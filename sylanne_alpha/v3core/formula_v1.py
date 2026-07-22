@@ -1,4 +1,8 @@
-"""Single immutable source for every Sylanne v3 formula-v1 constant."""
+"""Single immutable source for the current Sylanne v3 formula constants.
+
+The module name is retained for import compatibility; ``FORMULA_VERSION`` is the
+authoritative semantic revision.
+"""
 
 from __future__ import annotations
 
@@ -464,6 +468,11 @@ FULL_24_NO_STDP = (True, 24, False, False)
 SNN_16_NO_STDP = (True, 16, False, False)
 REUSE_LAST_SNN_SUMMARY = (False, 0, False, True)
 DETERMINISTIC_CONTINUOUS_ONLY = (False, 0, False, False)
+# Canonical formula-v2 execution profile.  The four tuple members are retained
+# solely because the bridge/Core contract still has to read legacy profile DTOs;
+# all are neutral and none selects a retired SNN/STDP computation.
+FORMULA_V2_SCALAR = DETERMINISTIC_CONTINUOUS_ONLY
+FORMULA_V2_PROFILE_ID = "FORMULA_V2_SCALAR"
 PROFILE_LADDER = (
     "FULL_24_STDP",
     "FULL_24_NO_STDP",
@@ -483,8 +492,17 @@ RECOVERY_CONSECUTIVE_SNAPSHOTS = 32
 RECOVERY_THRESHOLD_RATIO = 0.80
 REPOSITORY_HARD_STOP_PROFILE = "SKIP_V3_TURN"
 COMPUTE_PROFILE_FIELDS = ("snn_enabled", "ticks", "stdp_enabled", "reuse_last_summary")
+LIVE_COMPUTE_PROFILES = MappingProxyType({FORMULA_V2_PROFILE_ID: FORMULA_V2_SCALAR})
+LEGACY_READ_ONLY_PROFILE_IDS = (
+    "FULL_24_STDP",
+    "FULL_24_NO_STDP",
+    "SNN_16_NO_STDP",
+    "REUSE_LAST_SNN_SUMMARY",
+    "DETERMINISTIC_CONTINUOUS_ONLY",
+)
 COMPUTE_PROFILES = MappingProxyType(
     {
+        FORMULA_V2_PROFILE_ID: FORMULA_V2_SCALAR,
         "FULL_24_STDP": FULL_24_STDP,
         "FULL_24_NO_STDP": FULL_24_NO_STDP,
         "SNN_16_NO_STDP": SNN_16_NO_STDP,
@@ -583,9 +601,9 @@ def _validate_matrix_shape_and_values(
 def _validate_labelfree() -> None:
     """Fail-closed sanity checks for the formula-v2 label-free constants (§1.2/§3.1).
 
-    These are validated by the global gate even though they are not folded into
-    ``FORMULA_DIGEST`` yet, so a malformed reaction constant can never reach the
-    ``ReactionSignalV1`` pure function or the Slice C learners.
+    These are validated by the global gate and folded into ``FORMULA_DIGEST`` through
+    the manifest's ``labelfree`` block, so a malformed reaction constant can never
+    reach the ``ReactionSignalV1`` pure function or either formula-v2 learner.
     """
 
     weights = (REACT_W_VALENCE, REACT_W_ENGAGEMENT, REACT_W_LENGTH)
@@ -816,8 +834,9 @@ def build_formula_manifest() -> MappingProxyType[str, object]:
         ),
         load_shedding=_named_mapping(
             profile_fields=COMPUTE_PROFILE_FIELDS,
-            profiles=COMPUTE_PROFILES,
-            profile_ladder=PROFILE_LADDER,
+            profiles=LIVE_COMPUTE_PROFILES,
+            profile_ladder=(FORMULA_V2_PROFILE_ID, REPOSITORY_HARD_STOP_PROFILE),
+            legacy_read_only_profile_ids=LEGACY_READ_ONLY_PROFILE_IDS,
             reuse_last_summary_fallback=REUSE_LAST_SUMMARY_FALLBACK,
             load_thresholds=LOAD_THRESHOLDS[:-1] + ((1.0, 500.0, "inf"),),
             recovery_consecutive_snapshots=RECOVERY_CONSECUTIVE_SNAPSHOTS,
@@ -842,7 +861,8 @@ def build_labelfree_manifest() -> MappingProxyType[str, object]:
     """Build the recursively read-only formula-v2 ``labelfree`` manifest block.
 
     Authored in Slice A; folded into ``build_formula_manifest`` as of Slice D
-    (the intentional v1->v2 ``FORMULA_DIGEST`` bump d3998ec2->fb487bc9, spec §4.3).
+    (the intentional v1->v2 digest bump).  Later live/legacy profile separation
+    changed the v2 digest again; the generated ``FORMULA_DIGEST`` is authoritative.
     """
 
     return _named_mapping(

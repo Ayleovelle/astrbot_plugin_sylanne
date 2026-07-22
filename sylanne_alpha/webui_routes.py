@@ -53,6 +53,70 @@ GLOSSARY: dict[str, str] = {
 }
 
 
+def build_model_routing_payload(
+    config: dict[str, Any],
+    schema: dict[str, Any],
+    providers: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Derive the compact routing summary without mutating stored values."""
+
+    def provider_id(key: str) -> str:
+        return str(config.get(key, "") or "").strip()
+
+    auxiliary_id = provider_id("sylanne_alpha_aux_provider_id")
+    transcription_id = provider_id("sylanne_alpha_transcription_provider_id")
+    embedding_id = provider_id("sylanne_alpha_embedding_memory_provider_id")
+
+    auxiliary: dict[str, Any] = {"mode": "inherit"}
+    if auxiliary_id:
+        auxiliary = {"mode": "explicit", "provider_id": auxiliary_id}
+
+    transcription: dict[str, Any] = {"mode": "auto"}
+    if transcription_id:
+        transcription = {"mode": "explicit", "provider_id": transcription_id}
+
+    embedding_enabled = bool(
+        config.get(
+            "sylanne_alpha_embedding_memory_enabled",
+            schema.get("sylanne_alpha_embedding_memory_enabled", {}).get(
+                "default", False
+            ),
+        )
+    )
+    embedding_providers = [
+        item
+        for item in providers
+        if str(item.get("type", "") or "").strip().lower() == "embedding"
+    ]
+    if not embedding_enabled:
+        embedding: dict[str, Any] = {"mode": "disabled"}
+    elif embedding_id:
+        embedding = {"mode": "explicit", "provider_id": embedding_id}
+    elif len(embedding_providers) == 1:
+        embedding = {
+            "mode": "auto",
+            "provider_id": str(embedding_providers[0].get("id", "") or ""),
+        }
+    elif embedding_providers:
+        embedding = {"mode": "selection_required"}
+    else:
+        embedding = {"mode": "unavailable"}
+
+    advanced_override_count = sum(
+        1
+        for key, meta in schema.items()
+        if meta.get("ui_tier") == "advanced_provider" and provider_id(key)
+    )
+    return {
+        "chat": {"mode": "current_conversation"},
+        "auxiliary": auxiliary,
+        "image_understanding": {"mode": "auto"},
+        "transcription": transcription,
+        "embedding": embedding,
+        "advanced_override_count": advanced_override_count,
+    }
+
+
 CONFIG_PRESETS: dict[str, dict[str, Any]] = {
     "gentle": {
         "name": "温柔型",
@@ -391,11 +455,20 @@ class WebUIRoutes:
                 values[key] = self._MASKED_VALUE
             else:
                 values[key] = raw
+        providers = await self.provider_items()
         return {
             "schema": schema,
             "values": values,
-            "providers": await self.provider_items(),
+            "providers": providers,
+            "model_routing": self._model_routing_payload(schema, providers),
         }
+
+    def _model_routing_payload(
+        self,
+        schema: dict[str, Any],
+        providers: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return build_model_routing_payload(self._p._config, schema, providers)
 
     async def provider_items(self) -> list[dict[str, Any]]:
         """尽力获取 AstrBot 已注册的 LLM/Embedding provider 列表，供设置面板下拉选择。"""
@@ -435,10 +508,12 @@ class WebUIRoutes:
                 }
             )
 
+        # Specific registries first: a generic registry may contain both kinds,
+        # and deduplication must not accidentally relabel an embedding model as LLM.
         for method_name, provider_type in (
-            ("get_all_providers", "llm"),
-            ("get_all_llm_providers", "llm"),
             ("get_all_embedding_providers", "embedding"),
+            ("get_all_llm_providers", "llm"),
+            ("get_all_providers", ""),
         ):
             getter = getattr(context, method_name, None)
             if not callable(getter):

@@ -128,6 +128,7 @@ class TurnRegistryState(Enum):
 
 
 class SequenceStatus(Enum):
+    RESERVED = "RESERVED"
     ALLOCATED = "ALLOCATED"
     ACCEPTED = "ACCEPTED"
     DROPPED = "DROPPED"
@@ -256,6 +257,122 @@ class SequenceLedger:
             partition.next_local_sequence = next_local
             partition.high_watermark = sequence
             return sequence
+
+    def reserve(self, *, session_ref: SessionRef, sequence: TurnSequence) -> bool:
+        """Reserve a sequence floor without claiming a durable commit.
+
+        The bridge uses this for a fresh session's migration slot. Live captures
+        may allocate after the slot, but ``committed`` remains unchanged until the
+        repository pointer is actually published or recovered.
+        """
+
+        session_ref = self._validate_session_ref(session_ref)
+        sequence = self._validate_sequence(sequence)
+        with self._lock:
+            partition = self._partitions.get(session_ref)
+            if (
+                partition is not None
+                and partition.current_epoch is not None
+                and sequence.writer_epoch < partition.current_epoch
+            ):
+                return False
+            if partition is None:
+                if len(self._partitions) >= self._max_sessions:
+                    return False
+                partition = _SequencePartition(
+                    current_epoch=sequence.writer_epoch,
+                    next_local_sequence=sequence.local_sequence,
+                    high_watermark=sequence,
+                    status_high_watermarks=SequenceHighWatermarks(),
+                    records={},
+                )
+                self._partitions[session_ref] = partition
+            else:
+                existing = partition.records.get(sequence)
+                if existing is not None:
+                    return existing in {SequenceStatus.RESERVED, SequenceStatus.COMMITTED}
+                if partition.current_epoch != sequence.writer_epoch:
+                    partition.current_epoch = sequence.writer_epoch
+                    partition.next_local_sequence = sequence.local_sequence
+                else:
+                    partition.next_local_sequence = max(
+                        partition.next_local_sequence,
+                        sequence.local_sequence,
+                    )
+                if partition.high_watermark is None or sequence > partition.high_watermark:
+                    partition.high_watermark = sequence
+
+            while len(self._history_order) >= self._history_capacity:
+                if not self._evict_oldest_terminal_locked():
+                    return False
+            partition.records[sequence] = SequenceStatus.RESERVED
+            self._history_order[(session_ref, sequence)] = None
+            return True
+
+    def resume_committed(self, *, session_ref: SessionRef, sequence: TurnSequence) -> bool:
+        """Resume a partition from a durable committed high-watermark.
+
+        Migration publishes sequence 1 before the first live capture in the same
+        writer epoch. Restoring that fact here makes the first live allocation 2;
+        older epochs can never regress an already-resumed partition.
+        """
+
+        session_ref = self._validate_session_ref(session_ref)
+        sequence = self._validate_sequence(sequence)
+        with self._lock:
+            partition = self._partitions.get(session_ref)
+            if (
+                partition is not None
+                and partition.current_epoch is not None
+                and sequence.writer_epoch < partition.current_epoch
+            ):
+                return False
+            if partition is None:
+                if len(self._partitions) >= self._max_sessions:
+                    return False
+                partition = _SequencePartition(
+                    current_epoch=sequence.writer_epoch,
+                    next_local_sequence=sequence.local_sequence,
+                    high_watermark=sequence,
+                    status_high_watermarks=SequenceHighWatermarks(committed=sequence),
+                    records={},
+                )
+                self._partitions[session_ref] = partition
+            else:
+                if partition.current_epoch != sequence.writer_epoch:
+                    partition.current_epoch = sequence.writer_epoch
+                    partition.next_local_sequence = sequence.local_sequence
+                else:
+                    partition.next_local_sequence = max(
+                        partition.next_local_sequence,
+                        sequence.local_sequence,
+                    )
+                if partition.high_watermark is None or sequence > partition.high_watermark:
+                    partition.high_watermark = sequence
+                current = partition.status_high_watermarks
+                committed = current.committed
+                if committed is None or sequence > committed:
+                    committed = sequence
+                partition.status_high_watermarks = SequenceHighWatermarks(
+                    accepted=current.accepted,
+                    dropped=current.dropped,
+                    committed=committed,
+                )
+
+            if sequence not in partition.records:
+                while len(self._history_order) >= self._history_capacity:
+                    if not self._evict_oldest_terminal_locked():
+                        break
+                if len(self._history_order) < self._history_capacity:
+                    partition.records[sequence] = SequenceStatus.COMMITTED
+                    self._history_order[(session_ref, sequence)] = None
+            elif partition.records[sequence] in {
+                SequenceStatus.RESERVED,
+                SequenceStatus.ALLOCATED,
+                SequenceStatus.ACCEPTED,
+            }:
+                partition.records[sequence] = SequenceStatus.COMMITTED
+            return True
 
     def _evict_oldest_terminal_locked(self) -> bool:
         for record_key in tuple(self._history_order):

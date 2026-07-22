@@ -28,9 +28,9 @@ import asyncio
 import collections
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from sylanne_alpha.protocols import PluginHost
@@ -41,6 +41,12 @@ except ImportError:
     import logging as _logging
 
     logger = _logging.getLogger("astrbot_plugin_sylanne")  # type: ignore
+
+from sylanne_alpha.provider_routing import (
+    ProviderFeature,
+    resolve_embedding_provider,
+    resolve_text_provider,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1445,19 +1451,7 @@ class PublicAPI:
         )
         host = self._host(sk)
         memory_system = p._memory_system_for_session(sk)
-        enabled = bool(p._config.get("sylanne_alpha_embedding_memory_enabled"))
-        provider_id = str(
-            p._config.get("sylanne_alpha_embedding_memory_provider_id") or ""
-        )
-
-        query_embedding: list[float] | None = None
-        if enabled and provider_id and query:
-            try:
-                provider = p._get_embedding_provider(provider_id)
-                if provider:
-                    query_embedding = await provider.get_embedding(query)
-            except Exception:
-                query_embedding = None
+        query_embedding = await self._resolve_query_embedding(query)
 
         current_warmth = host.kernel.computation.engine.observe().get("warmth", 0.0)
         results = memory_system.recall(
@@ -1502,6 +1496,30 @@ class PublicAPI:
             lines.append(f"- {text}")
         return "\n".join(lines)
 
+    async def _resolve_query_embedding(self, query: str) -> list[float] | None:
+        """在原 embedding 开关内，统一解析显式/单 provider 自动选择。"""
+
+        p = self._p
+        config = getattr(p, "config", None) or getattr(p, "_config", None) or {}
+        if not bool(config.get("sylanne_alpha_embedding_memory_enabled")) or not query:
+            return None
+        context = getattr(p, "context", None) or getattr(p, "_context", None)
+        if context is None:
+            return None
+        try:
+            resolved = await resolve_embedding_provider(config=config, context=context)
+            provider = resolved.provider
+            get_embedding = cast(
+                Callable[[str], Awaitable[Any]] | None,
+                getattr(provider, "get_embedding", None),
+            )
+            if not callable(get_embedding):
+                return None
+            vector = await get_embedding(query)
+            return vector if isinstance(vector, list) else None
+        except Exception:
+            return None
+
     # ------------------------------------------------------------------
     # Internal assessor
     # ------------------------------------------------------------------
@@ -1542,15 +1560,22 @@ class PublicAPI:
                 appraisal={"low_signal": True, "signal_kind": "short_ack"},
             )
         timeout = float(cfg.get("assessor_timeout_seconds", 0.0))
-        provider_id_fn = getattr(p, "_provider_id", None)
-        if provider_id_fn and callable(provider_id_fn):
+        context = getattr(p, "context", None) or getattr(p, "_context", None)
+        if context is not None:
             try:
+                resolve = resolve_text_provider(
+                    feature=ProviderFeature.ASSESSOR,
+                    config=cfg,
+                    context=context,
+                    umo=str(getattr(event, "unified_msg_origin", "") or "") or None,
+                )
                 if timeout > 0:
-                    provider_id = await asyncio.wait_for(
-                        provider_id_fn(event), timeout=timeout
-                    )
+                    resolved = await asyncio.wait_for(resolve, timeout=timeout)
                 else:
-                    provider_id = await provider_id_fn(event)
+                    resolved = await resolve
+                provider_id = (
+                    resolved.provider_id if resolved.provider is not None else ""
+                )
             except (asyncio.TimeoutError, Exception):
                 return SimpleNamespace(
                     values={
@@ -1570,7 +1595,10 @@ class PublicAPI:
                 )
         else:
             provider_id = ""
-        call_llm_fn = getattr(p, "_call_internal_assessor_llm", None)
+        call_llm_fn = cast(
+            Callable[..., Awaitable[Any]] | None,
+            getattr(p, "_call_internal_assessor_llm", None),
+        )
         if call_llm_fn and callable(call_llm_fn) and provider_id:
             try:
                 if timeout > 0:
@@ -1757,19 +1785,7 @@ class PublicAPI:
         p = self._p
         host = self._host(session_key)
         memory_system = p._memory_system_for_session(session_key)
-        enabled = bool(p._config.get("sylanne_alpha_embedding_memory_enabled"))
-        provider_id = str(
-            p._config.get("sylanne_alpha_embedding_memory_provider_id") or ""
-        )
-
-        query_embedding: list[float] | None = None
-        if enabled and provider_id and query:
-            try:
-                provider = p._get_embedding_provider(provider_id)
-                if provider:
-                    query_embedding = await provider.get_embedding(query)
-            except Exception:
-                query_embedding = None
+        query_embedding = await self._resolve_query_embedding(query)
 
         current_warmth = host.kernel.computation.engine.observe().get("warmth", 0.0)
         results = memory_system.recall(

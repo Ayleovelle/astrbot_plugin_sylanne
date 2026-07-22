@@ -1,19 +1,18 @@
-"""Load-driven compute-profile selection with hysteresis (design 14.2 / plan V1).
+"""Load-pressure selection with hysteresis for the formula-v2 scalar bridge.
 
-The bridge picks exactly one versioned :class:`ComputeProfile` per turn *before* the
-core runs and never changes it mid-invocation.  Selection reads a
-:class:`~sylanne_alpha.v3bridge.models.LoadSnapshotV1` and walks the frozen degrade
-ladder:
+The bridge freezes exactly one versioned :class:`ComputeProfile` per turn before the
+core runs.  Formula v2 has one live compute identity, ``FORMULA_V2_SCALAR``; pressure
+levels 0..4 remain operational telemetry and hysteresis state, but must never revive
+the retired SNN/STDP/reuse profiles.  Level 5 still skips the turn:
 
-    FULL_24_STDP -> FULL_24_NO_STDP -> SNN_16_NO_STDP ->
-    REUSE_LAST_SNN_SUMMARY -> DETERMINISTIC_CONTINUOUS_ONLY -> SKIP_V3_TURN
+    scalar@pressure-0 -> scalar@pressure-1 -> ... -> scalar@pressure-4 -> SKIP_V3_TURN
 
 Degradation is *immediate*: the selector jumps to the worst level whose
 ``(fill, age_ms, p95_ms)`` threshold is crossed.  Recovery is *slow*: it moves at
 most one level up after 32 consecutive snapshots below 80% of the current level's
 entry threshold.  A repository hard-stop always forces ``SKIP`` and records the turn
-as ``DROPPED``.  ``REUSE_LAST_SNN_SUMMARY`` with no prior valid summary collapses to
-``DETERMINISTIC_CONTINUOUS_ONLY`` (plan manifest).
+as ``DROPPED``.  Legacy profile IDs remain readable only at codec/core compatibility
+boundaries; this live selector neither produces nor branches on them.
 
 The selector is a pure, single-threaded bridge object (called only from the v3
 worker between named stages); it never touches the core, a clock, or the filesystem.
@@ -30,8 +29,8 @@ from sylanne_alpha.v3core.contracts import ComputeProfile
 
 MATH_BACKEND_V1 = "scalar-v1"
 SKIP_PROFILE_NAME = formula.REPOSITORY_HARD_STOP_PROFILE  # "SKIP_V3_TURN"
-#: The full ladder including the terminal SKIP rung (index 5).
-LADDER = formula.PROFILE_LADDER
+#: Pressure ladder identity: levels 0..4 all execute the one live scalar profile.
+LADDER = (formula.FORMULA_V2_PROFILE_ID,) * 5 + (SKIP_PROFILE_NAME,)
 #: Entry thresholds for ladder levels 1..5 as (fill, age_ms, p95_ms) tuples.
 LOAD_THRESHOLDS = formula.LOAD_THRESHOLDS
 RECOVERY_CONSECUTIVE_SNAPSHOTS = formula.RECOVERY_CONSECUTIVE_SNAPSHOTS
@@ -39,11 +38,11 @@ RECOVERY_THRESHOLD_RATIO = formula.RECOVERY_THRESHOLD_RATIO
 
 
 def build_compute_profile(name: str) -> ComputeProfile:
-    """Build the versioned :class:`ComputeProfile` for a non-skip ladder name."""
+    """Build a live formula-v2 profile; legacy IDs are decode-only."""
 
     if name == SKIP_PROFILE_NAME:
         raise ValueError("SKIP_V3_TURN has no compute profile")
-    spec = formula.COMPUTE_PROFILES.get(name)
+    spec = formula.LIVE_COMPUTE_PROFILES.get(name)
     if spec is None:
         raise KeyError(f"{name!r} is not a declared compute profile")
     snn_enabled, ticks, stdp_enabled, reuse_last_summary = spec
@@ -63,7 +62,7 @@ def immediate_load_level(snapshot: LoadSnapshotV1) -> int:
     """The worst ladder level (0..5) whose entry threshold the snapshot crosses.
 
     A level is entered when *any* of fill/age/p95 reaches its threshold.  Level 0
-    (``FULL_24_STDP``) is the nominal, no-degrade level.
+    is nominal pressure.
     """
 
     level = 0
@@ -123,7 +122,7 @@ class ProfileSelector:
     def level(self) -> int:
         return self._level
 
-    def select(self, snapshot: LoadSnapshotV1, *, has_prior_summary: bool = True) -> ProfileSelection:
+    def select(self, snapshot: LoadSnapshotV1) -> ProfileSelection:
         if type(snapshot) is not LoadSnapshotV1:
             raise TypeError("select requires a LoadSnapshotV1")
 
@@ -165,11 +164,8 @@ class ProfileSelector:
                 reason="LOAD_SKIP",
             )
 
-        name = LADDER[level]
-        reason = "NOMINAL" if level == 0 else "LOAD_DEGRADE"
-        if name == "REUSE_LAST_SNN_SUMMARY" and not has_prior_summary:
-            name = formula.REUSE_LAST_SUMMARY_FALLBACK  # DETERMINISTIC_CONTINUOUS_ONLY
-            reason = "REUSE_WITHOUT_SUMMARY"
+        name = formula.FORMULA_V2_PROFILE_ID
+        reason = "NOMINAL" if level == 0 else "LOAD_PRESSURE"
         return ProfileSelection(
             level=level,
             profile_name=name,

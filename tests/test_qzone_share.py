@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from types import SimpleNamespace
 
 from sylanne_alpha import qzone_share as QZ
 from sylanne_alpha.life_simulation import LifeEvent, LifePrivacy, LifeSource, ShareIntent
@@ -117,6 +118,46 @@ class _Pipeline:
         return "一个虚构角色"
 
 
+class _TextProvider:
+    """AstrBot text provider 替身；把调用记录回现有 pipeline 便于断言复用。"""
+
+    def __init__(self, provider_id, pipeline):
+        self.provider_id = provider_id
+        self.pipeline = pipeline
+        self.calls: list[dict] = []
+
+    async def text_chat(self, **kwargs):
+        call = dict(kwargs)
+        self.calls.append(call)
+        prompt = str(call.get("prompt") or "")
+        if "YES 或 NO" in prompt:
+            self.pipeline.solo_calls.append({"prompt": prompt})
+            if self.pipeline.solo_raises:
+                raise RuntimeError("solo-check boom")
+            result = self.pipeline.solo_verdict
+        else:
+            self.pipeline.llm_calls.append({"prompt": prompt})
+            result = self.pipeline.draft
+        return SimpleNamespace(completion_text=result)
+
+
+class _ProviderContext:
+    def __init__(self, providers, default_id=""):
+        self.providers = {p.provider_id: p for p in providers}
+        self.default_id = default_id
+        self.lookup_calls: list[str] = []
+
+    def get_provider_by_id(self, provider_id):
+        self.lookup_calls.append(provider_id)
+        return self.providers.get(provider_id)
+
+    def get_all_providers(self):
+        return list(self.providers.values())
+
+    def get_using_provider(self, umo=None):
+        return self.providers.get(self.default_id)
+
+
 class _FakeCtx:
     """async context manager 替身：模拟 `async with session.post(...) as resp:`。"""
 
@@ -174,8 +215,12 @@ class _Plugin:
             "sylanne_alpha_qzone_weekly_max": weekly_max,
             "sylanne_alpha_qzone_min_score": min_score,
             "sylanne_alpha_qzone_autonomy": autonomy,
+            "sylanne_alpha_qzone_provider_id": "qzone-test",
         }
+        self._config = self.config
         self._llm_request_pipeline = pipeline if pipeline is not None else _Pipeline()
+        self.qzone_provider = _TextProvider("qzone-test", self._llm_request_pipeline)
+        self.context = _ProviderContext([self.qzone_provider], default_id="qzone-test")
         self._social_field = social_field if social_field is not None else _SocialField()
         self._qzone_http_session = _FakeSession() if http_session == "default" else http_session
         self._qzone_audit = None
@@ -370,6 +415,8 @@ def test_generate_draft_includes_eligible_memory_snippets_in_prompt():
     _run(QZ._generate_draft(plugin, event, snippets))
     assert len(pipeline.llm_calls) == 1
     assert "她自己读书时的感想" in pipeline.llm_calls[0]["prompt"]
+    assert plugin.context.lookup_calls == ["qzone-test"]
+    assert len(plugin.qzone_provider.calls) == 1
 
 
 def test_candidate_happy_path_pulls_in_memory_material():
@@ -619,6 +666,7 @@ def test_handle_candidate_frequency_gate_blocks_before_llm_call():
     _run(QZ.handle_share_intent_candidate(plugin, event, _intent(0.9)))
 
     assert pipeline.llm_calls == []  # 没有调用 LLM
+    assert plugin.context.lookup_calls == []  # owner 预算闸在 provider 解析之前
     log_reasons = [e["reason_code"] for e in plugin._qzone_audit.log]
     assert any(r.startswith("rejected_freq") for r in log_reasons)
 
@@ -635,6 +683,7 @@ def test_disabled_candidate_is_full_noop():
     _run(QZ.handle_share_intent_candidate(plugin, event, _intent(0.99)))
 
     assert pipeline.llm_calls == []
+    assert plugin.context.lookup_calls == []
     assert plugin._qzone_audit is None  # 完全没触碰审计状态
     assert plugin._store.pending_qzone_draft.get("priv:owner-1") is None
 
@@ -993,7 +1042,10 @@ def test_review_all_default_still_queues_solo_draft():
 
 
 def test_classify_solo_llm_yes_true():
-    assert _run(QZ._classify_solo_llm(_Plugin(pipeline=_Pipeline(solo_verdict="YES")), "今天很平静")) is True
+    plugin = _Plugin(pipeline=_Pipeline(solo_verdict="YES"))
+    assert _run(QZ._classify_solo_llm(plugin, "今天很平静")) is True
+    assert plugin.context.lookup_calls == ["qzone-test"]
+    assert len(plugin.qzone_provider.calls) == 1
 
 
 def test_classify_solo_llm_chinese_yes_true():
@@ -1170,3 +1222,34 @@ def test_collect_memory_material_excludes_user_interaction_source_escalation_gua
     assert not any("用户互动派生" in s for s in snippets)
     assert not any("第三方事实" in s for s in snippets)
     assert any("她自己散步的心情" in s for s in snippets)
+
+
+def test_qzone_provider_internal_typeerror_never_retries_paid_call():
+    """Provider 内部 TypeError 也可能发生在请求已发出后，绝不能据此重试。"""
+
+    class _InternalTypeErrorProvider:
+        provider_id = "qzone-test"
+
+        def __init__(self):
+            self.calls = 0
+
+        async def text_chat(self, **kwargs):
+            self.calls += 1
+            raise TypeError("provider failed after dispatch")
+
+    plugin = _Plugin()
+    provider = _InternalTypeErrorProvider()
+    plugin.qzone_provider = provider
+    plugin.context = _ProviderContext([provider], default_id="qzone-test")
+
+    result = _run(
+        QZ._call_qzone_llm(
+            plugin,
+            "只调用一次",
+            max_tokens=8,
+            temperature=0.0,
+        )
+    )
+
+    assert result == ""
+    assert provider.calls == 1

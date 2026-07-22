@@ -12,8 +12,8 @@ The approved topology is:
 
 ```text
 serial control skeleton
-  + parallel deterministic / spiking / continuous perception paths
-  + local LIF and reward-gated STDP microcircuits
+  + parallel deterministic / continuous perception paths
+  + label-free reaction and marginal-outcome learning
   + Global Workspace competition and broadcast
   + finite-action Active Inference
   + one EffectCommitter boundary
@@ -23,10 +23,16 @@ The current v2 path remains the only authority for user-visible behavior. v3 run
 
 The vendored SylannEngine tree under `sylanne_alpha/_engine/**` is read-only. v3 consumes only stable plugin-facing snapshots, especially `BodySnapshot`; it does not import engine internals or recompute canonical prediction error.
 
+> **Formula-v2 supersession (2026-07-18, normative).** The label-free reaction-learning specification `2026-07-18-v3core-formula-v2-label-free-reaction-learning-spec.md` is the authoritative successor for formula, learning, state, codec, trace, and evaluation requirements. Where this document conflicts with it, formula-v2 wins. The former SNN/LIF/reservoir and reward-gated STDP path is retired: it is not an evaluation profile, a credit gate, or persistent state in formula-v2. Historical SNN/STDP text below is retained only to explain the predecessor and has no implementation force.
+>
+> Formula-v2 requires `FORMULA_VERSION = "sylanne.v3.formula.v2"` and an intentionally changed `FORMULA_DIGEST`; `STATE_SCHEMA_VERSION = 2`; `STATE_CODEC_VERSION = 4` with read support for codecs 1--4; and a bumped `TRACE_SCHEMA_VERSION`. The trace records `reaction_same_sender`, `r_react`, `reaction_valid`, `lf_censor_reason`, `pref_offset_after[8]`, and `marginal_mu[8]`. Offline episodes use `neutral_eval_v2`, not `neutral_eval_v1`.
+>
+> The normative formula-v2 slices are LF-1 reaction signal and `ReactionFacts`, LF-2 adjacent dual-path settlement and `PendingOutcome` eligibility, LF-3 `LabelFreeState` plus preference-offset/marginal learners, and LF-4 schema/codec/trace/export/replay/stability gates. Label-free credit never depends on a shadow action, projected actual action, or action label.
+
 ## 2. Goals
 
 1. Replace scattered EMA, threshold, implicit ordering, and string scratch-bus behavior with typed, bounded, testable state transitions.
-2. Give SNN, multi-timescale dynamics, Global Workspace, and Active Inference distinct jobs with falsifiable value.
+2. Give bounded multi-timescale dynamics, Global Workspace, Active Inference, and formula-v2 label-free learners distinct jobs with falsifiable value.
 3. Permit aggressive internal emergence while retaining numerical bounds, deterministic replay, session isolation, transactional state commits, and hard failure containment.
 4. Run stateful shadow evaluation on real grey traffic without additional LLM/network calls or any change to v2 authority.
 5. Preserve enough observability to explain every v3 decision and remove any layer that fails ablation or falsification tests.
@@ -37,7 +43,7 @@ The vendored SylannEngine tree under `sylanne_alpha/_engine/**` is read-only. v3
 2. v3 does not execute real actions, tools, replies, memory writes, group operations, or body ticks.
 3. v3 does not claim online policy superiority from pure shadow disagreement. Unexecuted counterfactual outcomes are not observable.
 4. v3 does not modify or fork the vendored SylannEngine implementation.
-5. Virtual SNN ticks are numerical reservoir steps, not claims about millisecond biological time.
+5. Formula-v2 makes no biological-time or SNN claim; retired reservoir text is historical only.
 6. Existing user-visible v2 defects are not deferred to v3. Group invocation, transactional memory, hesitation repetition, and model-tool exposure remain separate v2 fixes.
 
 ## 4. Authority And Isolation
@@ -156,7 +162,7 @@ Core contracts:
 - `SessionRef`: keyed-HMAC session surrogate, HMAC key ID, and session generation; it contains no raw host session identifier.
 - `TurnKey`: plugin-instance ID, `SessionRef`, bridge-owned request nonce, and request attempt.
 - `TurnSequence`: lexicographically ordered `(writer_epoch, local_sequence)` token; local values never repeat within one epoch.
-- `ComputeProfile`: versioned frozen calculation choices selected before core execution, including SNN enablement, K, STDP enablement, replay mode, last-summary reuse, math backend, and formula/model versions.
+- `ComputeProfile`: versioned frozen calculation choices selected before core execution, including formula/model versions, replay mode, and math backend. Formula-v2 has no SNN/STDP/K or last-summary switches.
 - `CapturedTurn`: `TurnHandle`, immutable observation, and `TurnContextClass`, captured without runtime profile or deadline.
 - `TurnEnvelope`: `TurnKey`, derived `turn_id`, `TurnSequence`, `ComputeProfile`, deterministic seed, immutable observation, and authoritative `TurnContextClass`; it contains no wall-clock deadline or host object.
 - `ShadowJob`: bridge-only job containing the captured turn, actual-action projection, monotonic deadline, and runtime admission metadata.
@@ -579,7 +585,7 @@ posterior_var_i  = 1 / (1/V_ai + 1/R_ai)
 posterior_mean_i = posterior_var_i * (mu_ai/V_ai + y_i/R_ai)
 ```
 
-`R_a=0.20` in formula v1 is an immutable conservative likelihood prior, not a claim of offline calibration. G4 evaluates observation-likelihood NLL and empirical 68%/95% interval coverage on frozen held-out episodes; a later formula version may change `R_a` only from that frozen report. For the known, consecutive actual executed action only, a projected diagonal extended-Kalman update learns transition parameters and variance. For dimension `i`, with pre-update values:
+`R_a=0.20` in formula v1 is an immutable conservative likelihood prior, not a claim of offline calibration. G4 evaluates observation-likelihood NLL and empirical 68%/95% interval coverage on frozen held-out episodes; a later formula version may change `R_a` only from that frozen report. The transition variance `V_a` is likewise an immutable formula-v1 prior (`ACTION_INITIAL_V=0.25`, held in `[0.02,1.0]`): it is used in every posterior/EFE denominator but is **not** learned online in v1, consistent with the section-13 plastic-state enumeration (`executed-action transition parameters/covariance`, no variance) and with `ActionBeliefs` carrying no `V_a` storage field. Online variance learning is a deferred later-formula-revision feature that requires its own state-schema field, per-axis count, update equation, and ablation gate. For the known, consecutive actual executed action only, a projected diagonal extended-Kalman update learns the transition parameters and their covariance. For dimension `i`, with pre-update values:
 
 ```text
 theta_ai = [g_ai, b_ai]
@@ -587,17 +593,17 @@ phi_i    = [s_i, 1]
 mu_i     = tanh(theta_ai dot phi_i)
 j_i      = (1-mu_i^2) * phi_i
 error_i  = y_i - mu_i
-denom_i  = V_ai + R_ai + sum_k(j_ik^2 * Sigma_aik)
+denom_i  = V_ai + R_ai + sum_k(j_ik^2 * Sigma_aik)   # V_ai is the immutable prior
 K_ik     = Sigma_aik * j_ik / denom_i
 
 theta_aik' = project_box(theta_aik + K_ik*error_i)
 Sigma_aik' = clip((1-K_ik*j_ik)*Sigma_aik + q_theta, 1e-4, 1.0)
-eta         = 1 / (min(n_ai,64)+4)
-V_ai'       = clip((1-eta)*V_ai + eta*error_i^2, 0.02, 1.0)
-n_ai'       = min(n_ai+1, 65535)
+n_a'        = min(n_a+1, 65535)   # per-action execution count; advances once per settled turn
 ```
 
-Projection uses `g in [0.5,1.2]` and `b in [-0.5,0.5]`; `q_theta=1e-4` is formula-versioned. Updates use fixed axis/parameter order and the pre-update innovation. Unknown, non-consecutive, censored, or invalid outcome dimensions perform no update.
+Projection uses `g in [0.5,1.2]` and `b in [-0.5,0.5]`; `q_theta=1e-4` is formula-versioned. Updates use fixed axis/parameter order and the pre-update innovation. `V_a` is unchanged by the update (immutable v1 prior). Unknown, non-consecutive, censored, or invalid outcome dimensions perform no update; a turn with no valid dimension advances no count.
+
+> **Deferred (post-v1) online variance learning.** A later formula revision may make `V_a` plastic per action/axis with a per-axis count `n_ai`, using `eta = 1 / (min(n_ai,64)+4)` and `V_ai' = clip((1-eta)*V_ai + eta*error_i^2, 0.02, 1.0)`, `n_ai' = min(n_ai+1, 65535)`. This requires a new `ActionBeliefs` state-schema field and its own ablation gate, and is intentionally absent from formula v1.
 
 Preferences are a diagonal Gaussian:
 

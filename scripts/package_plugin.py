@@ -30,6 +30,8 @@ MANIFEST_ARCNAME = f"{PLUGIN_NAME}/{MANIFEST_NAME}"
 
 BUILD_FLAGS_RELPATH = Path("sylanne_alpha/v3bridge/build_flags.py")
 BUILD_FLAGS_ARCNAME = f"{PLUGIN_NAME}/{BUILD_FLAGS_RELPATH.as_posix()}"
+MAIN_RELPATH = Path("main.py")
+MAIN_ARCNAME = f"{PLUGIN_NAME}/{MAIN_RELPATH.as_posix()}"
 METADATA_RELPATH = Path("metadata.yaml")
 METADATA_ARCNAME = f"{PLUGIN_NAME}/{METADATA_RELPATH.as_posix()}"
 
@@ -238,13 +240,219 @@ def _read_metadata_version(data: bytes) -> str:
     return matches[0].strip().strip('"').strip("'")
 
 
+class _ModulePluginVersionWriteVisitor(ast.NodeVisitor):
+    """Find bindings that can change the module-level ``PLUGIN_VERSION`` name."""
+
+    def __init__(self) -> None:
+        self.writes: list[ast.AST] = []
+
+    def _record_binding(self, name: str | None, node: ast.AST) -> None:
+        if name == "PLUGIN_VERSION":
+            self.writes.append(node)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if node.id == "PLUGIN_VERSION" and isinstance(node.ctx, (ast.Store, ast.Del)):
+            self.writes.append(node)
+
+    def _visit_function_header(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self._record_binding(node.name, node)
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        self.visit(node.args)
+        if node.returns is not None:
+            self.visit(node.returns)
+        for type_param in getattr(node, "type_params", ()):  # Python 3.12+
+            self.visit(type_param)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function_header(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function_header(node)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        # Defaults/annotations execute in the containing scope; the body does not.
+        self.visit(node.args)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._record_binding(node.name, node)
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for base in node.bases:
+            self.visit(base)
+        for keyword in node.keywords:
+            self.visit(keyword)
+        for type_param in getattr(node, "type_params", ()):  # Python 3.12+
+            self.visit(type_param)
+        # The class body executes in a separate namespace, not the module namespace.
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            self._record_binding(alias.asname or alias.name.split(".", 1)[0], node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        for alias in node.names:
+            self._record_binding(alias.asname or alias.name, node)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        self._record_binding(node.name, node)
+        if node.type is not None:
+            self.visit(node.type)
+        for statement in node.body:
+            self.visit(statement)
+
+    def visit_MatchAs(self, node: ast.MatchAs) -> None:
+        self._record_binding(node.name, node)
+        self.generic_visit(node)
+
+    def visit_MatchStar(self, node: ast.MatchStar) -> None:
+        self._record_binding(node.name, node)
+
+    def visit_MatchMapping(self, node: ast.MatchMapping) -> None:
+        self._record_binding(node.rest, node)
+        self.generic_visit(node)
+
+
+def _literal_string(node: ast.AST, label: str) -> str:
+    try:
+        value = ast.literal_eval(node)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"{label} must be a string literal; refusing to package") from exc
+    if not isinstance(value, str):
+        raise RuntimeError(f"{label} must be a string literal; refusing to package")
+    return value
+
+
+def _main_release_identity_nodes(
+    data: bytes,
+) -> tuple[str, str, ast.expr, ast.expr]:
+    try:
+        tree = ast.parse(data.decode("utf-8"), filename=str(MAIN_RELPATH))
+    except (SyntaxError, UnicodeDecodeError) as exc:
+        raise RuntimeError("cannot parse main.py release identity; refusing to package") from exc
+
+    direct_assignments: list[tuple[ast.Assign, ast.Name]] = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            direct_assignments.extend(
+                (node, target)
+                for target in node.targets
+                if isinstance(target, ast.Name) and target.id == "PLUGIN_VERSION"
+            )
+
+    write_visitor = _ModulePluginVersionWriteVisitor()
+    write_visitor.visit(tree)
+    if (
+        len(direct_assignments) != 1
+        or len(write_visitor.writes) != 1
+        or write_visitor.writes[0] is not direct_assignments[0][1]
+    ):
+        raise RuntimeError(
+            "release identity requires exactly one PLUGIN_VERSION module-scope write, "
+            "as a direct string assignment; refusing to package"
+        )
+
+    plugin_node = direct_assignments[0][0].value
+    plugin_version = _literal_string(plugin_node, "PLUGIN_VERSION")
+
+    register_nodes: list[ast.expr] = []
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for decorator in node.decorator_list:
+            if not (
+                isinstance(decorator, ast.Call)
+                and isinstance(decorator.func, ast.Name)
+                and decorator.func.id == "register"
+            ):
+                continue
+            if len(decorator.args) < 4:
+                raise RuntimeError(
+                    "@register must declare its version as the fourth argument; "
+                    "refusing to package"
+                )
+            register_nodes.append(decorator.args[3])
+
+    if len(register_nodes) != 1:
+        raise RuntimeError(
+            "release identity requires exactly one @register version; refusing to package"
+        )
+    register_node = register_nodes[0]
+    register_version = _literal_string(register_node, "@register version")
+    return plugin_version, register_version, plugin_node, register_node
+
+
+def _read_main_release_identity(data: bytes) -> tuple[str, str]:
+    plugin_version, register_version, _plugin_node, _register_node = (
+        _main_release_identity_nodes(data)
+    )
+    return plugin_version, register_version
+
+
+def _ast_source_span(data: bytes, node: ast.AST) -> tuple[int, int]:
+    if (
+        not hasattr(node, "lineno")
+        or not hasattr(node, "end_lineno")
+        or node.end_lineno is None
+        or node.end_col_offset is None
+    ):
+        raise RuntimeError("main.py release identity lacks source positions; refusing to package")
+    lines = data.splitlines(keepends=True)
+    if node.lineno < 1 or node.end_lineno > len(lines):
+        raise RuntimeError("main.py release identity source position is invalid; refusing to package")
+    start = sum(len(line) for line in lines[: node.lineno - 1]) + node.col_offset
+    end = sum(len(line) for line in lines[: node.end_lineno - 1]) + node.end_col_offset
+    if start < 0 or end <= start or end > len(data):
+        raise RuntimeError("main.py release identity source span is invalid; refusing to package")
+    return start, end
+
+
+def _render_main_release_identity(data: bytes, version: str) -> bytes:
+    plugin_version, register_version, plugin_node, register_node = (
+        _main_release_identity_nodes(data)
+    )
+    if plugin_version != register_version:
+        raise RuntimeError("main.py release identities disagree; refusing to package")
+
+    replacement = repr(version).encode("utf-8")
+    spans = sorted(
+        (_ast_source_span(data, plugin_node), _ast_source_span(data, register_node)),
+        reverse=True,
+    )
+    rendered = data
+    previous_start = len(data)
+    for (start, end) in spans:
+        if end > previous_start:
+            raise RuntimeError("main.py release identity spans overlap; refusing to package")
+        rendered = rendered[:start] + replacement + rendered[end:]
+        previous_start = start
+
+    _validate_release_identity(version, rendered)
+    return rendered
+
+
+def _validate_release_identity(metadata_version: str, main_data: bytes) -> None:
+    plugin_version, register_version = _read_main_release_identity(main_data)
+    if metadata_version != plugin_version or metadata_version != register_version:
+        raise RuntimeError(
+            "release identity mismatch: "
+            f"metadata.yaml={metadata_version!r}, "
+            f"PLUGIN_VERSION={plugin_version!r}, "
+            f"@register={register_version!r}; refusing to package"
+        )
+
+
+def _metadata_channel_for_version(version: str) -> str:
+    return "grey" if "grey" in version.lower() else "stable"
+
+
 def _validate_metadata_channel(version: str, channel: str) -> None:
-    is_grey_version = "grey" in version.lower()
-    if channel == "grey" and not is_grey_version:
+    metadata_channel = _metadata_channel_for_version(version)
+    if channel == "grey" and metadata_channel != "grey":
         raise RuntimeError(
             f"grey channel requires grey metadata, got version {version!r}; refusing to package"
         )
-    if channel == "stable" and is_grey_version:
+    if channel == "stable" and metadata_channel != "stable":
         raise RuntimeError(
             f"stable channel rejects grey metadata version {version!r}; "
             "supply a temporary stable metadata copy via --metadata"
@@ -304,13 +512,19 @@ def _archive_entries(
 ) -> list[tuple[str, bytes]]:
     """Build the full (arcname, uncompressed bytes) set for one channel."""
     flags_source = (ROOT / BUILD_FLAGS_RELPATH).resolve()
+    main_source = (ROOT / MAIN_RELPATH).resolve()
     metadata_source = (ROOT / METADATA_RELPATH).resolve()
-    generated_sources = {flags_source}
+    replaced_sources = {flags_source}
+    dirty_exempt_sources = {flags_source}
     if _checked_metadata_override(metadata_override) is not None:
-        generated_sources.add(metadata_source)
+        replaced_sources.update((main_source, metadata_source))
+        # The checked-in metadata is irrelevant when a separate override is
+        # packaged. main.py remains a tracked input: generated main.py is derived
+        # from it, so a dirty main must still fail the HEAD-cleanliness gate.
+        dirty_exempt_sources.add(metadata_source)
 
     files = collect_files(exclude_paths=exclude_paths)
-    inputs = {path.resolve() for path in files} - generated_sources
+    inputs = {path.resolve() for path in files} - dirty_exempt_sources
 
     dirty = _paths_differing_from_head() & inputs
     if dirty:
@@ -321,7 +535,7 @@ def _archive_entries(
 
     entries: list[tuple[str, bytes]] = [(f"{PLUGIN_NAME}/", b"")]
     for path in files:
-        if path.resolve() in generated_sources:
+        if path.resolve() in replaced_sources:
             continue  # replaced below; never appended as a duplicate
         arcname = _normalize_arcname(Path(PLUGIN_NAME, path.relative_to(ROOT)).as_posix())
         entries.append((arcname, path.read_bytes()))
@@ -330,6 +544,13 @@ def _archive_entries(
     _verify_generated_flags(flags, channel)
     entries.append((BUILD_FLAGS_ARCNAME, flags))
     if metadata_override is not None:
+        override_version = _read_metadata_version(metadata_override.read_bytes())
+        entries.append(
+            (
+                MAIN_ARCNAME,
+                _render_main_release_identity((ROOT / MAIN_RELPATH).read_bytes(), override_version),
+            )
+        )
         entries.append((METADATA_ARCNAME, metadata_override.read_bytes()))
 
     return _sort_entries(entries)
@@ -440,6 +661,9 @@ def build_package(
         listed = ", ".join(str(path.relative_to(ROOT)) for path in untracked)
         raise RuntimeError(f"untracked v3 source files: {listed}; refusing to package")
 
+    checked_in_version = _read_metadata_version((ROOT / METADATA_RELPATH).read_bytes())
+    _validate_release_identity(checked_in_version, (ROOT / MAIN_RELPATH).read_bytes())
+
     metadata_path = metadata_override or (ROOT / METADATA_RELPATH)
     version = _read_metadata_version(metadata_path.read_bytes())
     _validate_metadata_channel(version, channel)
@@ -455,10 +679,24 @@ def build_package(
     )
     _validate_archive_entries(entries)
 
+    entry_map = dict(entries)
+    try:
+        effective_metadata = _read_metadata_version(entry_map[METADATA_ARCNAME])
+        effective_main = entry_map[MAIN_ARCNAME]
+    except KeyError as exc:
+        raise RuntimeError("release identity files missing from archive; refusing to package") from exc
+    if effective_metadata != version:
+        raise RuntimeError("effective archive metadata version drifted; refusing to package")
+    _validate_release_identity(effective_metadata, effective_main)
+
     generated = {name: content for name, content in entries if name == BUILD_FLAGS_ARCNAME}
     if metadata_override is not None:
         generated.update(
-            {name: content for name, content in entries if name == METADATA_ARCNAME}
+            {
+                name: content
+                for name, content in entries
+                if name in {MAIN_ARCNAME, METADATA_ARCNAME}
+            }
         )
     if BUILD_FLAGS_ARCNAME not in generated:
         raise RuntimeError("generated build flags missing from archive; refusing to package")

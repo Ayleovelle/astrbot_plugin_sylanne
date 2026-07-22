@@ -18,8 +18,11 @@ overwritten, deleted, or reverse-projected.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, fields
 from enum import Enum
+from typing import cast
 
 from sylanne_alpha.v2core.shadow_snapshot import V2SeedSnapshotV1
 from sylanne_alpha.v3bridge.effect_committer import (
@@ -134,7 +137,7 @@ def _frame_from_anchor(anchor: dict) -> SeedFrame:
     seed = anchor["seed"]
     stored = seed["fields"]
     style = seed.get("style_signature_seed")
-    kwargs: dict[str, object] = {}
+    kwargs: dict[str, float | None] = {}
     for name in _SEED_FIELD_NAMES:
         value = stored.get(name)
         kwargs[name] = None if value is None else float(value)
@@ -210,14 +213,15 @@ class MigrationCoordinator:
             if freeze_v2_seed is None:
                 raise ValueError("migrate requires either seed_snapshot or freeze_v2_seed")
             # The freezer owns the v2 turn lock and releases it before returning.
-            seed_snapshot = freeze_v2_seed()
+            freezer = cast(Callable[[], V2SeedSnapshotV1], freeze_v2_seed)
+            seed_snapshot = freezer()
         if type(seed_snapshot) is not V2SeedSnapshotV1:
             raise TypeError("frozen seed must be a V2SeedSnapshotV1")
         frame = seed_frame_from_v2(seed_snapshot)
 
         # The v3 migration lock is taken strictly AFTER the v2 lock is released;
         # v2 and v3 locks are never held together.
-        with v3_migration_lock:
+        with cast(AbstractContextManager[object], v3_migration_lock):
             if self._committer.has_committed_pointer(session_ref):
                 return self._already_migrated(session_ref)
             generation_id = new_generation_id()

@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import random
 import re
@@ -35,6 +36,12 @@ from sylanne_alpha.message_dispatch import (
     strip_draft_blocks,
 )
 from sylanne_alpha.proactive_bridge import is_night_fast_reply_exempt
+from sylanne_alpha.semantic_segmentation import (
+    SEMANTIC_BEAT_NONCE_EXTRA,
+    SemanticBeatPart,
+    parse_semantic_completion,
+    scrub_semantic_marker_candidates,
+)
 from sylanne_alpha.variant_pool import (
     EMPTY_REPLY_FALLBACK_VARIANTS,
     LAST_RESORT_FALLBACK_TEXT,
@@ -148,6 +155,7 @@ class LLMResponsePipeline:
     # ------------------------------------------------------------------
     # 匹配 LLM 伪造的 [sylanne_xxx] 系统标签
     _RE_SYLANNE_TAG = re.compile(r"\[sylanne_[^\]]*\]")
+    _SEMANTIC_CORRELATION_EXTRA = "_syl_semantic_beat_correlation"
 
     def _sanitize_response(self, text: str) -> str:
         """过滤 LLM 返回中伪造的 [sylanne_*] 系统标签。
@@ -161,6 +169,140 @@ class LLMResponsePipeline:
                 len(self._RE_SYLANNE_TAG.findall(text)),
             )
         return cleaned
+
+    @staticmethod
+    def _text_digest(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _event_extra(event: Any, key: str, default: Any = None) -> Any:
+        getter = getattr(event, "get_extra", None)
+        if not callable(getter):
+            return default
+        try:
+            return getter(key, default)
+        except TypeError:
+            try:
+                value = getter(key)
+            except Exception:
+                return default
+            return default if value is None else value
+        except Exception:
+            return default
+
+    def _parse_semantic_response(
+        self,
+        event: Any,
+        *,
+        original_text: str,
+        sanitized_text: str,
+    ) -> tuple[str, tuple[SemanticBeatPart, ...] | None]:
+        """Scrub this turn's markers and return only a model-authored valid plan."""
+
+        nonce = str(self._event_extra(event, SEMANTIC_BEAT_NONCE_EXTRA, "") or "")
+        if not re.fullmatch(r"[0-9A-F]{6}", nonce):
+            return scrub_semantic_marker_candidates(sanitized_text), None
+
+        parsed = parse_semantic_completion(sanitized_text, nonce=nonce)
+        cleaned = parsed.clean_text
+        setter = getattr(event, "set_extra", None)
+        if callable(setter):
+            correlation = {
+                "nonce": nonce,
+                "raw_chars": len(original_text),
+                "raw_sha256": self._text_digest(original_text),
+                "clean_chars": len(cleaned),
+                "clean_sha256": self._text_digest(cleaned),
+            }
+            try:
+                setter(self._SEMANTIC_CORRELATION_EXTRA, correlation)
+            except Exception:
+                pass
+        return cleaned, parsed.parts if parsed.accepted else None
+
+    def scrub_owned_semantic_markers(self, event: Any, text: str) -> str:
+        """Final send-side guard: no raw semantic control marker may be visible."""
+
+        nonce = str(self._event_extra(event, SEMANTIC_BEAT_NONCE_EXTRA, "") or "")
+        if not re.fullmatch(r"[0-9A-F]{6}", nonce):
+            return scrub_semantic_marker_candidates(str(text or ""))
+        return parse_semantic_completion(str(text or ""), nonce=nonce).clean_text
+
+    @staticmethod
+    def _message_text_slots(message: Any) -> tuple[str, list[tuple[Any, str]]] | None:
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            return content, [(message, "content")]
+        if not isinstance(content, list):
+            return None
+        slots: list[tuple[Any, str]] = []
+        chunks: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                if isinstance(part.get("text"), str):
+                    chunks.append(part["text"])
+                    slots.append((part, "text"))
+                continue
+            part_text = getattr(part, "text", None)
+            if isinstance(part_text, str):
+                chunks.append(part_text)
+                slots.append((part, "text"))
+        return ("".join(chunks), slots) if slots else None
+
+    @staticmethod
+    def _replace_text_slots(slots: list[tuple[Any, str]], cleaned: str) -> bool:
+        if not slots:
+            return False
+        try:
+            target, attribute = slots[0]
+            if isinstance(target, dict):
+                target[attribute] = cleaned
+            else:
+                setattr(target, attribute, cleaned)
+            for target, attribute in slots[1:]:
+                if isinstance(target, dict):
+                    target[attribute] = ""
+                else:
+                    setattr(target, attribute, "")
+        except Exception:
+            return False
+        return True
+
+    def on_agent_done(self, event: Any, run_context: Any, response: Any) -> bool:
+        """Replace the exact raw final assistant entry before AstrBot persists it."""
+
+        correlation = self._event_extra(event, self._SEMANTIC_CORRELATION_EXTRA, None)
+        if not isinstance(correlation, dict):
+            return False
+        messages = getattr(run_context, "messages", None)
+        if not isinstance(messages, list):
+            return False
+        for message in reversed(messages):
+            if str(getattr(message, "role", "") or "") != "assistant":
+                continue
+            extracted = self._message_text_slots(message)
+            if extracted is None:
+                return False
+            raw_text, slots = extracted
+            if len(raw_text) != correlation.get("raw_chars"):
+                return False
+            if self._text_digest(raw_text) != correlation.get("raw_sha256"):
+                return False
+            cleaned = self.scrub_owned_semantic_markers(event, raw_text)
+            cleaned = strip_draft_blocks(cleaned)
+            cleaned = self._sanitize_response(cleaned)
+            if len(cleaned) != correlation.get("clean_chars"):
+                return False
+            if self._text_digest(cleaned) != correlation.get("clean_sha256"):
+                return False
+            changed = self._replace_text_slots(slots, cleaned)
+            if changed and response is not None:
+                try:
+                    response.completion_text = cleaned
+                except Exception:
+                    pass
+            return changed
+        return False
 
     # ------------------------------------------------------------------
     # T1-02③ 身体驱动打字速度
@@ -455,6 +597,11 @@ class LLMResponsePipeline:
                 text = normalize_completion_text(getattr(response, "completion_text", ""))
                 cleaned = strip_draft_blocks(text)
                 cleaned = self._sanitize_response(cleaned)
+                cleaned, _semantic_parts = self._parse_semantic_response(
+                    event,
+                    original_text=text,
+                    sanitized_text=cleaned,
+                )
                 # 注：此分支 completion_text 整段直发 AstrBot（不分段）。曾在此加超长截断
                 # 兜底，经审查移除——单条长消息不是事故的 86 段轰炸，tagged thinking 已剥；
                 # 截断会丢内容、还撞 deliverable 契约"一次给全"，是治 speculative 问题反引入
@@ -541,6 +688,11 @@ class LLMResponsePipeline:
         text = normalize_completion_text(getattr(response, "completion_text", ""))
         cleaned = strip_draft_blocks(text)
         cleaned = self._sanitize_response(cleaned)
+        cleaned, semantic_parts = self._parse_semantic_response(
+            event,
+            original_text=text,
+            sanitized_text=cleaned,
+        )
         logger.info(
             f"Sylanne on_llm_response: len={len(cleaned)} session={session_key}"
         )
@@ -675,6 +827,7 @@ class LLMResponsePipeline:
             max_part_chars=max_part_chars,
             chars_per_second=cps,
             first_delay=think_delay,
+            semantic_parts=semantic_parts,
         )
         parts = plan.get("message_parts", [])
 
@@ -723,13 +876,14 @@ class LLMResponsePipeline:
             except Exception:  # 标记失败不阻断分段发送，只是 on_decorating_result
                 pass          # 那边的抑制会落空——框架会额外重发一次（宁重不丢）。
 
-        # 多段回复时存储未发送部分，供下轮续接
-        if len(parts) > 1:
-            sent_first = parts[0]["text"]
-            rest = cleaned
-            if rest.startswith(sent_first):
-                rest = rest[len(sent_first) :].strip()
-            self._p._store.unfinished_replies.set(session_key, rest)
+        # 在后台 task 真正获得调度前就先保存【全量】正文。若新消息立即取消
+        # task（甚至首段 first_delay 尚未结束），也不会把首段/整条回复弄丢；
+        # dispatcher 只在每段 send_message 成功返回后才扣掉已发送部分。
+        queued_text = "".join(str(part.get("text", "")) for part in parts)
+        if queued_text:
+            self._p._store.unfinished_replies.set(session_key, queued_text)
+        else:
+            self._p._store.unfinished_replies.pop(session_key, None)
 
         # 后台调度分段发送
         logger.info(
@@ -1042,14 +1196,30 @@ class LLMResponsePipeline:
                 本次补刀的 SPEAK（带错的 part_count），还把下一轮真正的终端证据挤掉。
                 v3 纯观察，对 v2 行为没有任何影响。
         """
+        total = len(parts)
+
+        def record_remaining(start_index: int) -> None:
+            if not session_key:
+                return
+            remaining_text = "".join(
+                str(part.get("text", "")) for part in parts[start_index:]
+            )
+            if remaining_text:
+                self._p._store.unfinished_replies.set(session_key, remaining_text)
+            else:
+                self._p._store.unfinished_replies.pop(session_key, None)
+
+        # Direct callers and a task that starts before the queue-side write both
+        # get the same no-loss invariant before the first await.
+        record_remaining(0)
         context = self._p.context
         if not hasattr(context, "send_message"):
             return
-        total = len(parts)
         # 栅栏令牌：在【任何 await 之前】同步取本轮的令牌。这条协程可能要跑好几秒
         # （段间 sleep），期间同一 session_key 上可能已经换了下一轮；结算时带着这枚
         # 令牌，v3 就能认出"我要结的那轮已经不在了"而放手，不会错结下一轮。
         v3_token = self._v3_pending_token(session_key) if settle_v3 else None
+        sent_count = 0
         try:
             for idx, part in enumerate(parts, 1):
                 delay = float(part.get("delay_before_seconds", 0))
@@ -1057,29 +1227,23 @@ class LLMResponsePipeline:
                     await asyncio.sleep(delay)
                 text = str(part.get("text", ""))
                 if not text:
+                    sent_count = idx
+                    record_remaining(sent_count)
                     continue
-                logger.info(
-                    f"Sylanne segmented reply part {idx}/{total}: {text[:60]}"
-                )
+                logger.info("Sylanne segmented reply part %d/%d", idx, total)
                 message = self._astrbot_message(text)
                 await context.send_message(origin, message)
-                # 每发送一段，更新 unfinished 为剩余未发内容（消除竞态）
-                if session_key and idx < total:
-                    remaining_text = "".join(
-                        str(p.get("text", "")) for p in parts[idx:]
-                    )
-                    if remaining_text:
-                        self._p._store.unfinished_replies.set(session_key, remaining_text)
-                    else:
-                        self._p._store.unfinished_replies.pop(session_key, None)
+                sent_count = idx
+                # 只有明确收到 send_message 成功返回，才从 unfinished 扣掉该段。
+                record_remaining(sent_count)
         except asyncio.CancelledError:
             # 新请求 cancel 旧分段任务（llm_request_pipeline 主动 cancel segmented_tasks）：
             # 不静默吞——留痕已发到第几段，unfinished 保留剩余供续接/下轮判断，然后重抛。
-            sent = locals().get("idx", 0)
+            record_remaining(sent_count)
             logger.info(
                 "Sylanne segmented dispatch cancelled: session=%s sent=%d/%d "
                 "(剩余留在 unfinished 供续接)",
-                session_key, sent, total,
+                session_key, sent_count, total,
             )
             # v3 shadow：段间取消 = 投递未完成 → UNKNOWN，绝不结算 SPEAK（design 14.2）。
             if settle_v3:
@@ -1088,6 +1252,7 @@ class LLMResponsePipeline:
         except BaseException:
             # 任意一段 send 失败（首段/次段皆然）：v2 行为完全不变——原样重抛，交给
             # task.exception()/上游。这里只补一条 v3 终端证据：部分投递 → UNKNOWN。
+            record_remaining(sent_count)
             if settle_v3:
                 self._v3_settle_segments(session_key, total, succeeded=False, token=v3_token)
             raise

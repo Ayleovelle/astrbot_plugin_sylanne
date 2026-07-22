@@ -27,7 +27,20 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Extracted version: $VERSION"
 
+      - name: Resolve release channel
+        id: release-channel
+        run: |
+          CHANNEL=$(python -c "from pathlib import Path; from scripts.package_plugin import _metadata_channel_for_version, _read_metadata_version; print(_metadata_channel_for_version(_read_metadata_version(Path('metadata.yaml').read_bytes())))")
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+          if [ "$CHANNEL" = "grey" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Grey metadata detected; stable release is intentionally skipped."
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Check if release already exists
+        if: steps.release-channel.outputs.publish == 'true'
         id: check
         run: |
           if gh release view "Embodiment-${{ steps.version.outputs.version }}" &>/dev/null; then
@@ -40,7 +53,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract changelog for version
-        if: steps.check.outputs.exists == 'false'
+        if: steps.release-channel.outputs.publish == 'true' && steps.check.outputs.exists == 'false'
         id: changelog
         run: |
           VERSION="${{ steps.version.outputs.version }}"
@@ -91,15 +104,15 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Install deps
-        if: steps.check.outputs.exists == 'false'
-        run: pip install aiohttp
+        if: steps.release-channel.outputs.publish == 'true' && steps.check.outputs.exists == 'false'
+        run: pip install -r requirements.txt
 
       - name: Build plugin zip
-        if: steps.check.outputs.exists == 'false'
+        if: steps.release-channel.outputs.publish == 'true' && steps.check.outputs.exists == 'false'
         run: python scripts/package_plugin.py --channel stable --output dist/astrbot_plugin_sylanne-${{ steps.version.outputs.version }}.zip
 
       - name: Verify zip contents
-        if: steps.check.outputs.exists == 'false'
+        if: steps.release-channel.outputs.publish == 'true' && steps.check.outputs.exists == 'false'
         run: |
           python -c "
           import zipfile, sys
@@ -127,7 +140,7 @@ jobs:
           "
 
       - name: Import smoke test from zip
-        if: steps.check.outputs.exists == 'false'
+        if: steps.release-channel.outputs.publish == 'true' && steps.check.outputs.exists == 'false'
         run: |
           mkdir -p /tmp/verify && cd /tmp/verify
           unzip -q $GITHUB_WORKSPACE/dist/astrbot_plugin_sylanne-${{ steps.version.outputs.version }}.zip
@@ -145,7 +158,7 @@ jobs:
           "
 
       - name: Create tag and release
-        if: steps.check.outputs.exists == 'false'
+        if: steps.release-channel.outputs.publish == 'true' && steps.check.outputs.exists == 'false'
         uses: softprops/action-gh-release@v3
         with:
           tag_name: "Embodiment-${{ steps.version.outputs.version }}"

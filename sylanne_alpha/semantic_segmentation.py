@@ -1,0 +1,311 @@
+"""Parse turn-scoped, model-authored semantic beat markers.
+
+This module validates boundaries that the response model already authored.  It
+does not infer, add, move, or rewrite any conversational boundary.
+"""
+
+from __future__ import annotations
+
+import re
+import secrets
+from dataclasses import dataclass
+from enum import Enum
+
+
+MAX_SEMANTIC_COMPLETION_CHARS = 10_000
+MAX_SEMANTIC_MARKERS = 5
+SEMANTIC_BEAT_NONCE_EXTRA = "_syl_semantic_beat_nonce"
+_ANY_MARKER_PATTERN = re.compile(
+    # Only consume syntactic attributes after the tag name.  This removes the
+    # hidden nonce/pause residue from an unclosed marker without treating all
+    # following prose up to some later ``>`` as control text.
+    r"""
+    </?syl-beat\b
+    (?:
+        \s+[A-Za-z_:][\w:.-]*\s*=\s*
+        (?:"[^"]*"|'[^']*'|[^\s<>]+)
+    )*
+    \s*/?>?
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+class PauseClass(str, Enum):
+    """A model-authored pause before the following visible part."""
+
+    SOFT = "soft"
+    NORMAL = "normal"
+    DEEP = "deep"
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticBeatPart:
+    """One exact visible-text slice and the pause that precedes it."""
+
+    text: str
+    pause_before: PauseClass | None
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticBeatPlan:
+    """The validated delivery plan or a scrubbed fail-closed result."""
+
+    clean_text: str
+    parts: tuple[SemanticBeatPart, ...]
+    accepted: bool
+    rejection_reason: str | None = None
+
+
+def build_marker(nonce: str, pause: PauseClass) -> str:
+    """Return the only marker grammar accepted for ``nonce`` and ``pause``."""
+
+    return f'<syl-beat nonce="{nonce}" pause="{pause.value}"/>'
+
+
+def new_semantic_nonce() -> str:
+    """Return a compact, unpredictable nonce scoped to one response turn."""
+
+    return secrets.token_hex(3).upper()
+
+
+def semantic_beat_system_contract(nonce: str) -> str:
+    """Build the bounded same-call contract for model-authored beat markers."""
+
+    markers = "、".join(build_marker(nonce, pause) for pause in PauseClass)
+    return (
+        "[即时聊天语义节拍]\n"
+        f"可在自然语义边界插入 0 到 5 个隐藏标记：{markers}。"
+        "标记只控制发送节拍；先正常写好回复，不要改写正文，不要解释或引用标记，"
+        "宁可少分几个完整节拍，也不要切成许多短气泡；"
+        "deep 只用于揭示、转折、犹豫或情绪落点；"
+        "不要把标记放进代码、URL、表格或其他结构化内容。"
+    )
+
+
+def _owned_marker_pattern(nonce: str) -> re.Pattern[str]:
+    """Build a bounded candidate matcher scoped to one escaped nonce."""
+
+    escaped_nonce = re.escape(nonce)
+    nonce_value = (
+        rf'(?:"{escaped_nonce}"|\'{escaped_nonce}\'|{escaped_nonce})'
+        r"(?=[\s/>])"
+    )
+    return re.compile(
+        r"<syl-beat\b"
+        rf"(?=[^<>]*\bnonce\s*=\s*{nonce_value})"
+        r"[^<>]*/?>"
+    )
+
+
+def _pause_attribute_value(marker: str) -> str | None:
+    match = re.search(
+        r"\bpause\s*=\s*(?:\"(?P<double>[^\"]*)\"|"
+        r"'(?P<single>[^']*)'|(?P<bare>[^\s/>]+))",
+        marker,
+    )
+    if match is None:
+        return None
+    return next(
+        (value for value in match.group("double", "single", "bare") if value is not None),
+        None,
+    )
+
+
+def _remove_matches(text: str, matches: tuple[re.Match[str], ...]) -> str:
+    if not matches:
+        return text
+    chunks: list[str] = []
+    cursor = 0
+    for match in matches:
+        chunks.append(text[cursor : match.start()])
+        cursor = match.end()
+    chunks.append(text[cursor:])
+    return "".join(chunks)
+
+
+def scrub_semantic_marker_candidates(text: str) -> str:
+    """Remove every raw ``syl-beat`` control candidate from visible text.
+
+    Only exact current-nonce markers may influence segmentation, but malformed,
+    missing-nonce, wrong-nonce, and closing-tag variants are still plugin
+    control residue and must never reach chat output or persisted history.
+    HTML-escaped examples are ordinary visible text and remain untouched.
+    """
+
+    return _remove_matches(text, tuple(_ANY_MARKER_PATTERN.finditer(text)))
+
+
+def _line_ranges(text: str) -> tuple[tuple[int, int, str], ...]:
+    lines: list[tuple[int, int, str]] = []
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        end = offset + len(line)
+        lines.append((offset, end, line))
+        offset = end
+    if offset < len(text):
+        lines.append((offset, len(text), text[offset:]))
+    return tuple(lines)
+
+
+def _fenced_code_ranges(text: str) -> tuple[tuple[int, int], ...]:
+    ranges: list[tuple[int, int]] = []
+    fence_start: int | None = None
+    fence_char = ""
+    fence_length = 0
+
+    for start, end, line in _line_ranges(text):
+        stripped = line.lstrip(" \t")
+        indent = len(line) - len(stripped)
+        opener = re.match(r"(`{3,}|~{3,})", stripped) if indent <= 3 else None
+        if fence_start is None:
+            if opener is not None:
+                token = opener.group(1)
+                fence_start = start
+                fence_char = token[0]
+                fence_length = len(token)
+            continue
+        if opener is None:
+            continue
+        token = opener.group(1)
+        if token[0] == fence_char and len(token) >= fence_length:
+            ranges.append((fence_start, end))
+            fence_start = None
+            fence_char = ""
+            fence_length = 0
+
+    if fence_start is not None:
+        ranges.append((fence_start, len(text)))
+    return tuple(ranges)
+
+
+def _inline_code_ranges(text: str) -> tuple[tuple[int, int], ...]:
+    ranges: list[tuple[int, int]] = []
+    cursor = 0
+    while cursor < len(text):
+        if text[cursor] != "`":
+            cursor += 1
+            continue
+        run_end = cursor + 1
+        while run_end < len(text) and text[run_end] == "`":
+            run_end += 1
+        delimiter = text[cursor:run_end]
+        line_end = text.find("\n", run_end)
+        if line_end < 0:
+            line_end = len(text)
+        close = text.find(delimiter, run_end, line_end)
+        if close < 0:
+            ranges.append((cursor, line_end))
+            cursor = line_end
+            continue
+        end = close + len(delimiter)
+        ranges.append((cursor, end))
+        cursor = end
+    return tuple(ranges)
+
+
+def _protected_ranges(text: str) -> tuple[tuple[int, int], ...]:
+    ranges = list(_fenced_code_ranges(text))
+    ranges.extend(_inline_code_ranges(text))
+    ranges.extend(match.span() for match in re.finditer(r"(?i)\b(?:https?://|www\.)\S+", text))
+    ranges.extend((start, end) for start, end, line in _line_ranges(text) if line.count("|") >= 2)
+    return tuple(ranges)
+
+
+def _overlaps(left: tuple[int, int], right: tuple[int, int]) -> bool:
+    return left[0] < right[1] and right[0] < left[1]
+
+
+def _rejected(clean_text: str, reason: str) -> SemanticBeatPlan:
+    return SemanticBeatPlan(
+        clean_text=clean_text,
+        parts=(),
+        accepted=False,
+        rejection_reason=reason,
+    )
+
+
+def parse_semantic_completion(raw: str, *, nonce: str) -> SemanticBeatPlan:
+    """Validate exact nonce-scoped markers without inferring boundaries.
+
+    Any candidate marker owned by this turn is removed before a rejected plan
+    is returned, so malformed control text cannot leak into history or output.
+    """
+
+    candidate_matches = tuple(_ANY_MARKER_PATTERN.finditer(raw))
+    owned_matches = tuple(_owned_marker_pattern(nonce).finditer(raw))
+    clean_text = _remove_matches(raw, candidate_matches)
+
+    if len(raw) > MAX_SEMANTIC_COMPLETION_CHARS:
+        return _rejected(clean_text, "INPUT_TOO_LONG")
+
+    exact_markers = {build_marker(nonce, pause): pause for pause in PauseClass}
+    exact_pauses: list[PauseClass] = []
+    malformed = False
+    unknown_pause = False
+    for match in owned_matches:
+        exact_pause = exact_markers.get(match.group(0))
+        if exact_pause is not None:
+            exact_pauses.append(exact_pause)
+            continue
+        malformed = True
+        pause_value = _pause_attribute_value(match.group(0))
+        if pause_value is not None and pause_value not in PauseClass._value2member_map_:
+            unknown_pause = True
+
+    if unknown_pause:
+        return _rejected(clean_text, "UNKNOWN_PAUSE")
+    if malformed:
+        return _rejected(clean_text, "MALFORMED_MARKER")
+    if len(candidate_matches) > MAX_SEMANTIC_MARKERS:
+        return _rejected(clean_text, "TOO_MANY_MARKERS")
+
+    owned_spans = {match.span() for match in owned_matches}
+    if any(match.span() not in owned_spans for match in candidate_matches):
+        return _rejected(clean_text, "UNSCOPED_MARKER")
+
+    protected_ranges = _protected_ranges(raw)
+    if any(_overlaps(match.span(), protected) for match in owned_matches for protected in protected_ranges):
+        return _rejected(clean_text, "MARKER_IN_PROTECTED_REGION")
+
+    if not owned_matches:
+        if not raw.strip():
+            return _rejected(raw, "EMPTY_PART")
+        return SemanticBeatPlan(
+            clean_text=raw,
+            parts=(SemanticBeatPart(text=raw, pause_before=None),),
+            accepted=True,
+        )
+
+    parts: list[SemanticBeatPart] = []
+    cursor = 0
+    pause_before: PauseClass | None = None
+    for match, following_pause in zip(owned_matches, exact_pauses, strict=True):
+        parts.append(SemanticBeatPart(text=raw[cursor : match.start()], pause_before=pause_before))
+        cursor = match.end()
+        pause_before = following_pause
+    parts.append(SemanticBeatPart(text=raw[cursor:], pause_before=pause_before))
+
+    if any(not part.text.strip() for part in parts):
+        return _rejected(clean_text, "EMPTY_PART")
+
+    return SemanticBeatPlan(
+        clean_text=clean_text,
+        parts=tuple(parts),
+        accepted=True,
+    )
+
+
+__all__ = [
+    "MAX_SEMANTIC_COMPLETION_CHARS",
+    "MAX_SEMANTIC_MARKERS",
+    "PauseClass",
+    "SEMANTIC_BEAT_NONCE_EXTRA",
+    "SemanticBeatPart",
+    "SemanticBeatPlan",
+    "build_marker",
+    "new_semantic_nonce",
+    "parse_semantic_completion",
+    "scrub_semantic_marker_candidates",
+    "semantic_beat_system_contract",
+]

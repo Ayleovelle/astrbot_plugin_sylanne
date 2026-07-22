@@ -16,6 +16,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +73,15 @@ class FakeEvent:
 
     def get_platform_name(self) -> str:
         return "qq"
+
+    def get_sender_id(self) -> str:
+        return "user-1"
+
+    def get_message_type(self) -> str:
+        return "GroupMessage"
+
+    def get_group_id(self) -> str:
+        return "1"
 
 
 async def _build_plugin() -> Any:
@@ -142,6 +153,284 @@ def test_initialize_acquires_epoch_before_worker_start(tmp_path: Path) -> None:
         # epoch 先于 worker：supervisor 拿到的正是 facade 的 epoch。
         assert facade.runtime.supervisor.epoch == facade.runtime.epoch
         assert facade.accepting is True
+        await facade.terminate()
+
+    _run(go())
+
+
+def test_session_identity_survives_plugin_restart(tmp_path: Path) -> None:
+    async def go() -> None:
+        root = tmp_path / "v3"
+        first_plugin = await _build_plugin()
+        first = first_plugin._v3_shadow
+        first.enabled = True
+        assert await first.initialize(root=root)
+        first_ref = first._identity.session_ref("qq", SESSION_ORIGIN, session_generation=0)
+        await first.terminate()
+
+        second_plugin = await _build_plugin()
+        second = second_plugin._v3_shadow
+        second.enabled = True
+        assert await second.initialize(root=root)
+        second_ref = second._identity.session_ref("qq", SESSION_ORIGIN, session_generation=0)
+        await second.terminate()
+
+        assert first_ref == second_ref
+        assert (root / "session_identity.key").is_file()
+
+    _run(go())
+
+
+def test_concurrent_initialize_coalesces_one_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sylanne_alpha.v3bridge import integration
+
+    release = asyncio.Event()
+    entered = asyncio.Event()
+    constructions = 0
+
+    class SlowRuntime:
+        def __init__(self, **_kwargs: Any) -> None:
+            nonlocal constructions
+            constructions += 1
+            self.counters = object()
+
+        async def initialize(self) -> None:
+            entered.set()
+            await release.wait()
+
+        async def terminate(self) -> None:
+            return None
+
+    monkeypatch.setattr(integration, "V3ShadowRuntime", SlowRuntime)
+
+    async def go() -> None:
+        plugin = await _build_plugin()
+        facade = plugin._v3_shadow
+        facade.enabled = True
+        first = asyncio.create_task(facade.initialize(root=tmp_path / "v3"))
+        await entered.wait()
+        second = asyncio.create_task(facade.initialize(root=tmp_path / "v3"))
+        await asyncio.sleep(0.05)
+        assert constructions == 1
+        release.set()
+        assert await asyncio.gather(first, second) == [True, True]
+        await facade.terminate()
+
+    _run(go())
+
+
+def test_cancelled_terminate_keeps_one_tracked_cleanup_until_worker_exits() -> None:
+    async def go() -> None:
+        plugin = await _build_plugin()
+        facade = plugin._v3_shadow
+        facade.enabled = True
+        facade.accepting = True
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class SlowRuntime:
+            counters = object()
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def terminate(self) -> None:
+                self.calls += 1
+                entered.set()
+                await release.wait()
+
+        runtime = SlowRuntime()
+        facade.runtime = runtime
+        first = asyncio.create_task(facade.terminate())
+        await entered.wait()
+        second = asyncio.create_task(facade.terminate())
+        await asyncio.sleep(0)
+        assert runtime.calls == 1
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert facade.runtime is runtime
+        release.set()
+        await asyncio.wait_for(second, timeout=2.0)
+        assert facade.runtime is None
+        assert runtime.calls == 1
+
+    _run(go())
+
+
+def test_facade_terminate_has_a_bounded_wait_without_cancelling_cleanup() -> None:
+    """A wedged v3 runtime must not hold plugin/v2 teardown forever."""
+
+    async def go() -> None:
+        plugin = await _build_plugin()
+        facade = plugin._v3_shadow
+        facade.enabled = True
+        facade.accepting = True
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class WedgedRuntime:
+            counters = object()
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def terminate(self) -> None:
+                self.calls += 1
+                entered.set()
+                await release.wait()
+
+        runtime = WedgedRuntime()
+        facade.runtime = runtime
+
+        await asyncio.wait_for(facade.terminate(timeout=0.05), timeout=0.5)
+        await entered.wait()
+        assert facade.runtime is runtime
+        assert facade._terminate_task is not None and not facade._terminate_task.done()
+
+        release.set()
+        await asyncio.wait_for(facade.terminate(timeout=1.0), timeout=1.5)
+        assert runtime.calls == 1
+        assert facade.runtime is None
+
+    _run(go())
+
+
+def test_first_live_turn_migrates_before_deferred_offer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sylanne_alpha.v2core import shadow_snapshot
+    from sylanne_alpha.v2core.shadow_snapshot import V2SeedSnapshotV1
+
+    async def freeze(_plugin: object, _session_key: str) -> V2SeedSnapshotV1:
+        return V2SeedSnapshotV1(user_bond_ema=0.7, user_hesitation_ema=0.3)
+
+    monkeypatch.setattr(shadow_snapshot, "freeze_seed_snapshot_fallback", freeze)
+
+    async def go() -> None:
+        plugin = await _build_plugin()
+        facade = plugin._v3_shadow
+        facade.enabled = True
+        assert await facade.initialize(root=tmp_path / "v3")
+
+        assert not facade.ensure_session(
+            plugin=plugin,
+            session_key=SESSION_ORIGIN,
+            platform_id="qq",
+            unified_msg_origin=SESSION_ORIGIN,
+        )
+        facade.capture_request(
+            session_key=SESSION_ORIGIN,
+            platform_id="qq",
+            unified_msg_origin=SESSION_ORIGIN,
+            message_id="m-first",
+            text_length=4,
+            history_present=False,
+            gap_seconds=1.0,
+            body=None,
+            sender_id="user-1",
+            is_group=True,
+        )
+        facade.settle(
+            session_key=SESSION_ORIGIN,
+            route_kind="SILENT",
+            reply_kind="SILENT",
+        )
+        await facade.join_private_tasks()
+        await facade.runtime.join()
+
+        session_ref = facade._identity.session_ref("qq", SESSION_ORIGIN, session_generation=0)
+        loaded = facade.runtime.committer.load_state(session_ref)
+        assert loaded is not None
+        assert loaded.state.revision >= 1
+        assert loaded.base.last_committed_turn_sequence.local_sequence >= 2
+        await facade.terminate()
+
+    _run(go())
+
+
+def test_restart_recovers_corrupt_journal_without_refreezing_v2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sylanne_alpha.v2core import shadow_snapshot
+    from sylanne_alpha.v2core.shadow_snapshot import V2SeedSnapshotV1
+    from sylanne_alpha.v3bridge.session_identity import session_filename_token
+
+    freezes = 0
+
+    async def initial_freeze(_plugin: object, _session_key: str) -> V2SeedSnapshotV1:
+        nonlocal freezes
+        freezes += 1
+        return V2SeedSnapshotV1(user_bond_ema=0.7, user_hesitation_ema=0.3)
+
+    monkeypatch.setattr(shadow_snapshot, "freeze_seed_snapshot_fallback", initial_freeze)
+
+    async def go() -> None:
+        root = tmp_path / "v3"
+        first_plugin = await _build_plugin()
+        first = first_plugin._v3_shadow
+        first.enabled = True
+        assert await first.initialize(root=root)
+        first.ensure_session(
+            plugin=first_plugin,
+            session_key=SESSION_ORIGIN,
+            platform_id="qq",
+            unified_msg_origin=SESSION_ORIGIN,
+        )
+        await first.join_private_tasks()
+        session_ref = first._identity.session_ref("qq", SESSION_ORIGIN, session_generation=0)
+        assert session_ref is not None
+        repository = first.runtime.committer.repository
+        pointer = repository._load_pointer(session_filename_token(session_ref))
+        assert pointer is not None
+        (repository.root / pointer.current_journal).write_bytes(b"corrupt")
+        await first.terminate()
+
+        async def forbidden_refreeze(_plugin: object, _session_key: str) -> V2SeedSnapshotV1:
+            raise AssertionError("existing v3 state must recover before any v2 refreeze")
+
+        monkeypatch.setattr(shadow_snapshot, "freeze_seed_snapshot_fallback", forbidden_refreeze)
+        second_plugin = await _build_plugin()
+        second = second_plugin._v3_shadow
+        second.enabled = True
+        assert await second.initialize(root=root)
+        second.ensure_session(
+            plugin=second_plugin,
+            session_key=SESSION_ORIGIN,
+            platform_id="qq",
+            unified_msg_origin=SESSION_ORIGIN,
+        )
+        await second.join_private_tasks()
+        assert session_ref in second._ready_sessions
+        assert second.runtime.committer.load_state(session_ref) is not None
+        assert freezes == 1
+        await second.terminate()
+
+    _run(go())
+
+
+def test_runtime_wires_real_plugin_budget_into_repository_admission(tmp_path: Path) -> None:
+    from sylanne_alpha.v3bridge.models import RepositoryAdmissionState
+
+    async def go() -> None:
+        plugin_root = tmp_path / "plugin-data"
+        plugin_root.mkdir()
+        (plugin_root / "legacy.bin").write_bytes(b"x" * 1_000_000)
+        plugin = await _build_plugin()
+        facade = plugin._v3_shadow
+        facade.enabled = True
+        assert await facade.initialize(
+            root=plugin_root / "v3_shadow",
+            supervisor_kwargs={"plugin_cap_bytes": 6_000_000},
+        )
+        assert facade.runtime.committer.repository.hard_limit_bytes == 3_000_000
+        snapshot = await facade.runtime.supervisor._load_snapshot()
+        assert snapshot.repository_admission is RepositoryAdmissionState.HARD_STOP
         await facade.terminate()
 
     _run(go())
@@ -304,6 +593,200 @@ def test_v3_identity_never_written_into_event_extra(tmp_path: Path) -> None:
         await facade.terminate()
 
     _run(go())
+
+
+def test_live_reaction_facts_use_hmac_speaker_equality_and_text_cues(tmp_path: Path) -> None:
+    async def go() -> None:
+        plugin = await _build_plugin()
+        facade = plugin._v3_shadow
+        facade.enabled = True
+        await facade.initialize(root=tmp_path / "v3")
+        offers: list[dict[str, Any]] = []
+        facade.runtime.offer_response = lambda **kwargs: offers.append(kwargs)
+
+        def one_turn(message_id: str, sender_id: str) -> None:
+            facade.capture_request(
+                session_key=SESSION_ORIGIN,
+                platform_id="qq",
+                unified_msg_origin=SESSION_ORIGIN,
+                message_id=message_id,
+                text_length=8,
+                history_present=True,
+                gap_seconds=2.0,
+                body=None,
+                text_warm=1.25,
+                text_cold=0.0,
+                text_distress=0.0,
+                text_question=True,
+                text_exclaim=0.0,
+                text_punct=1.25,
+                text_valence_cue=1.25,
+                text_engagement_cue=0.5,
+                sender_id=sender_id,
+                is_group=True,
+            )
+            facade.settle(
+                session_key=SESSION_ORIGIN,
+                route_kind="SILENT",
+                reply_kind="SILENT",
+            )
+
+        one_turn("m-1", "alice")
+        one_turn("m-2", "alice")
+        one_turn("m-3", "bob")
+
+        assert offers[0]["reaction_facts"].same_sender is None
+        assert offers[1]["reaction_facts"].same_sender is True
+        assert offers[2]["reaction_facts"].same_sender is False
+        raw_values = offers[1]["observation"][0]
+        assert raw_values[25] == 1.25
+        assert raw_values[26] == 0.5
+        assert b"alice" not in repr(offers).encode("utf-8")
+        await facade.terminate()
+
+    _run(go())
+
+
+def test_reaction_facts_freeze_at_response_boundary_under_overlapping_turns(
+    tmp_path: Path,
+) -> None:
+    """The later response must compare against the latest *settled* speaker.
+
+    Two host deliveries can overlap for the same v3 session while retaining distinct
+    delivery keys.  Freezing ``same_sender`` during request capture makes the second
+    delivery compare against stale state; the response boundary is the first point at
+    which the previous settled speaker is final.
+    """
+
+    async def go() -> None:
+        plugin = await _build_plugin()
+        facade = plugin._v3_shadow
+        facade.enabled = True
+        await facade.initialize(root=tmp_path / "v3")
+        offers: list[dict[str, Any]] = []
+        facade.runtime.offer_response = lambda **kwargs: offers.append(kwargs)
+
+        def capture(delivery_key: str, message_id: str, sender_id: str) -> None:
+            facade.capture_request(
+                session_key=delivery_key,
+                platform_id="qq",
+                unified_msg_origin=SESSION_ORIGIN,
+                message_id=message_id,
+                text_length=4,
+                history_present=True,
+                gap_seconds=1.0,
+                body=None,
+                sender_id=sender_id,
+                is_group=True,
+            )
+
+        # Establish Alice as the previous settled speaker.
+        capture("seed", "m-seed", "alice")
+        facade.settle(session_key="seed", route_kind="SILENT", reply_kind="SILENT")
+
+        # Both requests arrive before either response settles.  B therefore sees Alice
+        # at request time, but A settles Bob before B reaches its response boundary.
+        capture("delivery-a", "m-a", "bob")
+        capture("delivery-b", "m-b", "alice")
+        facade.settle(session_key="delivery-a", route_kind="SILENT", reply_kind="SILENT")
+        facade.settle(session_key="delivery-b", route_kind="SILENT", reply_kind="SILENT")
+
+        assert [offer["reaction_facts"].same_sender for offer in offers] == [
+            None,
+            False,
+            False,
+        ]
+        await facade.terminate()
+
+    _run(go())
+
+
+def test_local_g2_shadow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Write the mandatory canonical G2 report only for an explicit target."""
+
+    if "SYLANNE_V3_GATE_REPORT" not in os.environ:
+        facade = main_mod._V3ShadowFacade()
+        assert facade.write_local_g2_report_from_environment() is None
+        return
+
+    from sylanne_alpha.v2core import shadow_snapshot
+    from sylanne_alpha.v2core.shadow_snapshot import V2SeedSnapshotV1
+
+    async def freeze_seed(_plugin: object, _session_key: str) -> V2SeedSnapshotV1:
+        return V2SeedSnapshotV1()
+
+    monkeypatch.setattr(shadow_snapshot, "freeze_seed_snapshot_fallback", freeze_seed)
+
+    async def go() -> dict[str, Any]:
+        plugin = await _build_plugin()
+        facade = plugin._v3_shadow
+        facade.enabled = True
+        assert await facade.initialize(root=tmp_path / "v3")
+
+        facade.ensure_session(
+            plugin=plugin,
+            session_key=SESSION_ORIGIN,
+            platform_id="qq",
+            unified_msg_origin=SESSION_ORIGIN,
+        )
+        facade.capture_request(
+            session_key=SESSION_ORIGIN,
+            platform_id="qq",
+            unified_msg_origin=SESSION_ORIGIN,
+            message_id="g2-turn-1",
+            text_length=8,
+            history_present=False,
+            gap_seconds=1.0,
+            body=None,
+            sender_id="g2-user",
+            is_group=True,
+        )
+        facade.settle(
+            session_key=SESSION_ORIGIN,
+            route_kind="SILENT",
+            reply_kind="SILENT",
+        )
+        await facade.join_private_tasks()
+        await facade.runtime.join()
+
+        report = facade.write_local_g2_report_from_environment()
+        assert report is not None
+        await facade.terminate()
+        return report
+
+    report = _run(go())
+    target = Path(os.environ["SYLANNE_V3_GATE_REPORT"])
+    assert target.is_file(), "an explicitly requested G2 report must be written"
+    loaded = json.loads(target.read_text(encoding="utf-8"))
+    assert loaded == report
+
+    from sylanne_alpha.v3bridge.runtime_telemetry import ISOLATION_COUNTER_NAMES
+    from sylanne_alpha.v3core.canonical import canonical_sha256
+
+    digest = loaded.pop("report_digest")
+    assert digest == canonical_sha256(loaded)
+    assert loaded["report_kind"] == "v3_local_shadow_g2_v1"
+    assert loaded["source_channel"] in {"grey", "stable"}
+    assert loaded["build_channel"] in {"source", "grey", "stable"}
+    assert loaded["formula_fingerprint"]["version"]
+    assert loaded["formula_fingerprint"]["digest"]
+    assert loaded["model_fingerprint"]["revision"]
+    assert loaded["runtime_fingerprint_digest"]
+    assert loaded["accepted_count"] >= 1
+    assert loaded["dropped_count"] >= 0
+    assert loaded["correlated_count"] >= 1
+    assert set(loaded["isolation_counters"]) == set(ISOLATION_COUNTER_NAMES)
+    assert all(value == 0 for value in loaded["isolation_counters"].values())
+    assert loaded["passed"] is True
+
+
+def test_local_g2_shadow_rejects_malformed_explicit_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    facade = main_mod._V3ShadowFacade()
+    monkeypatch.setenv("SYLANNE_V3_GATE_REPORT", "  ")
+    with pytest.raises(ValueError, match="G2 report path"):
+        facade.write_local_g2_report_from_environment()
 
 
 def test_main_source_has_no_v3_conf_or_extra_key() -> None:
@@ -496,6 +979,67 @@ def test_capture_fires_at_the_real_request_boundary(tmp_path: Path) -> None:
     _run(go())
 
 
+def test_request_boundary_projects_v2_lexicon_cues_without_raw_text(tmp_path: Path) -> None:
+    async def go() -> None:
+        plugin = main_mod.EmotionalStatePlugin(FakeContext(), {})
+        facade = plugin._v3_shadow
+        facade.enabled = True
+        await facade.initialize(root=tmp_path / "v3")
+        event, request = FakeEvent(), FakeRequest()
+        await plugin._llm_request_pipeline._process_llm_request_final(
+            event,
+            request,
+            "抱抱你吗？",
+            SESSION_ORIGIN,
+            False,
+            False,
+            False,
+        )
+
+        pending = next(iter(facade._pending.values()))
+        raw_values = pending.observation[0]
+        assert raw_values[19] > 0.0
+        assert raw_values[22] == 1.0
+        assert raw_values[25] > 0.0
+        assert raw_values[26] > 0.0
+        assert "抱抱你吗" not in repr(pending.observation)
+        await facade.terminate()
+
+    _run(go())
+
+
+def test_disabled_v3_never_imports_or_scans_lexicon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sylanne_alpha.v2core import integration, lexicon
+
+    async def no_v2_request(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    def forbidden_read(_text: str) -> Any:
+        raise AssertionError("disabled v3 must not scan text")
+
+    monkeypatch.setattr(integration, "apply_v2core_request", no_v2_request)
+    monkeypatch.setattr(lexicon, "read_signals", forbidden_read)
+
+    async def go() -> None:
+        plugin = await _build_plugin()
+        assert plugin._v3_shadow.accepting is False
+        event, request = FakeEvent(), FakeRequest()
+        await plugin._llm_request_pipeline._process_llm_request_final(
+            event,
+            request,
+            "关闭时不应扫描",
+            SESSION_ORIGIN,
+            False,
+            False,
+            False,
+        )
+        assert request.system_prompt.startswith("PERSONA")
+
+    _run(go())
+
+
 async def _prompt_bytes(*, enabled: bool, root: Path | None) -> tuple[bytes, bytes]:
     """跑一遍真 prompt 组装路径，回传 (system_prompt, contexts) 的字节。
 
@@ -583,6 +1127,7 @@ def test_segmented_dispatch_first_segment_failure_is_unknown(tmp_path: Path) -> 
                 "qq:GroupMessage:1", parts, session_key="qq:GroupMessage:1"
             )
         assert list(facade.settled_actions) == [ActualAction.UNKNOWN]
+        assert plugin._store.unfinished_replies.get("qq:GroupMessage:1") == "ab"
         await facade.terminate()
 
     _run(go())
@@ -605,6 +1150,39 @@ def test_segmented_dispatch_second_segment_failure_is_unknown(tmp_path: Path) ->
                 "qq:GroupMessage:1", parts, session_key="qq:GroupMessage:1"
             )
         assert list(facade.settled_actions) == [ActualAction.UNKNOWN]
+        assert plugin._store.unfinished_replies.get("qq:GroupMessage:1") == "b"
+        await facade.terminate()
+
+    _run(go())
+
+
+def test_segmented_dispatch_cancelled_before_first_send_keeps_full_reply(
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        plugin, facade = await _facade_with_capture(
+            tmp_path,
+            session_key="qq:GroupMessage:1",
+        )
+        parts = [{"text": "整条都还没发", "delay_before_seconds": 30}]
+        task = asyncio.create_task(
+            plugin._llm_response_pipeline._dispatch_segmented_parts(
+                "qq:GroupMessage:1",
+                parts,
+                session_key="qq:GroupMessage:1",
+            )
+        )
+        await asyncio.sleep(0.05)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert plugin.context.sent == []
+        assert (
+            plugin._store.unfinished_replies.get("qq:GroupMessage:1")
+            == "整条都还没发"
+        )
         await facade.terminate()
 
     _run(go())
@@ -777,8 +1355,8 @@ def test_plugin_wrapper_forwards_settle_v3(tmp_path: Path) -> None:
     _run(go())
 
 
-def test_terminate_is_bounded_when_v3_hangs(tmp_path: Path) -> None:
-    """红队 F3 回归：v3 关停卡住时 v2 照常收尾——hang 不是 exception，只 catch 挡不住。"""
+def test_terminate_never_abandons_a_live_runtime_worker(tmp_path: Path) -> None:
+    """关停不得用超时遗弃仍存活的私有 executor/runtime。"""
 
     async def go() -> None:
         plugin = await _build_plugin()
@@ -786,16 +1364,19 @@ def test_terminate_is_bounded_when_v3_hangs(tmp_path: Path) -> None:
         facade.enabled = True
         await facade.initialize(root=tmp_path / "v3")
 
-        class _WedgedRuntime:
+        release = asyncio.Event()
+
+        class _SlowRuntime:
             async def terminate(self) -> None:
-                await asyncio.sleep(3600)  # 永远关不完
+                await release.wait()
 
         real_runtime = facade.runtime
-        facade.runtime = _WedgedRuntime()
-        loop = asyncio.get_running_loop()
-        started = loop.time()
-        await facade.terminate(timeout=0.05)
-        assert loop.time() - started < 5.0, "v3 卡死必须超时放手，不能拖住 v2 关停"
+        facade.runtime = _SlowRuntime()
+        shutdown = asyncio.create_task(facade.terminate())
+        await asyncio.sleep(0.05)
+        assert not shutdown.done(), "runtime 仍存活时 facade 不得假装 terminate 完成"
+        release.set()
+        await asyncio.wait_for(shutdown, timeout=2.0)
         assert facade.runtime is None
         await real_runtime.terminate()
 
@@ -807,7 +1388,8 @@ def test_executor_shutdown_does_not_block_the_event_loop() -> None:
 
     root = Path(__file__).resolve().parents[1]
     source = (root / "sylanne_alpha/v3bridge/shadow_supervisor.py").read_text(encoding="utf-8")
-    assert "await asyncio.to_thread(self._executor.shutdown, wait=True, cancel_futures=True)" in source
+    assert "await self._bounded_shutdown_step(" in source
+    assert "self._executor.shutdown," in source
     assert "\n            self._executor.shutdown(wait=True, cancel_futures=True)" not in source
 
 

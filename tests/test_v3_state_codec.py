@@ -23,6 +23,7 @@ import pytest
 
 from sylanne_alpha.v3core.contracts import Action, SessionRef, TurnSequence
 from sylanne_alpha.v3core.formula_v1 import FORMULA_VERSION
+from sylanne_alpha.v3core.learning.label_free import prior_label_free
 from sylanne_alpha.v3core.state import codec
 from sylanne_alpha.v3core.state.codec import (
     STATE_CODEC_MAGIC,
@@ -39,6 +40,7 @@ from sylanne_alpha.v3core.state.models import (
     ActionBeliefs,
     ExperienceRecord,
     PendingOutcome,
+    STATE_SCHEMA_VERSION,
     V3State,
     BASELINE_BOUNDS,
     BASELINE_STORED_BOUNDS,
@@ -48,6 +50,9 @@ from sylanne_alpha.v3core.state.models import (
     SNN_SUMMARY_STORED_BOUNDS,
 )
 from sylanne_alpha.v3core.formula_v1 import AXIS_DIM, EXPERIENCE_CAPACITY, SNN_SUMMARY_DIM
+
+
+LEGACY_FORMULA_VERSION = "sylanne.v3.formula.v1"
 
 
 def _snap16(value: float) -> float:
@@ -105,7 +110,7 @@ def _experience(index: int) -> ExperienceRecord:
 def _worst_case_state(experience_count: int = EXPERIENCE_CAPACITY) -> V3State:
     return V3State(
         session_ref=_session_ref(),
-        schema_version=1,
+        schema_version=STATE_SCHEMA_VERSION,
         source_digest="src-digest",
         state_generation_id="gen-worst",
         revision=123456,
@@ -243,10 +248,10 @@ def _legacy_v2_blob(*, with_pending: bool) -> bytes:
     body += _legacy_string("key-v1")  # session_ref.key_id
     body += b"s" * 32  # session_digest
     body += struct.pack(">Q", 1)  # session_ref.session_generation
-    body += _legacy_string(FORMULA_VERSION)  # formula_version
+    body += _legacy_string(LEGACY_FORMULA_VERSION)  # formula_version
     body += _legacy_string("")  # source_digest
     body += _legacy_string("")  # state_generation_id
-    body += _legacy_string(FORMULA_VERSION)  # model_revision
+    body += _legacy_string(LEGACY_FORMULA_VERSION)  # model_revision
     body += struct.pack(">B", 0)  # last_committed_turn_id: None
     body += struct.pack(">B", 0)  # last_committed_turn_sequence: None
     # continuous (v2: latent as float32)
@@ -277,9 +282,9 @@ def _legacy_v2_blob(*, with_pending: bool) -> bytes:
         body += struct.pack(">B", 1)  # legacy packed_eligibility present
         body += struct.pack(">I", plastic) + struct.pack(">%de" % plastic, *([0.0] * plastic))
         body += struct.pack(">B", 0)  # expiry_sequence: None
-        body += _legacy_string(FORMULA_VERSION)  # preference_revision
+        body += _legacy_string(LEGACY_FORMULA_VERSION)  # preference_revision
         body += _legacy_string("0" * 64)  # preference_digest
-        body += _legacy_string(FORMULA_VERSION)  # outcome_projector_revision
+        body += _legacy_string(LEGACY_FORMULA_VERSION)  # outcome_projector_revision
     else:
         body += struct.pack(">B", 0)  # pending: None
     body += struct.pack(">H", 0)  # experiences count
@@ -290,13 +295,29 @@ def _legacy_v2_blob(*, with_pending: bool) -> bytes:
 def test_legacy_v2_blob_migrates_by_discarding_the_snn_segment() -> None:
     decoded = decode_state(_legacy_v2_blob(with_pending=False))
     # The SnnState segment is gone and the absent label-free segment migrates to
-    # None; the state is otherwise the neutral state.  A legacy blob keeps its stored
-    # schema_version (1); only the next producer re-stamps it to the current schema.
-    assert decoded == V3State(session_ref=_session_ref(), schema_version=1)
+    # None; codec4 upgrades the legacy schema/formula header before exposing the
+    # state, so no current producer can accidentally re-emit a v1 header.
+    assert decoded == V3State(session_ref=_session_ref())
+    assert decoded.schema_version == STATE_SCHEMA_VERSION == 2
+    assert decoded.formula_version == FORMULA_VERSION == "sylanne.v3.formula.v2"
+    assert decoded.model_revision == FORMULA_VERSION
     assert decoded.label_free is None
     assert not hasattr(decoded, "snn")
     # The next encode emits the current (v4) version and round-trips.
     assert decode_state(encode_state(decoded)) == decoded
+
+
+def test_codec4_encoder_refuses_label_free_state_under_a_legacy_header() -> None:
+    inconsistent = V3State(
+        session_ref=_session_ref(),
+        schema_version=1,
+        formula_version=LEGACY_FORMULA_VERSION,
+        model_revision=LEGACY_FORMULA_VERSION,
+        label_free=prior_label_free(),
+    )
+
+    with pytest.raises(StateCodecError, match="current schema/formula"):
+        encode_state(inconsistent)
 
 
 def test_legacy_v2_pending_migrates_by_discarding_stdp_fields() -> None:

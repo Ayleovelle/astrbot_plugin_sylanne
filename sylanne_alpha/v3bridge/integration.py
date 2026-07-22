@@ -20,11 +20,28 @@ module only owns the ownership boundary and the deterministic wiring.
 
 from __future__ import annotations
 
+import asyncio
+import os
+import threading
 import time
+from pathlib import Path
 
+from sylanne_alpha.v2core.shadow_snapshot import V2SeedSnapshotV1
 from sylanne_alpha.v3bridge.actual_action import ActualAction
 from sylanne_alpha.v3bridge.effect_committer import EffectCommitter
-from sylanne_alpha.v3bridge.migration_coordinator import MigrationCoordinator, MigrationOutcome
+from sylanne_alpha.v3bridge.limits import (
+    MAX_ACTIVE_SESSIONS,
+    MAX_GLOBAL_QUEUE,
+    MAX_PER_SESSION_QUEUE,
+    PLUGIN_DATA_CAP_BYTES,
+    effective_v3_budget,
+)
+from sylanne_alpha.v3bridge.migration_coordinator import (
+    MigrationCoordinator,
+    MigrationOutcome,
+    RecoveryOutcome,
+)
+from sylanne_alpha.v3bridge.models import RepositoryAdmissionState
 from sylanne_alpha.v3bridge.profile_selector import ProfileSelector
 from sylanne_alpha.v3bridge.runtime_telemetry import IsolationCounters, TelemetrySink
 from sylanne_alpha.v3bridge.shadow_supervisor import (
@@ -34,11 +51,38 @@ from sylanne_alpha.v3bridge.shadow_supervisor import (
     ShadowSupervisor,
 )
 from sylanne_alpha.v3bridge.turn_registry import SequenceLedger, TurnHandle, TurnRegistry
-from sylanne_alpha.v3core.contracts import SessionRef, TurnContextClass
+from sylanne_alpha.v3core.contracts import ReactionFacts, SessionRef, TurnContextClass, TurnSequence
 from sylanne_alpha.v3core.orchestrator import orchestrate
 
 
 DEFAULT_SHADOW_DEADLINE_MS = 250.0
+
+
+def _tree_usage_bytes(root: Path, *, excluded: Path) -> int:
+    """Measure regular files below ``root`` without following links."""
+
+    if not root.exists():
+        return 0
+    excluded_key = os.path.normcase(os.path.abspath(os.fspath(excluded)))
+    total = 0
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                entry_key = os.path.normcase(os.path.abspath(entry.path))
+                if entry_key == excluded_key:
+                    continue
+                try:
+                    if entry.is_symlink():
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(Path(entry.path))
+                    elif entry.is_file(follow_symlinks=False):
+                        total += entry.stat(follow_symlinks=False).st_size
+                except FileNotFoundError:
+                    continue
+    return total
 
 
 class V3ShadowRuntime:
@@ -47,15 +91,23 @@ class V3ShadowRuntime:
     def __init__(
         self,
         *,
-        root: object,
+        root: str | os.PathLike[str],
         plugin_instance_id: str,
         correlation_secret: bytes,
         telemetry_capacity: int = 256,
         monotonic=time.monotonic,
         compute=orchestrate,
         load_snapshot_provider=None,
+        plugin_data_root: str | os.PathLike[str] | None = None,
+        non_v3_bytes: int | None = None,
+        plugin_cap_bytes: int = PLUGIN_DATA_CAP_BYTES,
         default_deadline_ms: float = DEFAULT_SHADOW_DEADLINE_MS,
-        **supervisor_kwargs: object,
+        per_session_cap: int = MAX_PER_SESSION_QUEUE,
+        global_cap: int = MAX_GLOBAL_QUEUE,
+        max_sessions: int = MAX_ACTIVE_SESSIONS,
+        job_timeout_s: float | None = 30.0,
+        drain_timeout_s: float = 5.0,
+        shutdown_step_timeout_s: float = 5.0,
     ) -> None:
         self._plugin_instance_id = plugin_instance_id
         self._correlation_secret = correlation_secret
@@ -63,14 +115,33 @@ class V3ShadowRuntime:
         self._compute = compute
         self._load_snapshot_provider = load_snapshot_provider
         self._default_deadline_ms = float(default_deadline_ms)
-        self._supervisor_kwargs = supervisor_kwargs
+        self._per_session_cap = per_session_cap
+        self._global_cap = global_cap
+        self._max_sessions = max_sessions
+        self._job_timeout_s = job_timeout_s
+        self._drain_timeout_s = drain_timeout_s
+        self._shutdown_step_timeout_s = shutdown_step_timeout_s
 
-        self.committer = EffectCommitter.open(root)
+        repository_root = Path(os.fspath(root))
+        if plugin_data_root is not None and non_v3_bytes is not None:
+            raise ValueError("pass plugin_data_root or non_v3_bytes, not both")
+        if non_v3_bytes is None:
+            non_v3_bytes = (
+                _tree_usage_bytes(Path(os.fspath(plugin_data_root)), excluded=repository_root)
+                if plugin_data_root is not None
+                else 0
+            )
+        self._repository_budget = effective_v3_budget(non_v3_bytes, plugin_cap_bytes)
+        self.committer = EffectCommitter.open(
+            repository_root,
+            hard_limit_bytes=self._repository_budget.hard_bytes,
+        )
         self.coordinator = MigrationCoordinator(self.committer)
         self.ledger = SequenceLedger()
         self.counters = IsolationCounters()
         self.telemetry = TelemetrySink(capacity=telemetry_capacity)
         self.profile_selector = ProfileSelector()
+        self._migration_lock = threading.Lock()
 
         self.registry: TurnRegistry | None = None
         self.supervisor: ShadowSupervisor | None = None
@@ -90,7 +161,7 @@ class V3ShadowRuntime:
         if self.initialized:
             return
         # Acquire the writer epoch BEFORE the worker starts; fail-close v3 only.
-        self._epoch = self.committer.acquire_epoch()
+        self._epoch = await asyncio.to_thread(self.committer.acquire_epoch)
         self.registry = TurnRegistry(
             plugin_instance_id=self._plugin_instance_id,
             correlation_secret=self._correlation_secret,
@@ -108,7 +179,17 @@ class V3ShadowRuntime:
             monotonic=self._monotonic,
             compute=self._compute,
             load_snapshot_provider=self._load_snapshot_provider,
-            **self._supervisor_kwargs,
+            repository_admission_provider=(
+                None
+                if self._load_snapshot_provider is not None
+                else self._repository_admission
+            ),
+            per_session_cap=self._per_session_cap,
+            global_cap=self._global_cap,
+            max_sessions=self._max_sessions,
+            job_timeout_s=self._job_timeout_s,
+            drain_timeout_s=self._drain_timeout_s,
+            shutdown_step_timeout_s=self._shutdown_step_timeout_s,
         )
         await self.supervisor.initialize(epoch=self._epoch)
 
@@ -122,6 +203,33 @@ class V3ShadowRuntime:
 
     # -- migration -----------------------------------------------------------
 
+    def _repository_admission(self) -> RepositoryAdmissionState:
+        usage = self.committer.repository.usage_bytes()
+        budget = self._repository_budget
+        if not budget.admission_enabled or usage >= budget.hard_bytes:
+            return RepositoryAdmissionState.HARD_STOP
+        if usage >= budget.high_bytes:
+            return RepositoryAdmissionState.HIGH_WATERMARK
+        return RepositoryAdmissionState.OPEN
+
+    def recover(
+        self,
+        session_ref: SessionRef,
+        *,
+        source_digest: str,
+        session_generation: int = 0,
+        writer_epoch: int | None = None,
+    ) -> RecoveryOutcome:
+        epoch = self._epoch if writer_epoch is None else int(writer_epoch)
+        if epoch is None:
+            raise RuntimeError("v3 runtime is not initialized")
+        return self.coordinator.recover(
+            session_ref,
+            writer_epoch=epoch,
+            session_generation=session_generation,
+            source_digest=source_digest,
+        )
+
     def migrate(
         self,
         session_ref: SessionRef,
@@ -129,26 +237,57 @@ class V3ShadowRuntime:
         source_digest: str,
         session_generation: int = 0,
         writer_epoch: int | None = None,
-        v3_migration_lock: object,
-        seed_snapshot: object = None,
+        v3_migration_lock: object | None = None,
+        seed_snapshot: V2SeedSnapshotV1 | None = None,
         freeze_v2_seed: object = None,
     ) -> MigrationOutcome:
         """One-time v2 seeding for a session (design 15.2).
 
-        The migration commits at its own writer epoch, always strictly below the epoch
-        the running supervisor acquires at :meth:`initialize`, so the first live turn's
-        sequence strictly exceeds the genesis sequence.
+        Production migration uses the already-acquired supervisor epoch. Sequence 1 is
+        reserved for the genesis commit before live capture, so the first turn starts
+        at 2 without acquiring a newer epoch that would fence the running worker.
         """
 
-        epoch = self.committer.acquire_epoch() if writer_epoch is None else int(writer_epoch)
-        return self.coordinator.migrate(
+        if writer_epoch is None:
+            epoch = self._epoch
+            if epoch is None:
+                epoch = self.committer.acquire_epoch()
+        else:
+            epoch = int(writer_epoch)
+        outcome = self.coordinator.migrate(
             session_ref,
             writer_epoch=epoch,
             session_generation=session_generation,
             source_digest=source_digest,
-            v3_migration_lock=v3_migration_lock,
+            v3_migration_lock=self._migration_lock
+            if v3_migration_lock is None
+            else v3_migration_lock,
             seed_snapshot=seed_snapshot,
             freeze_v2_seed=freeze_v2_seed,
+        )
+        high_watermark = self.committer.pointer_high_watermark(session_ref)
+        if high_watermark is not None:
+            self.ledger.resume_committed(session_ref=session_ref, sequence=high_watermark)
+        return outcome
+
+    def reserve_migration_sequence(self, session_ref: SessionRef) -> TurnSequence:
+        """Reserve the current epoch's genesis slot before first live capture."""
+
+        if self._epoch is None:
+            raise RuntimeError("v3 runtime is not initialized")
+        sequence = TurnSequence(self._epoch, 1)
+        if not self.ledger.reserve(session_ref=session_ref, sequence=sequence):
+            raise RuntimeError("v3 sequence ledger could not reserve migration slot")
+        return sequence
+
+    def complete_migration_sequence(self, session_ref: SessionRef) -> bool:
+        """Publish the in-memory migration barrier after durable base validation."""
+
+        if self._epoch is None:
+            return False
+        return self.ledger.resume_committed(
+            session_ref=session_ref,
+            sequence=TurnSequence(self._epoch, 1),
         )
 
     # -- capture + offer (event-loop path) -----------------------------------
@@ -183,6 +322,7 @@ class V3ShadowRuntime:
         observation: object,
         actual_action: ActualAction,
         quality_score: float | None,
+        reaction_facts: ReactionFacts | None = None,
         platform_id: object,
         unified_msg_origin: object,
         message_id: object,
@@ -212,6 +352,7 @@ class V3ShadowRuntime:
             observation=observation,
             actual_action=actual_action,
             quality_score=quality_score,
+            reaction_facts=reaction_facts,
             deadline_monotonic=moment + ms / 1000.0,
             handle=handle,
         )

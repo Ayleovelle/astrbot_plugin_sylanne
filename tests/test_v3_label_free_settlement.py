@@ -768,8 +768,9 @@ def test_trace_reaction_same_sender_is_three_valued_and_round_trips() -> None:
         )
         assert result.trace.reaction_same_sender is value
         assert decode_trace_bytes(result.trace_bytes).reaction_same_sender is value
-    # No pending -> path B does not run -> the recorded relation is neutral None even
-    # if the bridge supplied a fact, because no reaction was settled this turn.
+    # No pending means no settlement, but the trace is a deterministic record of the
+    # frozen invocation input, not merely a settlement receipt.  Replay must retain
+    # the supplied fact even on a censored/non-adjacent turn.
     no_settlement = orchestrate(
         CoreInvocation(
             envelope=_envelope(),
@@ -778,7 +779,8 @@ def test_trace_reaction_same_sender_is_three_valued_and_round_trips() -> None:
             reaction_facts=ReactionFacts(same_sender=True),
         )
     )
-    assert no_settlement.trace.reaction_same_sender is None
+    assert no_settlement.trace.reaction_same_sender is True
+    assert decode_trace_bytes(no_settlement.trace_bytes).reaction_same_sender is True
 
 
 # --------------------------------------------------------------------------- #
@@ -802,10 +804,11 @@ def test_reaction_facts_is_a_frozen_bool_or_none_relation() -> None:
 
 def test_formula_digest_is_folded_to_v2() -> None:
     # Slice D folds the labelfree block into the manifest (spec §4.3): the intentional
-    # v2 digest bump.
+    # v2 digest bump.  The current digest also freezes the one live scalar profile
+    # separately from the read-only legacy profile identifiers.
     assert "labelfree" in formula.FORMULA_MANIFEST
     assert formula.FORMULA_VERSION == "sylanne.v3.formula.v2"
     assert (
         formula.FORMULA_DIGEST
-        == "fb487bc94ac2b21afd45ab8dbbed39c3e0f859fe7a0d395fe3abda47142d8857"
+        == "59fcaf3b2079619827df002a0832627d6d0cdbfdee573388b7a785e2c2de9485"
     )

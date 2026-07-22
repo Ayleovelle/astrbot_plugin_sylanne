@@ -35,6 +35,9 @@ from sylanne_alpha.v3core import orchestrator
 from sylanne_alpha.v3core.orchestrator import STAGE_ORDER, orchestrate
 
 
+LEGACY_FORMULA_VERSION = "sylanne.v3.formula.v1"
+
+
 # --------------------------------------------------------------------------- #
 # Builders
 # --------------------------------------------------------------------------- #
@@ -179,6 +182,29 @@ def test_orchestrate_is_deterministic_and_byte_identical_under_the_same_fingerpr
     assert first.state_delta.next_state == second.state_delta.next_state
 
 
+def test_orchestrate_restamps_a_legacy_schema1_formula_v1_state_to_formula_v2() -> None:
+    legacy = _base_state(
+        schema_version=1,
+        formula_version=LEGACY_FORMULA_VERSION,
+        model_revision=LEGACY_FORMULA_VERSION,
+    )
+
+    result = orchestrate(
+        CoreInvocation(
+            envelope=_envelope(),
+            base_state=legacy,
+            projected_actual_outcome=(Action.SPEAK, None),
+        )
+    )
+
+    assert result.accepted is True
+    upgraded = result.state_delta.next_state
+    assert upgraded.schema_version == 2
+    assert upgraded.formula_version == formula.FORMULA_VERSION
+    assert upgraded.model_revision == formula.ACTION_MODEL_REVISION
+    assert decode_state(encode_state(upgraded)) == upgraded
+
+
 def test_orchestrate_has_no_side_effect_on_the_immutable_base_state() -> None:
     base = _base_state()
     invocation = CoreInvocation(
@@ -206,7 +232,7 @@ def test_state_delta_advances_the_revision_and_records_the_committed_turn() -> N
 # --------------------------------------------------------------------------- #
 
 
-def test_reuse_without_prior_summary_degrades_deterministically_to_continuous_only() -> None:
+def test_legacy_reuse_profile_is_canonicalized_to_formula_v2_scalar() -> None:
     reuse = orchestrate(
         CoreInvocation(
             envelope=_envelope(profile="REUSE_LAST_SNN_SUMMARY"),
@@ -221,11 +247,31 @@ def test_reuse_without_prior_summary_degrades_deterministically_to_continuous_on
             projected_actual_outcome=(Action.SPEAK, None),
         )
     )
-    # The degraded computation matches the continuous-only decision exactly.
+    # The legacy DTO is accepted read-only, but neither compute nor trace/profile
+    # identity carries the retired selector into a formula-v2 result.
     assert reuse.decision_plan.action == continuous.decision_plan.action
     assert reuse.trace.next_latent_axes == continuous.trace.next_latent_axes
     assert reuse.trace.snn_ran is False
-    assert reuse.trace.degradation_reason == "REUSE_WITHOUT_SUMMARY_FALLBACK"
+    assert reuse.trace.degradation_reason == "NONE"
+    assert reuse.trace.profile_id == "FORMULA_V2_SCALAR"
+    assert reuse.trace.profile_snn_enabled is False
+    assert reuse.trace.profile_ticks == 0
+    assert reuse.trace.profile_stdp_enabled is False
+    assert reuse.trace.profile_reuse_last_summary is False
+
+
+def test_next_formula_v2_state_clears_a_legacy_snn_summary_slot() -> None:
+    legacy_summary = tuple(0.25 for _ in range(formula.SNN_SUMMARY_DIM))
+    result = orchestrate(
+        CoreInvocation(
+            envelope=_envelope(profile="FULL_24_STDP"),
+            base_state=_base_state(last_snn_summary=legacy_summary),
+            projected_actual_outcome=(Action.SPEAK, None),
+        )
+    )
+
+    assert result.accepted is True
+    assert result.state_delta.next_state.last_snn_summary is None
 
 
 def test_deleting_snn_novelty_shifts_the_action_distribution_toward_clarify() -> None:

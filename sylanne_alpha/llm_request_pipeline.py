@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import inspect
 import json
 import random
 import time
@@ -25,8 +26,20 @@ from sylanne_alpha.content_sanitizer import (
     is_content_filter_refusal,
 )
 from sylanne_alpha.message_dispatch import realtime_flags
-from sylanne_alpha.utils import safe_ensure_future
+from sylanne_alpha.provider_routing import (
+    ProviderFeature,
+    call_text_provider_once,
+    resolve_embedding_provider,
+    resolve_text_provider,
+    resolve_transcription_provider,
+)
+from sylanne_alpha.semantic_segmentation import (
+    SEMANTIC_BEAT_NONCE_EXTRA,
+    new_semantic_nonce,
+    semantic_beat_system_contract,
+)
 from sylanne_alpha.state_persistence import mark_dirty
+from sylanne_alpha.utils import safe_ensure_future
 
 if TYPE_CHECKING:
     from sylanne_alpha.protocols import PluginHost
@@ -166,6 +179,34 @@ def _v3_message_id_of(event: Any) -> Any:
     """入站 message_id（v3 shadow 关联用）。只读，取不到就 None → 该轮不捕获。"""
 
     return getattr(getattr(event, "message_obj", None), "message_id", None)
+
+
+def _v3_sender_of(event: Any) -> Any:
+    """Authenticated sender id for bridge-local HMAC equality only."""
+
+    getter = getattr(event, "get_sender_id", None)
+    if callable(getter):
+        try:
+            return getter()
+        except Exception:  # noqa: BLE001 - missing sender becomes unknown relation
+            return None
+    return None
+
+
+def _v3_is_group_of(event: Any) -> bool | None:
+    """Resolve group/private context through AstrBot's public event accessors."""
+
+    group_getter = getattr(event, "get_group_id", None)
+    if callable(group_getter):
+        try:
+            group_id = group_getter()
+        except Exception:  # noqa: BLE001
+            return None
+        return group_id not in (None, "")
+    group_id = getattr(getattr(event, "message_obj", None), "group_id", None)
+    if group_id is not None:
+        return group_id != ""
+    return None
 
 
 def _v3_addressed_of(event: Any) -> bool:
@@ -870,7 +911,7 @@ class LLMRequestPipeline:
             return f"[用户发送了{len(image_urls)}张图片]"
 
         # 自动检测可用的多模态 provider
-        provider_id = await self._detect_multimodal_provider()
+        provider_id = await self._detect_multimodal_provider(event)
         if not provider_id:
             return f"[用户发送了{len(image_urls)}张图片]"
 
@@ -894,32 +935,11 @@ class LLMRequestPipeline:
 
         return f"[用户发送了{len(image_urls)}张图片]"
 
-    async def _detect_multimodal_provider(self) -> str:
-        """自动检测可用的多模态 provider。
+    @staticmethod
+    def _provider_supports_multimodal(provider: Any) -> bool:
+        """复用旧检测口径判断 provider 是否具备图片理解能力。"""
 
-        优先使用用户指定的 transcription_provider_id，
-        否则遍历所有已注册 provider，按模型名匹配多模态能力。
-
-        Returns:
-            多模态 provider 的 ID，未找到返回空字符串。
-        """
-        p = self._p
-        config = p.config or {}
-
-        # 用户显式指定了 provider 则直接用
-        explicit = str(config.get("sylanne_alpha_transcription_provider_id") or "")
-        if explicit:
-            return explicit
-
-        # 缓存检测结果，避免每条消息都遍历
-        cached = getattr(p, "_multimodal_provider_cache", None)
-        if cached is not None:
-            ts, pid = cached
-            if time.time() - ts < 300:
-                return pid
-
-        # 已知支持多模态的模型名模式
-        _MULTIMODAL_PATTERNS = (
+        multimodal_patterns = (
             "gpt-4o",
             "gpt-4-turbo",
             "gpt-4-vision",
@@ -933,43 +953,31 @@ class LLMRequestPipeline:
             "cogvlm",
             "minicpm-v",
         )
+        model = str(
+            getattr(provider, "model_name", "")
+            or getattr(provider, "model", "")
+            or getattr(provider, "id", "")
+        ).lower()
+        return any(pattern in model for pattern in multimodal_patterns)
 
+    async def _detect_multimodal_provider(self, event: Any | None = None) -> str:
+        """通过中央路由选择图片转述 provider，保留既有能力检测口径。"""
+
+        p = self._p
+        config = p.config or {}
         context = getattr(p, "context", None)
         if context is None:
             return ""
 
-        # 遍历所有 LLM provider 查找多模态的
-        for method_name in ("get_all_providers", "get_all_llm_providers"):
-            getter = getattr(context, method_name, None)
-            if not callable(getter):
-                continue
-            try:
-                providers = getter()
-                if hasattr(providers, "__await__"):
-                    providers = await providers
-            except Exception:
-                continue
-            iterable = (
-                providers.values() if isinstance(providers, dict) else (providers or [])
-            )
-            for prov in iterable:
-                model = str(
-                    getattr(prov, "model_name", "")
-                    or getattr(prov, "model", "")
-                    or getattr(prov, "id", "")
-                ).lower()
-                if any(pat in model for pat in _MULTIMODAL_PATTERNS):
-                    pid = str(
-                        getattr(prov, "id", "")
-                        or getattr(prov, "provider_id", "")
-                        or ""
-                    )
-                    if pid:
-                        p._multimodal_provider_cache = (time.time(), pid)
-                        return pid
+        umo = str(getattr(event, "unified_msg_origin", "") or "") or None
 
-        p._multimodal_provider_cache = (time.time(), "")
-        return ""
+        resolution = await resolve_transcription_provider(
+            config=config,
+            context=context,
+            multimodal_detector=self._provider_supports_multimodal,
+            umo=umo,
+        )
+        return resolution.provider_id if resolution.provider is not None else ""
 
     @staticmethod
     def _merge_fragments(texts: list[str]) -> str:
@@ -1357,8 +1365,15 @@ class LLMRequestPipeline:
         )
 
         # Step 4: 情感/关系状态信号
+        assessment_umo = str(
+            getattr(event, "unified_msg_origin", "") or ""
+        ).strip() or None
         state_fragment = await self._dispatch_assessment(
-            session_key, message_text, gap_seconds, realtime_enabled,
+            session_key,
+            message_text,
+            gap_seconds,
+            realtime_enabled,
+            umo=assessment_umo,
         )
 
         # Step 4.5: v3 shadow 请求边界（design 14.1；plan Task 13）
@@ -1369,19 +1384,43 @@ class LLMRequestPipeline:
         # 默认关时 capture_request 首行即 return；开着也只冻结事实、不推进 v3 状态、不阻塞。
         # 全部异常封在 facade 内部，这里没有 try 是刻意的：它保证不抛。
         _v3 = getattr(p, "_v3_shadow", None)
-        if _v3 is not None:
-            _v3.capture_request(
-                session_key=session_key,
-                platform_id=_v3_platform_of(event),
-                unified_msg_origin=getattr(event, "unified_msg_origin", None),
-                message_id=_v3_message_id_of(event),
-                text_length=len(message_text or ""),
-                history_present=history_depth > 0,
-                gap_seconds=gap_seconds,
-                body=p._store.last_injected_states.get(session_key),
-                addressed=_v3_addressed_of(event),
-                proactive=_v3_proactive_of(p, session_key),
-            )
+        if _v3 is not None and _v3.accepting:
+            try:
+                from sylanne_alpha.v2core.lexicon import read_signals
+
+                _v3_platform = _v3_platform_of(event)
+                _v3_origin = getattr(event, "unified_msg_origin", None)
+                _v3_signals = read_signals(str(message_text or "")[:4096])
+                _v3.ensure_session(
+                    plugin=p,
+                    session_key=session_key,
+                    platform_id=_v3_platform,
+                    unified_msg_origin=_v3_origin,
+                )
+                _v3.capture_request(
+                    session_key=session_key,
+                    platform_id=_v3_platform,
+                    unified_msg_origin=_v3_origin,
+                    message_id=_v3_message_id_of(event),
+                    text_length=len(message_text or ""),
+                    history_present=history_depth > 0,
+                    gap_seconds=gap_seconds,
+                    body=p._store.last_injected_states.get(session_key),
+                    addressed=_v3_addressed_of(event),
+                    proactive=_v3_proactive_of(p, session_key),
+                    text_warm=float(_v3_signals.warm),
+                    text_cold=float(_v3_signals.cold),
+                    text_distress=float(_v3_signals.distress),
+                    text_question=bool(_v3_signals.question),
+                    text_exclaim=float(_v3_signals.exclaim),
+                    text_punct=float(_v3_signals.punct),
+                    text_valence_cue=float(_v3_signals.valence_cue),
+                    text_engagement_cue=float(_v3_signals.engagement_cue),
+                    sender_id=_v3_sender_of(event),
+                    is_group=_v3_is_group_of(event),
+                )
+            except Exception as exc:  # noqa: BLE001 - v3 must never break the v2 request
+                logger.debug(f"Sylanne v3 shadow request projection skipped: {exc}")
 
         # Step 5: 组装最终 prompt
         self._assemble_final_prompt(
@@ -1398,6 +1437,16 @@ class LLMRequestPipeline:
             memory_fragment=memory_fragment,
             base_system_prompt_len=_pristine_sys_len,
             hajide=hajide,
+        )
+
+        # Step 5.1: 同一次主回复调用内，请模型自行标注自然语义节拍。仅在实时
+        # 拦截已接管且 AstrBot 明确关闭 streaming 时启用；nonce 写进 event extras
+        # 供响应侧相关联地解析/清洗，不新增 provider 或第二次 LLM 调用。
+        self._inject_semantic_beat_contract(
+            event,
+            request,
+            realtime_enabled=realtime_enabled,
+            intercept=intercept,
         )
 
         # Step 5b 已废止（fix/context-integrity，2026-07）：曾在此处对低信息
@@ -1426,6 +1475,47 @@ class LLMRequestPipeline:
     # ------------------------------------------------------------------
     # _clean_incoming_message
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _inject_semantic_beat_contract(
+        event: Any,
+        request: Any,
+        *,
+        realtime_enabled: bool,
+        intercept: bool,
+    ) -> bool:
+        """Append a turn-scoped semantic-beat contract on the safe takeover path.
+
+        The round-trip extras check is deliberate: without a retrievable nonce,
+        response-side code could not distinguish plugin-owned markers from user
+        text, so the contract must not be emitted.
+        """
+
+        if not realtime_enabled or not intercept or request is None:
+            return False
+
+        get_extra = getattr(event, "get_extra", None)
+        set_extra = getattr(event, "set_extra", None)
+        if not callable(get_extra) or not callable(set_extra):
+            return False
+
+        try:
+            if get_extra("enable_streaming") is not False:
+                return False
+
+            nonce = new_semantic_nonce()
+            set_extra(SEMANTIC_BEAT_NONCE_EXTRA, nonce)
+            if get_extra(SEMANTIC_BEAT_NONCE_EXTRA) != nonce:
+                return False
+
+            contract = semantic_beat_system_contract(nonce)
+            system_prompt = str(getattr(request, "system_prompt", "") or "")
+            request.system_prompt = (
+                f"{system_prompt}\n{contract}" if system_prompt else contract
+            )
+        except Exception:
+            return False
+        return True
 
     @staticmethod
     def _stream_first_do_first(
@@ -1790,12 +1880,9 @@ class LLMRequestPipeline:
             current_warmth = host.kernel.computation.engine.observe().get("warmth", 0.0)
             query_embedding = None
             enabled = bool(p._config.get("sylanne_alpha_embedding_memory_enabled"))
-            provider_id = str(
-                p._config.get("sylanne_alpha_embedding_memory_provider_id") or ""
-            )
-            if enabled and provider_id:
+            if enabled:
                 try:
-                    provider = p._get_embedding_provider(provider_id)
+                    provider = await self._embedding_provider_if_enabled()
                     if provider:
                         query_embedding = await provider.get_embedding(
                             message_text[:100]
@@ -2117,6 +2204,8 @@ class LLMRequestPipeline:
         message_text: str,
         gap_seconds: float,
         realtime_enabled: bool,
+        *,
+        umo: str | None = None,
     ) -> str:
         """从计算栈构建情感/关系状态信号片段。
 
@@ -2144,8 +2233,11 @@ class LLMRequestPipeline:
         fast_enabled = p._cfg_bool("sylanne_alpha_assessor_llm_enabled")
         if fast_enabled and message_text and realtime_enabled:
             try:
+                async def _current_assessor_call(prompt: str) -> str:
+                    return await self._assessor_llm_call(prompt, umo=umo)
+
                 fast_assessment = await p._async_assessor.assess_fast(
-                    message_text, self._assessor_llm_call
+                    message_text, _current_assessor_call
                 )
             except Exception as e:
                 logger.warning(f"Sylanne fast assessment: {e}", exc_info=True)
@@ -2999,12 +3091,9 @@ class LLMRequestPipeline:
             embedding_enabled = bool(
                 p._config.get("sylanne_alpha_embedding_memory_enabled")
             )
-            embedding_provider_id = str(
-                p._config.get("sylanne_alpha_embedding_memory_provider_id") or ""
-            )
-            if embedding_enabled and embedding_provider_id:
+            if embedding_enabled:
                 try:
-                    provider = p._get_embedding_provider(embedding_provider_id)
+                    provider = await self._embedding_provider_if_enabled()
                     if provider:
                         vec = await provider.get_embedding(summary[:100])
                         if vec:
@@ -3142,11 +3231,8 @@ class LLMRequestPipeline:
             embedding_enabled = bool(
                 p._config.get("sylanne_alpha_embedding_memory_enabled")
             )
-            embedding_provider_id = str(
-                p._config.get("sylanne_alpha_embedding_memory_provider_id") or ""
-            )
-            if embedding_enabled and embedding_provider_id:
-                provider = p._get_embedding_provider(embedding_provider_id)
+            if embedding_enabled:
+                provider = await self._embedding_provider_if_enabled()
                 if provider:
                     for item in l1_items:
                         if item.id in confirmed_ids and item.embedding is None:
@@ -3247,47 +3333,95 @@ class LLMRequestPipeline:
     # Generic LLM call helper + specialized wrappers
     # ------------------------------------------------------------------
 
+    async def _embedding_provider_if_enabled(self) -> Any | None:
+        """Resolve embedding provider only after the existing memory gate is on."""
+
+        p = self._p
+        config = getattr(p, "_config", None) or getattr(p, "config", None) or {}
+        if not bool(config.get("sylanne_alpha_embedding_memory_enabled")):
+            return None
+        context = getattr(p, "context", None)
+        if context is None:
+            return None
+        try:
+            resolution = await resolve_embedding_provider(
+                config=config,
+                context=context,
+            )
+        except (TypeError, ValueError):
+            return None
+        return resolution.provider
+
     async def _generic_llm_call(
         self,
         prompt: str,
-        provider_config_keys: list[str],
+        provider_config_keys: list[str] | None = None,
         max_tokens: int | None = None,
         temperature: float = 0.0,
         retries: int = 1,
+        feature: ProviderFeature | str | None = None,
+        umo: str | None = None,
     ) -> str:
-        """通用 LLM 调用：按 config key 优先级查找 provider 并执行 text_chat。
+        """统一执行文本 LLM 调用，同时兼容旧 provider-key 调用接口。
 
         Args:
             prompt: 发送给 LLM 的 prompt 文本。
-            provider_config_keys: 配置键列表，按优先级从高到低查找 provider_id。
+            provider_config_keys: 旧接口的配置键优先级；未传 ``feature`` 时使用。
             max_tokens: 最大输出 token 数，None 表示不限制。
             temperature: 采样温度。
             retries: 最大尝试次数（含首次）。
+            feature: 中央路由的能力类型，优先使用高级覆盖→辅助→当前聊天。
+            umo: 可选会话来源，用于解析当前会话的聊天 provider。
 
         Returns:
             LLM 返回的文本，失败返回空字符串。
         """
         p = self._p
-        provider_id = ""
-        for key in provider_config_keys:
-            provider_id = str(p._config.get(key) or "")
-            if provider_id:
-                break
-        if not provider_id:
+        config = getattr(p, "_config", None) or getattr(p, "config", None) or {}
+        context = getattr(p, "context", None)
+        if context is None:
             return ""
-        context = p.context
-        if not hasattr(context, "get_provider_by_id"):
-            return ""
-        provider = context.get_provider_by_id(provider_id)
+
+        provider: Any = None
+        if feature is not None:
+            try:
+                resolution = await resolve_text_provider(
+                    feature=feature,
+                    config=config,
+                    context=context,
+                    umo=umo,
+                )
+                provider = resolution.provider
+            except (TypeError, ValueError):
+                return ""
+        else:
+            provider_id = ""
+            for key in provider_config_keys or ():
+                provider_id = str(config.get(key) or "").strip()
+                if provider_id:
+                    break
+            if not provider_id:
+                return ""
+            getter = getattr(context, "get_provider_by_id", None)
+            if not callable(getter):
+                return ""
+            try:
+                provider = getter(provider_id)
+                if inspect.isawaitable(provider):
+                    provider = await provider
+            except Exception:
+                return ""
         if provider is None:
             return ""
 
         for attempt in range(retries):
             try:
-                kwargs: dict[str, Any] = {"prompt": prompt, "temperature": temperature}
-                if max_tokens is not None:
-                    kwargs["max_tokens"] = max_tokens
-                resp = await provider.text_chat(**kwargs)
+                resp = await call_text_provider_once(
+                    provider,
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
                 result = str(getattr(resp, "completion_text", "") or "")
                 if is_content_filter_refusal(result):
                     return ""
@@ -3296,19 +3430,12 @@ class LLMRequestPipeline:
                 # For single-retry calls, return whatever we got (even short)
                 if retries == 1:
                     return result
-            except TypeError:
-                # Provider doesn't support max_tokens/temperature kwargs -- retry bare
-                try:
-                    resp = await provider.text_chat(prompt=prompt)
-                    result = str(getattr(resp, "completion_text", "") or "")
-                    if is_content_filter_refusal(result):
-                        return ""
-                    if result and len(result.strip()) >= 4:
-                        return result
-                    if retries == 1:
-                        return result
-                except Exception as e:
-                    logger.debug(f"Sylanne skip: {e}")
+            except TypeError as e:
+                # A provider may raise TypeError after dispatching a paid
+                # request.  Signature compatibility is handled locally by
+                # call_text_provider_once, so this error is never retried.
+                logger.debug(f"Sylanne skip: {e}")
+                return ""
             except Exception as e:
                 logger.debug(f"Sylanne skip: {e}")
             if attempt < retries - 1:
@@ -3326,43 +3453,38 @@ class LLMRequestPipeline:
             return 1024
         return val if val > 0 else 1024
 
-    async def _assessor_llm_call(self, prompt: str) -> str:
+    async def _assessor_llm_call(
+        self,
+        prompt: str,
+        *,
+        umo: str | None = None,
+    ) -> str:
         """调用配置的 LLM provider 执行快速语义评估（max_tokens 可配置，默认 1024）。"""
         return await self._generic_llm_call(
             prompt,
-            provider_config_keys=[
-                "sylanne_alpha_assessor_provider_id",
-                "emotion_provider_id",
-            ],
             max_tokens=self._assessor_max_tokens(),
             temperature=0.0,
+            feature=ProviderFeature.ASSESSOR,
+            umo=umo,
         )
 
     async def _main_assessor_llm_call(self, prompt: str) -> str:
         """调用配置的 LLM provider 执行主（深度）语义评估（max_tokens 可配置，默认 1024）。"""
         return await self._generic_llm_call(
             prompt,
-            provider_config_keys=[
-                "sylanne_alpha_main_assessor_provider_id",
-                "sylanne_alpha_assessor_provider_id",
-                "emotion_provider_id",
-            ],
             max_tokens=self._assessor_max_tokens(),
             temperature=0.0,
+            feature=ProviderFeature.MAIN_ASSESSOR,
         )
 
     async def _summarizer_llm_call(self, prompt: str) -> str:
         """调用 LLM 执行摘要生成，不限制 token 数量。带重试（最多 2 次）。"""
         return await self._generic_llm_call(
             prompt,
-            provider_config_keys=[
-                "sylanne_alpha_main_assessor_provider_id",
-                "sylanne_alpha_assessor_provider_id",
-                "emotion_provider_id",
-            ],
             max_tokens=None,
             temperature=0.0,
             retries=2,
+            feature=ProviderFeature.MAIN_ASSESSOR,
         )
 
     # ------------------------------------------------------------------
@@ -3377,26 +3499,24 @@ class LLMRequestPipeline:
         告警（首次 + 每 N 次重发），让故障可见。返回契约不变：失败仍返回空串。
         """
         p = self._p
-        provider_id = str(
-            p._config.get("sylanne_alpha_life_simulation_provider_id") or ""
+        config = getattr(p, "_config", None) or getattr(p, "config", None) or {}
+        context = getattr(p, "context", None)
+        if context is None:
+            self._life_sim_warn(
+                "no_provider_api", "运行环境无 provider context，生活模拟 LLM 调用降级为空"
+            )
+            return ""
+
+        resolution = await resolve_text_provider(
+            feature=ProviderFeature.LIFE,
+            config=config,
+            context=context,
         )
-        if not provider_id:
-            self._life_sim_warn(
-                "provider_id_empty",
-                "未配置 sylanne_alpha_life_simulation_provider_id（启用了生活模拟却没选 Provider）",
-            )
-            return ""
-        context = p.context
-        if not hasattr(context, "get_provider_by_id"):
-            self._life_sim_warn(
-                "no_provider_api", "运行环境无 get_provider_by_id 接口，生活模拟 LLM 调用降级为空"
-            )
-            return ""
-        provider = context.get_provider_by_id(provider_id)
+        provider = resolution.provider
         if provider is None:
             self._life_sim_warn(
-                "provider_missing",
-                f"provider_id={provider_id!r} 解析不到 provider（可能已删除或改名）",
+                resolution.reason,
+                f"provider_id={resolution.provider_id!r} 解析失败（{resolution.reason}）",
             )
             return ""
         try:
@@ -3769,18 +3889,6 @@ class LLMRequestPipeline:
         Returns:
             生成的消息文本（最多 200 字），失败返回空字符串。
         """
-        p = self._p
-        provider_id = str(
-            p._config.get("sylanne_alpha_life_simulation_provider_id") or ""
-        )
-        if not provider_id:
-            return ""
-        context = p.context
-        if not hasattr(context, "get_provider_by_id"):
-            return ""
-        provider = context.get_provider_by_id(provider_id)
-        if provider is None:
-            return ""
         prompt = (
             f"你是 Sylanne，一个有自己生活的角色。你刚刚经历了一件事想和朋友分享。\n"
             f"事件：{reason}\n心情：{mood}\n"
@@ -3788,8 +3896,12 @@ class LLMRequestPipeline:
             f"直接输出消息内容，不要加任何前缀。"
         )
         try:
-            resp = await provider.text_chat(prompt=prompt)
-            text = str(getattr(resp, "completion_text", "") or "").strip()
+            text = (
+                await self._generic_llm_call(
+                    prompt,
+                    feature=ProviderFeature.LIFE,
+                )
+            ).strip()
             return text[:200] if text else ""
         except Exception:
             return ""

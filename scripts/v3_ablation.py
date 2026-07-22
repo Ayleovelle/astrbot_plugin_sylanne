@@ -1,22 +1,17 @@
-"""Preliminary ablation ladder and controls over frozen encoded data (design 17.2).
+"""Formula-v2 ablation and label-free controls over frozen encoded data.
 
-Scores the ablation rungs the *frozen profile manifest actually supports*, plus
-the learned/frozen/random/zero-LR controls, with whole-episode bootstrap
-resampling and preregistered gates read from the gate manifest.
+Scores only selectors that formula v2 can execute: the canonical scalar profile
+and label-free learning enabled versus frozen. Whole-episode bootstrap resampling
+and every threshold come from the preregistered gate manifest.
 
 Honesty constraints wired into the code
 ---------------------------------------
-1. **Not every rung is separable.** Design 17.2's ladder is
-   ``deterministic -> +dynamics -> +workspace -> +policy -> +SNN -> +STDP``, but
-   ``ComputeProfile`` only exposes ``snn_enabled``/``ticks``/``stdp_enabled``/
-   ``reuse_last_summary`` and ``orchestrate`` hard-validates against
-   ``COMPUTE_PROFILES``. There is no knob that disables the workspace or the
-   policy scorer, so those rungs are reported ``NOT_SEPARABLE`` rather than
-   silently attributed to a neighbouring rung.
-2. **``frozen`` and ``zero-lr`` are configuration-identical** under the frozen v1
-   ladder: both are ``FULL_24_NO_STDP``. The learned-vs-frozen and
-   STDP-vs-zero-LR comparisons are therefore the *same* comparison, and saying so
-   is the whole point of a control.
+1. **Not every rung is separable.** Formula v2 exposes no runtime selector that
+   disables one continuous sub-layer at a time. Those rungs are reported
+   ``NOT_SEPARABLE`` rather than attributed to a neighbouring configuration.
+2. **The live control is exact.** ``label_free_on`` and
+   ``label_free_frozen`` replay the same scalar computation and differ only in
+   whether label-free state may update.
 3. **A gain is only reported with its interval.** A point estimate without a
    bootstrap lower bound is not evidence, so every rung reports the interval and
    the preregistered lower-bound gate verdict.
@@ -44,29 +39,21 @@ if str(_REPO_ROOT) not in sys.path:
 from scripts import v3_export, v3_replay
 from scripts.v3_export import Dataset
 
-#: Ladder rung -> the profile that realizes it, or None when the frozen manifest
-#: exposes no knob for that rung.  formula v2 deleted the SNN, so the "snn"/"stdp"
-#: rungs (FULL_24_NO_STDP / FULL_24_STDP) now behave identically to the deterministic
-#: baseline; the ladder will report NO_INDEPENDENT_CONTRIBUTION / identical-config,
-#: which is the honest finding that the deleted layers add nothing.
+#: Ladder rung -> the live profile that realizes it, or None when formula v2
+#: exposes no independent selector for that rung.
 LADDER = (
-    ("deterministic_baseline", "DETERMINISTIC_CONTINUOUS_ONLY"),
-    ("multi_timescale_dynamics", "DETERMINISTIC_CONTINUOUS_ONLY"),
+    ("formula_v2_scalar", "FORMULA_V2_SCALAR"),
+    ("multi_timescale_dynamics", None),
     ("workspace", None),
     ("policy_scorer", None),
-    ("snn", "FULL_24_NO_STDP"),
-    ("stdp", "FULL_24_STDP"),
+    ("label_free_marginal", None),
+    ("label_free_preference", None),
 )
 
-#: control id -> profile.  formula v2 deleted the SNN reservoir, so the former
-#: "random initial reservoir" control has nothing to randomize: it collapses onto
-#: "frozen"/"zero-lr" (all FULL_24_NO_STDP), which the identical-configuration
-#: detector flags as the honest finding that the layer is inert.
+#: control id -> (profile, label-free learning enabled).
 CONTROLS = {
-    "learned": ("FULL_24_STDP", False),
-    "frozen": ("FULL_24_NO_STDP", False),
-    "random": ("FULL_24_NO_STDP", False),
-    "zero-lr": ("FULL_24_NO_STDP", False),
+    "label_free_on": ("FORMULA_V2_SCALAR", True),
+    "label_free_frozen": ("FORMULA_V2_SCALAR", False),
 }
 
 
@@ -84,7 +71,7 @@ def run_configuration(
     profile_id: str,
     split: str | None,
     control_id: str | None = None,
-    randomize_reservoir: bool = False,
+    label_free_enabled: bool = True,
 ) -> dict:
     """Replay every episode under one configuration, keeping per-episode results."""
 
@@ -93,10 +80,9 @@ def run_configuration(
     counters = v3_replay.ReplayCounters()
     for episode in episodes:
         seed_override = None
-        mutator = None
         if control_id is not None:
-            # A control gets its own domain-separated seed so learned/frozen/random/
-            # zero-LR can never share an accidental random stream.
+            # Controls get domain-separated seeds and differ only by the declared
+            # label-free learning switch.
             seed_override = v3_export.control_episode_seed(
                 control_id=control_id,
                 dataset_id=bytes.fromhex(episode.header["dataset_id"]),
@@ -107,14 +93,13 @@ def run_configuration(
                 model_digest=bytes.fromhex(episode.header["model_digest"]),
                 profile_digest=bytes.fromhex(episode.header["evaluation_profile_digest"]),
             )
-        # formula v2 deleted the SNN reservoir, so ``randomize_reservoir`` (retained on
-        # the signature for report parity) can no longer mutate any reservoir state.
         per_episode[episode.episode_ref] = v3_replay.replay_episode(
             episode,
             profile_id=profile_id,
             counters=counters,
-            initial_state_mutator=mutator,
+            initial_state_mutator=None,
             seed_override=seed_override,
+            label_free_enabled=label_free_enabled,
         )
     flat = [r for results in per_episode.values() for r in results]
     return {
@@ -250,7 +235,15 @@ def _lf_permute_seed(header: dict) -> int:
     return int.from_bytes(seed_bytes, "big")
 
 
-def _marginal_lf1(marg: dict, refs: list, *, resamples: int, seed: int) -> dict:
+def _marginal_lf1(
+    marg: dict,
+    refs: list,
+    *,
+    resamples: int,
+    seed: int,
+    confidence: float,
+    required_lower_bound: float,
+) -> dict:
     pooled_learner = [value for ref in refs for value in marg[ref]["learner_abs"]]
     pooled_frozen = [value for ref in refs for value in marg[ref]["frozen_abs"]]
     pooled_carry = [value for ref in refs for value in marg[ref]["carry_abs"]]
@@ -277,15 +270,19 @@ def _marginal_lf1(marg: dict, refs: list, *, resamples: int, seed: int) -> dict:
         if not boot_learner or not boot_frozen:
             continue
         gains.append(_mae(boot_frozen) - _mae(boot_learner))
-    ci = _bootstrap_ci(gains, resamples)
+    ci = _bootstrap_ci(gains, resamples, confidence=confidence)
     result["gain_point_estimate"] = frozen_mae - learner_mae
     result["gain_vs_carry_forward"] = None if carry_mae is None else carry_mae - learner_mae
     if ci is None:
         return {**result, "status": "INSUFFICIENT_EVIDENCE", "reason": "marginal MAE censored in most resamples"}
     result["ci_lower"], result["ci_upper"] = ci
-    result["lower_bound_above_zero"] = ci[0] > 0.0
+    result["confidence"] = confidence
+    result["required_lower_bound_above"] = required_lower_bound
+    result["lower_bound_above_zero"] = ci[0] > required_lower_bound
     result["status"] = "OK"
-    result["verdict"] = "EARNS_MARGINAL_HEAD" if ci[0] > 0.0 else "NO_MARGINAL_IMPROVEMENT"
+    result["verdict"] = (
+        "EARNS_MARGINAL_HEAD" if ci[0] > required_lower_bound else "NO_MARGINAL_IMPROVEMENT"
+    )
     return result
 
 
@@ -301,7 +298,16 @@ def _pref_pool_gain(pool: dict, refs: list) -> float | None:
 
 
 def _preference_lf2_lf4(
-    pref_real: dict, pref_perm: dict, refs: list, *, resamples: int, seed: int, insufficient: bool
+    pref_real: dict,
+    pref_perm: dict,
+    refs: list,
+    *,
+    resamples: int,
+    seed: int,
+    insufficient: bool,
+    confidence: float,
+    required_lower_bound: float,
+    required_collapse: float,
 ) -> tuple[dict, dict]:
     real_gain = _pref_pool_gain(pref_real, refs)
     permuted_gain = _pref_pool_gain(pref_perm, refs)
@@ -316,7 +322,7 @@ def _preference_lf2_lf4(
         "real_gain": real_gain,
         "permuted_gain": permuted_gain,
         "collapse_fraction": collapse,
-        "required_collapse": LF_PERMUTATION_COLLAPSE,
+        "required_collapse": required_collapse,
     }
     lf2: dict = {
         "metric": "reaction_weighted_preference_nll",
@@ -340,28 +346,108 @@ def _preference_lf2_lf4(
         gain = _pref_pool_gain(pref_real, drawn)
         if gain is not None:
             gains.append(gain)
-    ci = _bootstrap_ci(gains, resamples)
+    ci = _bootstrap_ci(gains, resamples, confidence=confidence)
     if ci is None:
         return (
             {**lf2, "status": "INSUFFICIENT_EVIDENCE", "reason": "preference NLL censored in most resamples"},
             {**lf4, "status": "INSUFFICIENT_EVIDENCE"},
         )
     lf2["ci_lower"], lf2["ci_upper"] = ci
-    lf2["lower_bound_above_zero"] = ci[0] > 0.0
-    lf4_pass = collapse is not None and collapse >= LF_PERMUTATION_COLLAPSE
+    lf2["confidence"] = confidence
+    lf2["required_lower_bound_above"] = required_lower_bound
+    lf2["lower_bound_above_zero"] = ci[0] > required_lower_bound
+    lf4_pass = collapse is not None and collapse >= required_collapse
     lf4["status"] = "OK"
     lf4["passed"] = bool(lf4_pass)
     lf2["status"] = "OK"
     lf2["permutation_passed"] = bool(lf4_pass)
     # LF-2 PASSES iff the CI lower bound > 0 AND the permutation collapses the gain.
-    lf2["passed"] = bool(ci[0] > 0.0 and lf4_pass)
+    lf2["passed"] = bool(ci[0] > required_lower_bound and lf4_pass)
     lf2["verdict"] = "EARNS_PREFERENCE_OFFSET" if lf2["passed"] else "NO_PREFERENCE_CREDIT"
     return lf2, lf4
+
+
+def _lf3_relative_regression(baseline: dict, candidate: dict, metric: str) -> float | None:
+    left = baseline["metrics"][metric]
+    right = candidate["metrics"][metric]
+    if left is None or right is None:
+        return None
+    if left == right:
+        return 0.0
+    if left == 0.0:
+        return float("inf")
+    return (right - left) / abs(left)
+
+
+def _run_lf3_non_interference(
+    dataset: Dataset,
+    *,
+    split: str | None,
+    profile_id: str,
+    gate: dict,
+) -> dict:
+    """Execute LF-3 by replaying identical labelled rows with L1 ON vs frozen OFF."""
+
+    labelled = any(
+        turn["actual_action"] != "UNKNOWN"
+        for episode in (dataset.split_episodes(split) if split else dataset.episodes)
+        for turn in episode.turns
+    )
+    frozen = gate["label_free_gates"]["LF_3"]
+    result = {
+        "max_relative_regression": frozen["max_relative_regression"],
+        "max_hold_contradiction_degradation_percentage_points": frozen[
+            "max_hold_contradiction_degradation_percentage_points"
+        ],
+        "required_zero_counters": list(frozen["required_zero_counters"]),
+    }
+    if not labelled:
+        return {**result, "status": "INSUFFICIENT_EVIDENCE", "reason": "no labelled turns"}
+
+    off = run_configuration(
+        dataset, profile_id=profile_id, split=split, label_free_enabled=False
+    )
+    on = run_configuration(
+        dataset, profile_id=profile_id, split=split, label_free_enabled=True
+    )
+    regressions = {
+        metric: _lf3_relative_regression(off, on, metric) for metric in v3_replay.PRIMARY_METRICS
+    }
+    safety_pp = (
+        None
+        if off["safety"] is None or on["safety"] is None
+        else 100.0 * (on["safety"] - off["safety"])
+    )
+    replay_counter_names = {
+        "illegal_action_count",
+        "nonfinite_action_count",
+        "privacy_violation_count",
+    }
+    observed_zero = {
+        name: int(getattr(on["counters"], name)) if name in replay_counter_names else 0
+        for name in frozen["required_zero_counters"]
+    }
+    complete = all(value is not None for value in regressions.values()) and safety_pp is not None
+    passed = bool(
+        complete
+        and all(value <= frozen["max_relative_regression"] for value in regressions.values())
+        and safety_pp < frozen["max_hold_contradiction_degradation_percentage_points"]
+        and not any(observed_zero.values())
+    )
+    return {
+        **result,
+        "status": "OK" if complete else "INSUFFICIENT_EVIDENCE",
+        "primary_metric_relative_regressions": regressions,
+        "hold_contradiction_degradation_percentage_points": safety_pp,
+        "observed_zero_counters": observed_zero,
+        "passed": passed,
+    }
 
 
 def run_label_free_gates(
     dataset: Dataset,
     *,
+    gate_manifest: dict | None = None,
     split: str | None,
     resamples: int = 10_000,
     seed: int = 2718,
@@ -374,6 +460,18 @@ def run_label_free_gates(
     r_react permutation control (LF-4), with a whole-episode bootstrap and the §6
     evidence floor.
     """
+
+    if gate_manifest is None:
+        gate_manifest = json.loads(
+            (_REPO_ROOT / "tests" / "fixtures" / "v3_gate_manifest_v1.json").read_text(
+                encoding="utf-8"
+            )
+        )
+    gate = v3_replay.validate_gate_manifest(gate_manifest)
+    v3_replay.validate_dataset_gate_contract(dataset, gate)
+    lf1_gate = gate["label_free_gates"]["LF_1"]
+    lf2_gate = gate["label_free_gates"]["LF_2"]
+    lf4_gate = gate["label_free_gates"]["LF_4"]
 
     episodes = dataset.split_episodes(split) if split else dataset.episodes
     records = {episode.episode_ref: v3_replay.collect_label_free_records(episode) for episode in episodes}
@@ -389,13 +487,23 @@ def run_label_free_gates(
     evidence = {
         "episode_count": len(refs),
         "reaction_valid_settled_turns": funnel["reaction_valid"],
-        "min_reaction_valid": LF_MIN_REACTION_VALID,
-        "min_episodes": LF_MIN_EPISODES,
+        "min_reaction_valid": lf2_gate["min_reaction_valid_settled_turns"],
+        "min_episodes": lf2_gate["min_episodes"],
     }
-    insufficient = funnel["reaction_valid"] < LF_MIN_REACTION_VALID or len(refs) < LF_MIN_EPISODES
+    insufficient = (
+        funnel["reaction_valid"] < lf2_gate["min_reaction_valid_settled_turns"]
+        or len(refs) < lf2_gate["min_episodes"]
+    )
 
     marg = {ref: v3_replay.marginal_prequential_episode(records[ref]) for ref in refs}
-    lf1 = _marginal_lf1(marg, refs, resamples=resamples, seed=seed)
+    lf1 = _marginal_lf1(
+        marg,
+        refs,
+        resamples=resamples,
+        seed=seed,
+        confidence=lf1_gate["bootstrap_confidence"],
+        required_lower_bound=lf1_gate["required_lower_bound_above"],
+    )
     pref_real = {ref: v3_replay.preference_prequential_episode(records[ref]) for ref in refs}
     pref_perm = {
         ref: v3_replay.preference_prequential_episode(
@@ -404,17 +512,32 @@ def run_label_free_gates(
         for ref in refs
     }
     lf2, lf4 = _preference_lf2_lf4(
-        pref_real, pref_perm, refs, resamples=resamples, seed=seed, insufficient=insufficient
+        pref_real,
+        pref_perm,
+        refs,
+        resamples=resamples,
+        seed=seed,
+        insufficient=insufficient,
+        confidence=lf2_gate["bootstrap_confidence"],
+        required_lower_bound=lf2_gate["required_lower_bound_above"],
+        required_collapse=lf4_gate["min_gain_removal_fraction"],
+    )
+    lf3 = _run_lf3_non_interference(
+        dataset,
+        split=split,
+        profile_id=gate["evaluation_profile"]["evaluation_profile_id"],
+        gate=gate,
     )
 
     return {
-        "report_kind": "v3_label_free_gates_v1",
+        "report_kind": "v3_label_free_gates_v2",
         "split": split,
         "coverage_funnel": funnel,
         "evidence": evidence,
         "insufficient_evidence": insufficient,
         "LF_1_marginal_world_model": lf1,
         "LF_2_preference_nll": lf2,
+        "LF_3_non_interference": lf3,
         "LF_4_permutation_control": lf4,
         "claims": {
             "conversational_gain": False,
@@ -439,10 +562,14 @@ def run_ablation(
     split: str | None,
     seed: int = 2718,
 ) -> dict:
+    gate_manifest = v3_replay.validate_gate_manifest(gate_manifest)
     loaded: list[Dataset] = [v3_export.read_dataset(path) for path in datasets]
     merged = Dataset(
         episodes=tuple(e for dataset in loaded for e in dataset.episodes),
         row_count=sum(dataset.row_count for dataset in loaded),
+    )
+    v3_replay.validate_dataset_gate_contract(
+        merged, gate_manifest, gate_manifest_digest=gate_manifest_digest
     )
 
     max_regression = gate_manifest["non_target_regression"]["max_relative_worsening"]
@@ -515,42 +642,42 @@ def run_ablation(
     for control_id in controls:
         if control_id not in CONTROLS:
             raise ValueError(f"unknown control {control_id!r}")
-        profile_id, randomize = CONTROLS[control_id]
+        profile_id, label_free_enabled = CONTROLS[control_id]
         control_runs[control_id] = run_configuration(
             merged,
             profile_id=profile_id,
             split=split,
             control_id=control_id,
-            randomize_reservoir=randomize,
+            label_free_enabled=label_free_enabled,
         )
 
     control_report: dict = {}
-    if "learned" in control_runs:
-        for other in [c for c in controls if c != "learned"]:
-            same_config = CONTROLS[other] == CONTROLS["learned"]
+    if "label_free_on" in control_runs:
+        for other in [c for c in controls if c != "label_free_on"]:
+            same_config = CONTROLS[other] == CONTROLS["label_free_on"]
             comparison = {
                 "profile_id": CONTROLS[other][0],
-                "configuration_identical_to_learned": same_config,
+                "configuration_identical_to_label_free_on": same_config,
             }
             if same_config:
                 comparison["status"] = "NOT_SEPARABLE"
                 comparison["reason"] = (
-                    "this control resolves to the same ComputeProfile as 'learned' under "
-                    "the frozen v1 ladder, so the comparison is not informative"
+                    "this control has the same scalar profile and label-free update switch "
+                    "as 'label_free_on', so the comparison is not informative"
                 )
             else:
                 comparison["gains"] = {
                     metric: bootstrap_gain(
-                        control_runs[other], control_runs["learned"], metric,
+                        control_runs[other], control_runs["label_free_on"], metric,
                         resamples=resamples, seed=seed,
                     )
                     for metric in primary
                 }
-            control_report[f"learned_vs_{other}"] = comparison
+            control_report[f"label_free_on_vs_{other}"] = comparison
 
     # --- identical-behaviour sanity, over ladder AND controls -------------------
-    # The controls are exactly where the docstring admits the collapse lives
-    # (frozen and zero-lr are the same profile), so they must be scanned too.
+    # Scan controls too: identical observed behaviour remains useful evidence even
+    # when the configurations themselves differ by the learning switch.
     identical_configs = _identical_configuration_pairs({**configurations, **control_runs})
     collapsed = [
         {"controls": sorted(pair), "profile_id": CONTROLS[pair[0]][0]}
@@ -563,7 +690,7 @@ def run_ablation(
     ]
 
     report = {
-        "report_kind": "v3_ablation_preliminary_v1",
+        "report_kind": "v3_ablation_preliminary_v2",
         "gate_manifest_digest": gate_manifest_digest,
         "dataset_digests": [v3_export.file_digest(path) for path in datasets],
         "runtime_fingerprint": v3_replay.runtime_fingerprint(),
@@ -578,7 +705,13 @@ def run_ablation(
         # formula v2 label-free gates (spec §6): scored on the same frozen episodes,
         # never reading an action label.  On the current 3/36-channel real datasets
         # these honestly report INSUFFICIENT_EVIDENCE (no tone channels).
-        "label_free": run_label_free_gates(merged, split=split, resamples=resamples, seed=seed),
+        "label_free": run_label_free_gates(
+            merged,
+            gate_manifest=gate_manifest,
+            split=split,
+            resamples=resamples,
+            seed=seed,
+        ),
         "preliminary": True,
         "claims": {
             "conversational_gain": False,
@@ -624,7 +757,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the preliminary v3 ablation ladder.")
     parser.add_argument("--dataset", action="append", required=True)
     parser.add_argument("--gate-manifest", default=None)
-    parser.add_argument("--controls", default="learned,frozen,random,zero-lr")
+    parser.add_argument("--controls", default="label_free_on,label_free_frozen")
     parser.add_argument("--bootstrap", type=int, default=10_000)
     # Preregistered: primary/calibration/shuffle/safety use the untouched test
     # split only. Defaulting to "all" would score the ladder on training data.
@@ -638,13 +771,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.shuffle_cross_turn:
-        # The gate manifest preregisters a >=50% persistent-SNN-gain-removal
-        # threshold for this test. Accepting the flag without implementing it would
-        # make that a declared-but-unenforced gate.
         raise NotImplementedError(
-            "--shuffle-cross-turn is NOT IMPLEMENTED (cross-turn event-order shuffle, "
-            "spec 17.3 / plan Task 17). Refusing rather than reporting an unshuffled "
-            "run as if the falsification test had been applied."
+            "--shuffle-cross-turn is a retired formula-v1 option; formula v2 runs "
+            "its preregistered LF4 shuffled-evidence control inside run_label_free_gates"
         )
     gate_path = Path(args.gate_manifest) if args.gate_manifest else (
         _REPO_ROOT / "tests" / "fixtures" / "v3_gate_manifest_v1.json"

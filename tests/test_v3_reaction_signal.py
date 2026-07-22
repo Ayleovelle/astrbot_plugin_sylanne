@@ -16,9 +16,8 @@ the Slice A contract from ``docs/superpowers/specs/
   baseline deviation afterwards, and the present-term weight renormalization is
   exact for one / two / three terms;
 * the function never takes an Action-typed argument (label-free by construction);
-* the ``labelfree`` manifest block is authored but the digest fold is DEFERRED so
-  ``FORMULA_DIGEST`` stays byte-stable (Slice A must not strand the v1 replay
-  fixture; the bump is coupled to Slice C/D dataset regeneration).
+* the ``labelfree`` manifest block is folded into formula v2 and the digest is
+  pinned to the regenerated replay fixtures and benchmark evidence.
 """
 
 from __future__ import annotations
@@ -511,7 +510,7 @@ def test_labelfree_block_is_folded_into_the_v2_manifest() -> None:
     assert formula.FORMULA_VERSION == "sylanne.v3.formula.v2"
     assert (
         formula.FORMULA_DIGEST
-        == "fb487bc94ac2b21afd45ab8dbbed39c3e0f859fe7a0d395fe3abda47142d8857"
+        == "59fcaf3b2079619827df002a0832627d6d0cdbfdee573388b7a785e2c2de9485"
     )
 
 

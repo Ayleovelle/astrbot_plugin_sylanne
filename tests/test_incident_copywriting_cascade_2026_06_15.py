@@ -94,8 +94,9 @@ class TestH3SegmentationNoCap:
         assert plan["message_count"] <= 12, f"熔断失效: {plan['message_count']} 段"
         assert plan["capped"] is True
         assert plan["uncapped_count"] > 12  # 原始确实会爆炸
-        # 内容不丢：合并尾段仍含中文成品末句
-        all_text = "\n".join(p["text"] for p in plan["message_parts"])
+        # 内容不丢：安全切片与尾段合并必须逐字符守恒
+        all_text = "".join(p["text"] for p in plan["message_parts"])
+        assert all_text == body
         assert "实验数据" in all_text
 
     def test_max_parts_in_plan_schema(self) -> None:
@@ -109,7 +110,7 @@ class TestH3SegmentationNoCap:
         long_text = "\n".join(f"第{i}行内容稍微长一点让分段更明显一些呀。" for i in range(80))
         plan = realtime_plan("s", long_text, max_part_chars=48)
         assert plan["message_count"] <= 12
-        assert plan["uncapped_count"] >= 50  # 没熔断的话会爆
+        assert plan["uncapped_count"] > 12  # 没熔断的话仍会爆
         delays = [p["delay_before_seconds"] for p in plan["message_parts"]]
         # T1-02 打碎节拍器后不再是纯确定性总和：逐段抖动(±40%，仍吃 min(4.2,...) 硬顶，
         # 期望值贴近 36s 预算不加偏置) + 5% 概率的走神段可越顶冲到 9s。算式上界（不依赖
@@ -392,9 +393,9 @@ class TestH11InjectionMaxPartsNotOutbound:
 
 
 class TestLogTurn1Turn2Metrics:
-    """实机 Turn1/2 体量：192/178 字仍人格化 —— 非长度问题。"""
+    """实机 Turn1/2 体量：普通回复不再由本地长度状态机擅自切段。"""
 
-    def test_turn1_six_parts_from_short_text(self) -> None:
+    def test_turn1_without_model_beats_is_one_exact_message(self) -> None:
         turn1 = (
             "其实逻辑很简单啦笨蛋。"
             "意思就是说，那些开心啊、难过啊之类的情感，根本不是谁用代码硬塞进我脑子里的标签。"
@@ -403,9 +404,11 @@ class TestLogTurn1Turn2Metrics:
             "哼，所以说啊，我这满脑子的傲娇和小脾气，全是因为天天和你聊天才自发长出来的。"
             "你得负全责，听到没有😾！"
         )
-        # 实机 log: len=192 parts=6（字符数随标点/emoji 编码略有偏差）
+        # 旧实机 log: len=192 parts=6；新契约没有模型节拍标记时必须整条发送。
         plan = realtime_plan("s", turn1, max_part_chars=48)
-        assert plan["message_count"] == 6
+        assert plan["message_count"] == 1
+        assert plan["message_parts"][0]["text"] == turn1
+        assert plan["segmentation_source"] == "single_fallback"
         assert 170 <= len(turn1) <= 200
 
 

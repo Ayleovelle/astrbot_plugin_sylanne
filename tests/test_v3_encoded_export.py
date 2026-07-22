@@ -93,7 +93,7 @@ def test_every_episode_header_carries_the_frozen_neutral_initial_state(exported)
         # The header state is the canonical neutral state, identical for every episode.
         assert header["initial_state_digest"] == v3_export.neutral_eval_state_digest()
         assert header["pending_credit_censored"] is True
-        assert header["evaluation_profile_id"] == "FULL_24_STDP"
+        assert header["evaluation_profile_id"] == "FORMULA_V2_SCALAR"
         assert header["gate_manifest_digest"] == exported.manifest["gate_manifest_digest"]
         assert len(bytes.fromhex(header["episode_seed"])) == 16  # first 128 bits
 
@@ -412,15 +412,16 @@ def test_control_seed_only_appends_the_framed_control_id() -> None:
     )
     base = b"".join(v3_export.framed(parts[name]) for name in v3_export.EPISODE_SEED_ORDER)
     expected = hashlib.sha256(
-        b"SYL3\x01EVAL\x00" + base + v3_export.framed(b"frozen")
+        b"SYL3\x01EVAL\x00" + base + v3_export.framed(b"label_free_frozen")
     ).digest()[:16]
-    assert v3_export.control_episode_seed(control_id="frozen", **parts) == expected
-    # controls must not collide with the learned stream or with each other
+    assert v3_export.control_episode_seed(control_id="label_free_frozen", **parts) == expected
+    assert v3_export.CONTROL_IDS == ("label_free_on", "label_free_frozen")
+    # controls must not collide with the unmodified stream or with each other
     seeds = {
         v3_export.control_episode_seed(control_id=name, **parts)
-        for name in ("learned", "frozen", "random", "zero-lr")
+        for name in v3_export.CONTROL_IDS
     }
-    assert len(seeds) == 4
+    assert len(seeds) == 2
     assert v3_export.episode_seed(**parts) not in seeds
 
 

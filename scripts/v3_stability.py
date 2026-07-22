@@ -13,19 +13,16 @@ out-of-order, extreme, and malformed turns and checks the declared invariants:
 * no permanent all-speak, all-hold, workspace winner lock, or weight saturation;
 * the same revision advances at most once and a failed transaction leaves state
   byte-identical;
-* action-distribution JS divergence below 0.02 across the K resampling pairs.
+* the formula-v2 scalar profile is the only live computation profile exercised.
 
 **What this gate does NOT claim.** G0 is a synthetic invariant/fault-injection
 gate. It makes no claim about conversational gain, no claim that a learned
 configuration beats a control, and no claim about calibration. Those live behind
 G1/G3/G4 on frozen real data and are reported by name.
 
-**Known limitation, reported rather than hidden.** Design 17.3 asks for K
-resampling at 16/24/32 ticks. The frozen ``COMPUTE_PROFILES`` manifest only
-declares K=16 (``SNN_16_NO_STDP``) and K=24 (``FULL_24_*``), and ``orchestrate``
-hard-validates the profile against that manifest, so K=32 is unreachable through
-the real pipeline. This gate runs the 16<->24 pair and reports K=32 as
-``NOT_IMPLEMENTABLE`` instead of fabricating a number for it.
+Tick-count resampling belonged to the retired formula-v1 subsystem. The legacy
+API remains as a non-executing tombstone, but its profiles and thresholds cannot
+contribute evidence to this formula-v2 gate.
 """
 
 from __future__ import annotations
@@ -95,11 +92,10 @@ SLOW_MAX_STEP = 0.03
 SETTLE_MAX_TURNS = 4000
 POSTERIOR_LOCK_LEVEL = 0.98
 POSTERIOR_LOCK_TURNS = 20
-MAX_JS_DIVERGENCE = 0.02
 RECOVERY_SESSION_FRACTION = 0.999
 
-#: Recovery probes must freeze online learning (design 17.4).
-FROZEN_LEARNING_PROFILE = "FULL_24_NO_STDP"
+#: Formula v2 has one live scalar profile; recovery probes exercise that profile.
+FROZEN_LEARNING_PROFILE = formula.FORMULA_V2_PROFILE_ID
 
 
 class StabilityFailure(RuntimeError):
@@ -210,9 +206,8 @@ class StreamStats:
     accepted: int = 0
     rejected: int = 0
     reject_reasons: dict = field(default_factory=dict)
-    #: Total spikes over the whole stream. A silent reservoir makes every
-    #: SNN-dependent gate (K resampling, learned/frozen/random, STDP/zero-LR)
-    #: pass vacuously, so silence must fail loudly rather than look clean.
+    #: Neutral legacy trace counters retained for trace-schema compatibility.
+    #: Formula-v2 stability verdicts do not consume them.
     total_spikes: int = 0
     max_membrane_voltage: float = 0.0
     min_threshold: float = float("inf")
@@ -231,7 +226,11 @@ class StreamStats:
     out_of_bounds: int = 0
 
 
-def run_stream(seed: int, turns: int, profile_id: str = "FULL_24_STDP") -> StreamStats:
+def run_stream(
+    seed: int,
+    turns: int,
+    profile_id: str = formula.FORMULA_V2_PROFILE_ID,
+) -> StreamStats:
     """Walk a long mixed synthetic stream and record every declared invariant."""
 
     rng = random.Random(seed)
@@ -511,30 +510,13 @@ def k_action_distribution(seed: int, turns: int, profile_id: str) -> dict:
 
 
 def k_divergence_report(seed: int, turns: int) -> dict:
-    """16<->24 JS divergence; K=32 is not reachable through the frozen manifest."""
+    """Retained API tombstone; formula v2 has no tick-count selector to compare."""
 
-    from scripts.v3_replay import js_divergence
-
-    d16 = k_action_distribution(seed, turns, "SNN_16_NO_STDP")
-    d24 = k_action_distribution(seed, turns, "FULL_24_NO_STDP")
-    divergence = js_divergence(d16, d24)
+    del seed, turns
     return {
-        "pairs": {
-            "16_vs_24": {
-                "js_divergence": divergence,
-                "max": MAX_JS_DIVERGENCE,
-                "within_gate": divergence < MAX_JS_DIVERGENCE,
-            },
-            "24_vs_32": {"status": "NOT_IMPLEMENTABLE"},
-            "16_vs_32": {"status": "NOT_IMPLEMENTABLE"},
-        },
-        "k32_note": (
-            "SNN_ALLOWED_TICKS declares (16,24,32) but COMPUTE_PROFILES declares only "
-            "K=16 and K=24; orchestrate() hard-validates the profile against that "
-            "manifest, so K=32 cannot be exercised through the real pipeline. Reported "
-            "rather than fabricated."
-        ),
-        "distributions": {"k16": d16, "k24": d24},
+        "status": "RETIRED_LEGACY_COMPATIBILITY",
+        "live_gate": False,
+        "reason": "formula v2 has no tick-count selector",
     }
 
 
@@ -543,7 +525,7 @@ def k_divergence_report(seed: int, turns: int) -> dict:
 # --------------------------------------------------------------------------- #
 
 
-def evaluate(stats: StreamStats, recoveries: list[dict], k_report: dict) -> tuple[list[str], dict]:
+def evaluate(stats: StreamStats, recoveries: list[dict]) -> tuple[list[str], dict]:
     failures: list[str] = []
     if stats.nonfinite:
         failures.append("nonfinite value observed")
@@ -564,9 +546,6 @@ def evaluate(stats: StreamStats, recoveries: list[dict], k_report: dict) -> tupl
         failures.append("one action dominated more than half the stream consecutively")
     if stats.accepted and stats.max_winner_run > 0.5 * max(stats.accepted, 1):
         failures.append("workspace winner lock")
-    if not k_report["pairs"]["16_vs_24"]["within_gate"]:
-        failures.append("K=16 vs K=24 action-distribution JS divergence exceeds 0.02")
-
     # formula v2 deleted the SNN subsystem: there is no reservoir left to be silent,
     # so the former "zero spikes across the stream" failure is retired -- that defect
     # was resolved by deleting the subsystem rather than by making it fire.
@@ -600,15 +579,18 @@ def evaluate(stats: StreamStats, recoveries: list[dict], k_report: dict) -> tupl
 
 
 def run_gate(seed: int, turns: int, sessions: int = 8, k_turns: int = 400) -> dict:
+    # ``k_turns`` is accepted only for CLI/API compatibility. It cannot select or
+    # score a retired profile in formula-v2 evidence.
+    del k_turns
     stats = run_stream(seed, turns)
     recoveries = [recovery_probe(seed + offset) for offset in range(sessions)]
-    k_report = k_divergence_report(seed, k_turns)
-    failures, recovery_summary = evaluate(stats, recoveries, k_report)
+    failures, recovery_summary = evaluate(stats, recoveries)
 
     report = {
-        "report_kind": "v3_stability_g0_v1",
+        "report_kind": "v3_stability_g0_v2",
         "seed": seed,
         "turns": stats.turns,
+        "evaluation_profile_id": formula.FORMULA_V2_PROFILE_ID,
         "turn_classes": list(TURN_CLASSES),
         "formula_digest": formula.FORMULA_DIGEST,
         "gate_manifest_digest": v3_export.default_gate_manifest_digest(),
@@ -630,7 +612,6 @@ def run_gate(seed: int, turns: int, sessions: int = 8, k_turns: int = 400) -> di
             "nonfinite": stats.nonfinite,
         },
         "recovery": recovery_summary,
-        "k_resampling": k_report,
         "failures": failures,
         "passed": not failures,
         "claims": {
@@ -656,7 +637,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=2718)
     parser.add_argument("--turns", type=int, default=100_000)
     parser.add_argument("--sessions", type=int, default=8)
-    parser.add_argument("--k-turns", type=int, default=400)
+    parser.add_argument("--k-turns", type=int, default=400, help=argparse.SUPPRESS)
     parser.add_argument("--report", required=True)
     return parser
 
@@ -675,7 +656,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "passed": report["passed"],
                 "failures": report["failures"],
                 "recovery": report["recovery"],
-                "k_16_vs_24": report["k_resampling"]["pairs"]["16_vs_24"],
             },
             indent=2,
         )

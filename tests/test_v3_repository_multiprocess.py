@@ -5,6 +5,8 @@ import queue
 import time
 from pathlib import Path
 
+import portalocker
+
 from sylanne_alpha.v3bridge._state_repository import (
     AbsentState,
     CommitPrecondition,
@@ -93,6 +95,41 @@ def _budget_worker(
         output.put(result.value)
 
 
+def _lock_holder(root: str, ready, release, output) -> None:
+    lock_path = Path(root) / ".repo.lock"
+    try:
+        with portalocker.Lock(
+            lock_path,
+            mode="a+b",
+            timeout=1.0,
+            flags=portalocker.LOCK_EX | portalocker.LOCK_NB,
+        ):
+            ready.set()
+            if not release.wait(10.0):
+                output.put(("holder-timeout",))
+                return
+            output.put(("released",))
+    except Exception as exc:  # pragma: no cover - diagnostic worker path
+        output.put(("holder-error", type(exc).__module__, type(exc).__name__, str(exc)))
+
+
+def _lock_timeout_worker(root: str, output) -> None:
+    started = time.monotonic()
+    try:
+        StateRepository(Path(root), lock_timeout_seconds=0.2).acquire_epoch()
+    except Exception as exc:
+        output.put(
+            (
+                "error",
+                type(exc).__module__,
+                type(exc).__name__,
+                time.monotonic() - started,
+            )
+        )
+    else:
+        output.put(("committed", time.monotonic() - started))
+
+
 def _start_and_join(processes: list[multiprocessing.Process]) -> None:
     for process in processes:
         process.start()
@@ -146,6 +183,47 @@ def test_multiprocess_epoch_allocation_is_unique_and_monotonic(tmp_path: Path) -
     epochs = sorted(_drain(output, len(processes)))
     assert epochs == [1, 2, 3, 4]
     assert StateRepository(tmp_path).current_epoch() == 4
+
+
+def test_multiprocess_repository_lock_timeout_is_bounded(tmp_path: Path) -> None:
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    holder_output = context.Queue()
+    contender_output = context.Queue()
+    holder = context.Process(
+        target=_lock_holder,
+        args=(str(tmp_path), ready, release, holder_output),
+    )
+    contender = context.Process(
+        target=_lock_timeout_worker,
+        args=(str(tmp_path), contender_output),
+    )
+
+    holder.start()
+    try:
+        assert ready.wait(5.0), _drain(holder_output, 1)
+        contender.start()
+        contender.join(timeout=3.0)
+        assert not contender.is_alive()
+        assert contender.exitcode == 0
+        outcome = _drain(contender_output, 1)[0]
+        assert outcome[0] == "error"
+        assert outcome[1] == "portalocker.exceptions"
+        assert outcome[2] == "AlreadyLocked"
+        assert 0.1 <= outcome[3] < 2.0
+    finally:
+        release.set()
+        if contender.is_alive():
+            contender.terminate()
+        contender.join(timeout=2.0)
+        holder.join(timeout=5.0)
+        if holder.is_alive():
+            holder.terminate()
+        holder.join(timeout=2.0)
+
+    assert holder.exitcode == 0
+    assert _drain(holder_output, 1) == [("released",)]
 
 
 def test_multiprocess_compare_and_commit_has_exactly_one_winner(tmp_path: Path) -> None:

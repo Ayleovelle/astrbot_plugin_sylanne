@@ -24,7 +24,7 @@ import math
 import platform
 import random
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Sequence
 
@@ -52,7 +52,8 @@ from sylanne_alpha.v3core.learning.outcomes import ekf_transition_update
 from sylanne_alpha.v3core.observation.encoder import project_outcome
 from sylanne_alpha.v3core.observation.models import OutcomeFrame
 from sylanne_alpha.v3core.orchestrator import orchestrate
-from sylanne_alpha.v3core.state.codec import decode_state
+from sylanne_alpha.v3core.state.codec import STATE_CODEC_VERSION, decode_state
+from sylanne_alpha.v3core.state.models import STATE_SCHEMA_VERSION
 
 ACTIONS = ("SPEAK", "HOLD", "CLARIFY", "REACH")
 _EPS = 1e-12
@@ -64,6 +65,135 @@ PRIMARY_METRICS = ("actual_action_log_loss", "actual_action_brier", "next_turn_v
 
 class ReplayError(RuntimeError):
     """Replay refused to produce a number it could not stand behind."""
+
+
+def _gate_error(detail: str) -> ReplayError:
+    return ReplayError(f"formula-v2 gate manifest: {detail}")
+
+
+def validate_gate_manifest(gate_manifest: object) -> dict:
+    """Validate the frozen formula-v2 evaluation contract before scoring.
+
+    The file digest freezes the concrete thresholds.  This validator freezes their
+    *meaning*: a legacy neutral state/profile or a missing LF gate is rejected instead
+    of being silently interpreted with current code.
+    """
+
+    if not isinstance(gate_manifest, dict):
+        raise _gate_error("top level must be an object")
+    try:
+        initial = gate_manifest["initial_state"]
+        profile = gate_manifest["evaluation_profile"]
+        gates = gate_manifest["label_free_gates"]
+    except KeyError as exc:
+        raise _gate_error(f"missing required block {exc.args[0]!r}") from exc
+    if not isinstance(initial, dict) or not isinstance(profile, dict) or not isinstance(gates, dict):
+        raise _gate_error("initial_state, evaluation_profile, and label_free_gates must be objects")
+
+    expected_initial = {
+        "initial_state_id": v3_export.INITIAL_STATE_ID,
+        "state_schema_version": STATE_SCHEMA_VERSION,
+        "state_codec_version": STATE_CODEC_VERSION,
+        "formula_version": formula.FORMULA_VERSION,
+        "initial_state_digest": v3_export.neutral_eval_state_digest(),
+        "pending_outcome": "none",
+        "label_free_state": "all_prior",
+        "boundary_credit": "censored",
+    }
+    for field, expected in expected_initial.items():
+        if initial.get(field) != expected:
+            raise _gate_error(f"initial_state.{field} must equal {expected!r}")
+
+    expected_profile = {
+        "evaluation_profile_id": v3_export.EVALUATION_PROFILE_ID,
+        "evaluation_profile_digest": v3_export.evaluation_profile_digest(),
+        "formula_version": formula.FORMULA_VERSION,
+        "model_revision": formula.ACTION_MODEL_REVISION,
+        "math_backend": "scalar-v1",
+    }
+    for field, expected in expected_profile.items():
+        if profile.get(field) != expected:
+            raise _gate_error(f"evaluation_profile.{field} must equal {expected!r}")
+
+    if set(gates) != {"LF_1", "LF_2", "LF_3", "LF_4"}:
+        raise _gate_error("label_free_gates must freeze exactly LF_1, LF_2, LF_3, and LF_4")
+    for gate_id in ("LF_1", "LF_2", "LF_3", "LF_4"):
+        if not isinstance(gates[gate_id], dict):
+            raise _gate_error(f"label_free_gates.{gate_id} must be an object")
+
+    lf1, lf2, lf3, lf4 = (gates[name] for name in ("LF_1", "LF_2", "LF_3", "LF_4"))
+    if lf1.get("metric") != "marginal_axis_mae" or lf1.get("control") != "frozen_prior_head":
+        raise _gate_error("LF_1 must freeze marginal_axis_mae against frozen_prior_head")
+    if lf1.get("bootstrap_confidence") != 0.95 or lf1.get("required_lower_bound_above") != 0.0:
+        raise _gate_error("LF_1 must freeze the preregistered 95% lower-bound gate")
+    if lf1.get("carry_forward_is_gate") is not False:
+        raise _gate_error("LF_1 carry-forward must be reported but not gated")
+
+    min_reactions = lf2.get("min_reaction_valid_settled_turns")
+    min_episodes = lf2.get("min_episodes")
+    if type(min_reactions) is not int or min_reactions < 1:
+        raise _gate_error("LF_2 min_reaction_valid_settled_turns must be a positive int")
+    if type(min_episodes) is not int or min_episodes < 1:
+        raise _gate_error("LF_2 min_episodes must be a positive int")
+    if lf2.get("metric") != "reaction_weighted_preference_nll":
+        raise _gate_error("LF_2 must freeze reaction_weighted_preference_nll")
+    if lf2.get("control") != "offset_zero_v1_preference":
+        raise _gate_error("LF_2 must freeze the zero-offset preference control")
+    if lf2.get("bootstrap_confidence") != 0.95 or lf2.get("required_lower_bound_above") != 0.0:
+        raise _gate_error("LF_2 must freeze the preregistered 95% lower-bound gate")
+    if lf2.get("requires_lf4") is not True:
+        raise _gate_error("LF_2 must require LF_4")
+
+    max_regression = lf3.get("max_relative_regression")
+    max_safety_pp = lf3.get("max_hold_contradiction_degradation_percentage_points")
+    required_zero = lf3.get("required_zero_counters")
+    if type(max_regression) is not float or not 0.0 <= max_regression <= 1.0:
+        raise _gate_error("LF_3 max_relative_regression must be a float in [0,1]")
+    if type(max_safety_pp) is not float or not 0.0 <= max_safety_pp <= 100.0:
+        raise _gate_error("LF_3 safety degradation must be a percentage-point float")
+    if not isinstance(required_zero, list) or not required_zero or any(
+        type(name) is not str or not name for name in required_zero
+    ):
+        raise _gate_error("LF_3 required_zero_counters must be a non-empty string list")
+
+    collapse = lf4.get("min_gain_removal_fraction")
+    if lf4.get("control_id") != "LF_PERMUTE":
+        raise _gate_error("LF_4 control_id must be LF_PERMUTE")
+    if type(collapse) is not float or not 0.0 <= collapse <= 1.0:
+        raise _gate_error("LF_4 min_gain_removal_fraction must be a float in [0,1]")
+    return gate_manifest
+
+
+def validate_dataset_gate_contract(
+    dataset: Dataset,
+    gate_manifest: object,
+    *,
+    gate_manifest_digest: str | None = None,
+) -> None:
+    """Require every episode to carry the gate's exact initial/profile semantics."""
+
+    gate = validate_gate_manifest(gate_manifest)
+    initial = gate["initial_state"]
+    profile = gate["evaluation_profile"]
+    for episode in dataset.episodes:
+        header = episode.header
+        if gate_manifest_digest is not None and header.get("gate_manifest_digest") != gate_manifest_digest:
+            raise _gate_error("episode was frozen against a different gate-manifest digest")
+        for field in ("initial_state_id", "initial_state_digest"):
+            if header.get(field) != initial[field]:
+                raise _gate_error(f"episode {field} does not match the frozen initial state")
+        for field in ("evaluation_profile_id", "evaluation_profile_digest"):
+            if header.get(field) != profile[field]:
+                raise _gate_error(f"episode {field} does not match the frozen evaluation profile")
+        if header.get("formula_digest") != formula.FORMULA_DIGEST:
+            raise _gate_error("episode formula digest does not match this formula-v2 build")
+        if header.get("model_digest") != formula.FORMULA_DIGEST:
+            raise _gate_error("episode model digest does not match this formula-v2 build")
+        state = decode_state(header["initial_state_b64"].encode("ascii"))
+        if state.schema_version != STATE_SCHEMA_VERSION or state.formula_version != formula.FORMULA_VERSION:
+            raise _gate_error("episode initial-state header is not schema2/formula_v2")
+        if state.pending_outcome is not None or state.label_free is not None:
+            raise _gate_error("episode initial state is not the all-prior, boundary-censored state")
 
 
 # --------------------------------------------------------------------------- #
@@ -152,6 +282,7 @@ def replay_episode(
     counters: ReplayCounters | None = None,
     initial_state_mutator=None,
     seed_override: bytes | None = None,
+    label_free_enabled: bool = True,
 ) -> list[TurnResult]:
     """Replay one episode from its frozen header state, strictly in order."""
 
@@ -169,6 +300,15 @@ def replay_episode(
 
     for turn in episode.turns:
         index = turn["episode_turn_index"]
+        if not label_free_enabled:
+            pending = state.pending_outcome
+            if pending is not None and pending.label_free_eligible:
+                pending = replace(pending, label_free_eligible=False)
+            # Evidence-only frozen control: with origin eligibility disabled, L1
+            # cannot affect this turn's policy; clearing label_free between turns
+            # also prevents any previous L1 offset from leaking forward.  L2 may be
+            # computed transiently, but it has no policy reader in formula v2.
+            state = replace(state, pending_outcome=pending, label_free=None)
         frame = v3_export.frame_for_turn(turn, previous_action)
 
         # Score the *previous* turn's next-observation prediction against this
@@ -265,6 +405,8 @@ def replay_episode(
         )
 
         state = result.state_delta.next_state
+        if not label_free_enabled:
+            state = replace(state, label_free=None)
         previous_action = actual
         pending = state.pending_outcome
         pending_mu = tuple(pending.predictive_mu_actual) if pending is not None else ()
@@ -672,6 +814,9 @@ def build_report(
     counters: ReplayCounters,
     calibration: bool,
 ) -> dict:
+    validate_dataset_gate_contract(
+        dataset, gate_manifest, gate_manifest_digest=gate_manifest_digest
+    )
     fingerprint = runtime_fingerprint()
     coverage = action_coverage(results)
     ess = effective_sample_size(results)
@@ -842,12 +987,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     gate_manifest = json.loads(gate_path.read_text(encoding="utf-8"))
     gate_digest = v3_export.file_digest(gate_path)
+    validate_gate_manifest(gate_manifest)
     if manifest is not None and manifest["gate_manifest_digest"] != gate_digest:
         raise ReplayError(
             "dataset was frozen against a different gate manifest; refusing to score it"
         )
 
     split = None if args.split == "all" else args.split
+    validate_dataset_gate_contract(
+        dataset, gate_manifest, gate_manifest_digest=gate_digest
+    )
     results, counters = replay_dataset(dataset, split=split)
     report = build_report(
         dataset_path=dataset_path,

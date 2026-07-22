@@ -339,8 +339,13 @@ def test_encoding_with_label_free_is_deterministic() -> None:
 def test_v3_blob_without_label_free_segment_decodes_as_none() -> None:
     decoded = decode_state(_v3_neutral_blob())
     assert decoded.label_free is None
-    assert decoded.schema_version == 1  # a legacy blob keeps its stored schema version
-    assert decoded == V3State(session_ref=_session_ref(), schema_version=1)
+    # Decoding is the migration boundary: the absent segment stays absent, while
+    # the exposed DTO is normalized to the current schema/formula header so it can
+    # be safely re-emitted by the codec-v4 encoder.
+    assert decoded.schema_version == STATE_SCHEMA_VERSION
+    assert decoded.formula_version == FORMULA_VERSION
+    assert decoded.model_revision == FORMULA_VERSION
+    assert decoded == V3State(session_ref=_session_ref())
     # A migrated state re-emits as the current (v4) codec and round-trips.
     assert decode_state(encode_state(decoded)) == decoded
 

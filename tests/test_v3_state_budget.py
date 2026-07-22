@@ -35,6 +35,7 @@ from sylanne_alpha.v3core.state.models import (
     LABEL_FREE_PREF_OFFSET_DIM,
     MARGINAL_COUNT_CAP,
     REACTION_COUNT_CAP,
+    STATE_SCHEMA_VERSION,
     THETA_PARAMS,
     WORKSPACE_BROADCAST_DIM,
     ActionBeliefs,
@@ -103,7 +104,7 @@ def _worst_case_state() -> V3State:
     )
     return V3State(
         session_ref=SessionRef(key_id="key-v1", session_digest=b"z" * 32, session_generation=1),
-        schema_version=1,
+        schema_version=STATE_SCHEMA_VERSION,
         source_digest="s" * 64,
         state_generation_id="g" * 32,
         revision=2_000_000_000,

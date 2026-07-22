@@ -748,6 +748,17 @@ def test_action_belief_reward_and_refractory_constants_are_exact() -> None:
 
 
 def test_profiles_and_load_thresholds_are_exact() -> None:
+    assert formula.FORMULA_V2_PROFILE_ID == "FORMULA_V2_SCALAR"
+    assert formula.LIVE_COMPUTE_PROFILES == {
+        "FORMULA_V2_SCALAR": (False, 0, False, False),
+    }
+    assert set(formula.LEGACY_READ_ONLY_PROFILE_IDS) == {
+        "FULL_24_STDP",
+        "FULL_24_NO_STDP",
+        "SNN_16_NO_STDP",
+        "REUSE_LAST_SNN_SUMMARY",
+        "DETERMINISTIC_CONTINUOUS_ONLY",
+    }
     assert formula.FULL_24_STDP == (True, 24, True, False)
     assert formula.FULL_24_NO_STDP == (True, 24, False, False)
     assert formula.SNN_16_NO_STDP == (True, 16, False, False)
@@ -772,6 +783,15 @@ def test_profiles_and_load_thresholds_are_exact() -> None:
     assert formula.RECOVERY_CONSECUTIVE_SNAPSHOTS == 32
     assert formula.RECOVERY_THRESHOLD_RATIO == 0.80
     assert formula.REPOSITORY_HARD_STOP_PROFILE == "SKIP_V3_TURN"
+    load_manifest = formula.FORMULA_MANIFEST["load_shedding"]
+    assert load_manifest["profiles"] == formula.LIVE_COMPUTE_PROFILES
+    assert load_manifest["profile_ladder"] == (
+        formula.FORMULA_V2_PROFILE_ID,
+        formula.REPOSITORY_HARD_STOP_PROFILE,
+    )
+    assert set(load_manifest["legacy_read_only_profile_ids"]) == set(
+        formula.LEGACY_READ_ONLY_PROFILE_IDS
+    )
 
 
 def test_formula_manifest_uses_named_mappings_for_all_material_semantics() -> None:
@@ -796,7 +816,7 @@ def test_formula_manifest_uses_named_mappings_for_all_material_semantics() -> No
         "stdp_enabled",
         "reuse_last_summary",
     )
-    assert manifest["load_shedding"]["profiles"] == formula.COMPUTE_PROFILES
+    assert manifest["load_shedding"]["profiles"] == formula.LIVE_COMPUTE_PROFILES
     assert manifest["load_shedding"]["reuse_last_summary_fallback"] == "DETERMINISTIC_CONTINUOUS_ONLY"
     assert manifest["expression"]["clarify_hesitation_semantics"] == (
         "hesitation is true iff action is CLARIFY and uncertainty >= threshold"
@@ -820,12 +840,15 @@ def test_formula_digest_is_canonical_and_golden() -> None:
     # section-1.2 reaction constants and the L1/L2 learner priors + update laws -- is
     # now folded into ``build_formula_manifest`` and ``FORMULA_VERSION`` is
     # ``sylanne.v3.formula.v2``, so every revision alias in the manifest flips too.
-    # This is the intentional v2 digest bump.  Prior digests on this lineage:
+    # This is the intentional v2 digest bump.  The current digest additionally
+    # freezes the one live scalar profile separately from read-only legacy profile
+    # IDs, so retired selectors cannot drive formula-v2 evidence. Prior digests:
     #   47c690a7...  formula v1 (pre-SNN-deletion)
     #   d3998ec2...  SNN deleted, label-free authored but fold DEFERRED (Slices A-C)
     assert formula.FORMULA_VERSION == "sylanne.v3.formula.v2"
     assert "labelfree" in formula.FORMULA_MANIFEST
-    assert formula.FORMULA_DIGEST == "fb487bc94ac2b21afd45ab8dbbed39c3e0f859fe7a0d395fe3abda47142d8857"
+    #   fb487bc9...  label-free fold before live/legacy profile separation
+    assert formula.FORMULA_DIGEST == "59fcaf3b2079619827df002a0832627d6d0cdbfdee573388b7a785e2c2de9485"
 
 
 def test_v3core_import_firewall() -> None:

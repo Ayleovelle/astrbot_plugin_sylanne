@@ -4,18 +4,22 @@
   "schema": "v3_gate_manifest_v1",
 
   "initial_state": {
-    "initial_state_id": "neutral_eval_v1",
+    "initial_state_id": "neutral_eval_v2",
+    "state_schema_version": 2,
+    "state_codec_version": 4,
+    "formula_version": "sylanne.v3.formula.v2",
+    "initial_state_digest": "28106ca14b65e9dc1b2d0c1e053cd0eaae35cd71aa4bd0c571483f691e5bdd4c",
     "description": "Every episode replays from the canonical neutral state; G3 runtime state is diagnostic only and is never guessed as an offline initial state.",
     "pending_outcome": "none",
+    "label_free_state": "all_prior",
     "boundary_credit": "censored"
   },
 
   "evaluation_profile": {
-    "evaluation_profile_id": "FULL_24_STDP",
-    "snn_enabled": true,
-    "ticks": 24,
-    "stdp_enabled": true,
-    "reuse_last_summary": false,
+    "evaluation_profile_id": "FORMULA_V2_SCALAR",
+    "evaluation_profile_digest": "a0dabc7c01df2505d68f77ef18a1dc8dba2635dfd25a828239456474930406c5",
+    "formula_version": "sylanne.v3.formula.v2",
+    "model_revision": "sylanne.v3.formula.v2",
     "math_backend": "scalar-v1"
   },
 
@@ -85,10 +89,51 @@
     "multi_timescale_dynamics",
     "workspace",
     "policy_scorer",
-    "snn",
-    "stdp"
+    "label_free_marginal",
+    "label_free_preference"
   ],
-  "controls": ["learned", "frozen", "random", "zero-lr"],
+  "controls": ["label_free_on", "label_free_frozen", "LF_PERMUTE"],
+
+  "label_free_gates": {
+    "LF_1": {
+      "metric": "marginal_axis_mae",
+      "direction": "lower_is_better",
+      "control": "frozen_prior_head",
+      "bootstrap_confidence": 0.95,
+      "required_lower_bound_above": 0.0,
+      "carry_forward_is_gate": false
+    },
+    "LF_2": {
+      "metric": "reaction_weighted_preference_nll",
+      "direction": "lower_is_better",
+      "control": "offset_zero_v1_preference",
+      "bootstrap_confidence": 0.95,
+      "required_lower_bound_above": 0.0,
+      "min_reaction_valid_settled_turns": 150,
+      "min_episodes": 3,
+      "requires_lf4": true
+    },
+    "LF_3": {
+      "max_relative_regression": 0.005,
+      "max_hold_contradiction_degradation_percentage_points": 0.5,
+      "required_zero_counters": [
+        "v3_external_reply_count",
+        "v3_prompt_mutation_count",
+        "v3_tool_call_count",
+        "v3_body_tick_count",
+        "v3_v2_memory_write_count",
+        "v3_astrbot_history_write_count",
+        "v3_extra_llm_call_count",
+        "illegal_action_count",
+        "nonfinite_action_count",
+        "privacy_violation_count"
+      ]
+    },
+    "LF_4": {
+      "control_id": "LF_PERMUTE",
+      "min_gain_removal_fraction": 0.50
+    }
+  },
 
   "bootstrap": {
     "unit": "whole_episode",
@@ -140,17 +185,11 @@
   },
 
   "falsification": {
-    "shuffle_test": {
-      "method": "shuffle cross-turn event order preserving feature marginals and gap distribution",
-      "min_persistent_snn_gain_removed": 0.50,
-      "within_window_latency_shuffle_is_evidence": false
-    },
-    "k_resampling": {
-      "ticks": [16, 24, 32],
-      "max_action_distribution_js_divergence": 0.02
-    },
-    "learned_must_beat": ["frozen", "random"],
-    "stdp_must_beat": ["zero-lr"]
+    "lf4_reaction_permutation": {
+      "control_id": "LF_PERMUTE",
+      "min_gain_removal_fraction": 0.50,
+      "within_episode": true
+    }
   },
 
   "stability_g0": {
@@ -165,7 +204,7 @@
       "slow_axis_max_locked_turns": 20,
       "recovery_session_fraction": 0.999
     },
-    "forbidden": ["permanent_all_speak", "permanent_all_hold", "workspace_winner_lock", "weight_saturation"],
+    "forbidden": ["permanent_all_speak", "permanent_all_hold", "workspace_winner_lock"],
     "claims_conversational_gain": false,
     "claims_learned_vs_control_superiority": false,
     "claims_calibration": false
@@ -195,6 +234,6 @@
     "key_loss_or_digest_mismatch": "INVALID_DATASET",
     "never_silently_passed": true,
     "aliases_require": "preregistered lower confidence bound above zero plus calibration and safety gates",
-    "conservative_names_until_g4": ["ProposalArbiterV1", "PolicyScorerV1", "ReservoirFeaturesV1"]
+    "conservative_names_until_g4": ["ProposalArbiterV1", "PolicyScorerV1"]
   }
 }

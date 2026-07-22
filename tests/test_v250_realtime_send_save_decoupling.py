@@ -28,6 +28,7 @@ message.components，精确复现框架 completion_text getter/setter 的真实
 from __future__ import annotations
 
 import asyncio
+import re
 import tempfile
 import types
 from types import SimpleNamespace
@@ -49,6 +50,11 @@ from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline
 from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline
 from sylanne_alpha.message_dispatch import realtime_flags
 from sylanne_alpha.rhythm_learner import RhythmLearner
+from sylanne_alpha.semantic_segmentation import (
+    PauseClass,
+    SEMANTIC_BEAT_NONCE_EXTRA,
+    build_marker,
+)
 from sylanne_alpha.session_state_store import SessionStateStore
 
 
@@ -348,6 +354,97 @@ def test_realtime_flags_accepts_legacy_aliases_symmetrically() -> None:
     ) == (True, True), "旧别名单独设置也应等价于开启（此前请求侧不认别名）"
     assert realtime_flags({}) == (False, False)
     assert realtime_flags(None) == (False, False)
+
+
+@pytest.mark.parametrize(
+    ("enabled", "intercept", "streaming", "expected"),
+    [
+        (True, True, False, True),
+        (False, True, False, False),
+        (True, False, False, False),
+        (True, True, True, False),
+    ],
+)
+def test_semantic_beat_contract_injection_matrix(
+    enabled: bool,
+    intercept: bool,
+    streaming: bool,
+    expected: bool,
+) -> None:
+    event = _Ev()
+    event.set_extra("enable_streaming", streaming)
+    request = SimpleNamespace(system_prompt="原始人格契约")
+
+    injected = LLMRequestPipeline._inject_semantic_beat_contract(
+        event,
+        request,
+        realtime_enabled=enabled,
+        intercept=intercept,
+    )
+
+    assert injected is expected
+    nonce = event.get_extra(SEMANTIC_BEAT_NONCE_EXTRA)
+    if not expected:
+        assert nonce is None
+        assert request.system_prompt == "原始人格契约"
+        return
+
+    assert isinstance(nonce, str)
+    assert re.fullmatch(r"[0-9A-F]{6}", nonce)
+    assert request.system_prompt.startswith("原始人格契约\n")
+    for pause in PauseClass:
+        assert build_marker(nonce, pause) in request.system_prompt
+    assert "0 到 5 个" in request.system_prompt
+    assert "不要改写正文" in request.system_prompt
+    assert "代码、URL、表格" in request.system_prompt
+    assert "provider_id" not in request.system_prompt
+    assert "第二次 LLM" not in request.system_prompt
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        SimpleNamespace(get_extra=lambda *_args: False),
+        SimpleNamespace(set_extra=lambda *_args: None),
+    ],
+)
+def test_semantic_beat_contract_skips_when_event_extras_are_not_round_trippable(
+    event: object,
+) -> None:
+    request = SimpleNamespace(system_prompt="原始人格契约")
+    assert (
+        LLMRequestPipeline._inject_semantic_beat_contract(
+            event,
+            request,
+            realtime_enabled=True,
+            intercept=True,
+        )
+        is False
+    )
+    assert request.system_prompt == "原始人格契约"
+
+
+def test_semantic_beat_contract_uses_astrbot_one_argument_get_extra_api() -> None:
+    class StrictAstrBotExtras:
+        def __init__(self) -> None:
+            self.values: dict[str, object] = {"enable_streaming": False}
+
+        def set_extra(self, key: str, value: object) -> None:
+            self.values[key] = value
+
+        def get_extra(self, key: str) -> object:
+            return self.values.get(key)
+
+    event = StrictAstrBotExtras()
+    request = SimpleNamespace(system_prompt="原始人格契约")
+
+    assert LLMRequestPipeline._inject_semantic_beat_contract(
+        event,
+        request,
+        realtime_enabled=True,
+        intercept=True,
+    )
+    assert event.get_extra(SEMANTIC_BEAT_NONCE_EXTRA)
 
 
 def test_stream_first_do_first_requires_all_three_gates() -> None:

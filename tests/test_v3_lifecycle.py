@@ -225,56 +225,59 @@ def test_shutdown_marks_queued_jobs_dropped_and_stops_admission(tmp_path) -> Non
 
 
 def test_reload_50_cycles_leak_nothing(tmp_path) -> None:
-    async def scenario():
-        root = tmp_path / "repo"
-        root.mkdir()
-        ref = _session_ref()
-        # One-time migration under an initial (low) epoch.
-        seed_committer = EffectCommitter.open(root)
-        _seed_session(seed_committer, ref)
+    root = tmp_path / "repo"
+    root.mkdir()
+    ref = _session_ref()
+    # One-time migration under an initial (low) epoch.
+    seed_committer = EffectCommitter.open(root)
+    _seed_session(seed_committer, ref)
 
-        async def one_cycle() -> None:
-            runtime = V3ShadowRuntime(
-                root=root,
-                plugin_instance_id="plugin",
-                correlation_secret=CORRELATION_SECRET,
-                job_timeout_s=None,
-            )
-            await runtime.initialize()
-            handle = runtime.capture_request(
-                session_ref=ref,
-                bridge_request_nonce="nonce",
-                request_attempt=0,
-                platform_id="qq",
-                unified_msg_origin="grp:1",
-                message_id="m",
-            )
-            assert handle is not None
-            result = runtime.offer_response(
-                handle=handle,
-                context=TurnContextClass.ADDRESSED,
-                observation=(_raw_values(), Action.SPEAK),
-                actual_action=ActualAction.SPEAK,
-                quality_score=None,
-                platform_id="qq",
-                unified_msg_origin="grp:1",
-                message_id="m",
-                deadline_ms=5000.0,
-            )
-            assert result.accepted
-            await runtime.join()
-            await runtime.terminate()
-            assert runtime.counters.all_zero()
-            assert runtime.supervisor.tracked_task_count == 0
-            assert runtime.supervisor.queued_count == 0
+    async def one_cycle() -> None:
+        runtime = V3ShadowRuntime(
+            root=root,
+            plugin_instance_id="plugin",
+            correlation_secret=CORRELATION_SECRET,
+            job_timeout_s=None,
+        )
+        await runtime.initialize()
+        handle = runtime.capture_request(
+            session_ref=ref,
+            bridge_request_nonce="nonce",
+            request_attempt=0,
+            platform_id="qq",
+            unified_msg_origin="grp:1",
+            message_id="m",
+        )
+        assert handle is not None
+        result = runtime.offer_response(
+            handle=handle,
+            context=TurnContextClass.ADDRESSED,
+            observation=(_raw_values(), Action.SPEAK),
+            actual_action=ActualAction.SPEAK,
+            quality_score=None,
+            platform_id="qq",
+            unified_msg_origin="grp:1",
+            message_id="m",
+            deadline_ms=5000.0,
+        )
+        assert result.accepted
+        await runtime.join()
+        await runtime.terminate()
+        assert runtime.counters.all_zero()
+        assert runtime.supervisor.tracked_task_count == 0
+        assert runtime.supervisor.queued_count == 0
 
-        # Warm up, then baseline every leakable resource.
-        await one_cycle()
-        gc.collect()
-        base_threads = len(_v3_threads())
+    # Close the warm-up event loop before taking the process-handle baseline.
+    # ``terminate`` intentionally uses ``asyncio.to_thread`` for bounded blocking
+    # teardown, and the loop's shared executor may lazily grow after one cycle. Its
+    # worker handles belong to the still-open test loop, not to a leaked v3 runtime.
+    asyncio.run(one_cycle())
+    gc.collect()
+    base_threads = len(_v3_threads())
+    base_handles = _handle_count()
+
+    async def scenario() -> None:
         base_tasks = _live_task_count()
-        base_handles = _handle_count()
-
         for _ in range(50):
             await one_cycle()
 
@@ -283,12 +286,14 @@ def test_reload_50_cycles_leak_nothing(tmp_path) -> None:
         assert base_threads == 0
         # zero leaked asyncio tasks beyond this running scenario coroutine
         assert _live_task_count() <= base_tasks
-        # OS handles do not grow beyond a small tolerance for allocator noise
-        final_handles = _handle_count()
-        if final_handles is not None and base_handles is not None:
-            assert final_handles <= base_handles + 16
 
     asyncio.run(scenario())
+    # ``asyncio.run`` has now closed the loop and joined its shared executor, so
+    # this comparison measures process handles at equivalent lifecycle boundaries.
+    gc.collect()
+    final_handles = _handle_count()
+    if final_handles is not None and base_handles is not None:
+        assert final_handles <= base_handles + 16
 
 
 def _v3_threads() -> list:

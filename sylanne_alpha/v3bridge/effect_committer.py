@@ -26,6 +26,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
@@ -33,10 +34,12 @@ from sylanne_alpha.v3bridge._state_repository import (
     AbsentState,
     CommitPrecondition,
     CommitResult,
+    FaultPoint,
     JournalRecord,
     StateRepository,
+    StateSnapshot,
 )
-from sylanne_alpha.v3bridge.limits import MAX_STATE_BYTES
+from sylanne_alpha.v3bridge.limits import MAX_STATE_BYTES, PLUGIN_DATA_CAP_BYTES
 from sylanne_alpha.v3bridge.session_identity import session_filename_token
 from sylanne_alpha.v3core.canonical import canonical_json_bytes, canonical_sha256
 from sylanne_alpha.v3core.contracts import SessionRef, TurnSequence
@@ -203,8 +206,30 @@ class EffectCommitter:
         self._repo = repository
 
     @classmethod
-    def open(cls, root: object, **repository_kwargs: object) -> "EffectCommitter":
-        return cls(StateRepository(root, **repository_kwargs))
+    def open(
+        cls,
+        root: str | os.PathLike[str],
+        *,
+        fault_injector: Callable[[FaultPoint], None] | None = None,
+        replace_attempts: int = 8,
+        replace_retry_seconds: float = 0.05,
+        hard_limit_bytes: int | None = None,
+        non_v3_bytes: int = 0,
+        plugin_cap_bytes: int = PLUGIN_DATA_CAP_BYTES,
+        lock_timeout_seconds: float = 2.0,
+    ) -> "EffectCommitter":
+        return cls(
+            StateRepository(
+                root,
+                fault_injector=fault_injector,
+                replace_attempts=replace_attempts,
+                replace_retry_seconds=replace_retry_seconds,
+                hard_limit_bytes=hard_limit_bytes,
+                non_v3_bytes=non_v3_bytes,
+                plugin_cap_bytes=plugin_cap_bytes,
+                lock_timeout_seconds=lock_timeout_seconds,
+            )
+        )
 
     @property
     def repository(self) -> StateRepository:
@@ -248,7 +273,7 @@ class EffectCommitter:
 
     # -- reads ---------------------------------------------------------------
 
-    def _decode_snapshot_state(self, snapshot: object) -> V3State | None:
+    def _decode_snapshot_state(self, snapshot: StateSnapshot) -> V3State | None:
         try:
             encoded = json.loads(snapshot.canonical_cognitive_payload.decode("utf-8"))
             if type(encoded) is not str:
@@ -434,20 +459,8 @@ class EffectCommitter:
         return self._anchor_session_dir(token) / f"{generation_id}.anchor"
 
     def _write_anchor_durable(self, token: str, generation_id: str, anchor: dict) -> None:
-        directory = self._anchor_session_dir(token)
-        directory.mkdir(parents=True, exist_ok=True)
         data = _frame_anchor(anchor)
-        staging = directory / f".{os.urandom(8).hex()}.tmp"
-        fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            view = memoryview(data)
-            offset = 0
-            while offset < len(view):
-                offset += os.write(fd, view[offset:])
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        os.replace(staging, self._anchor_path(token, generation_id))
+        self._repo.write_seed_anchor(token, generation_id, data)
 
     def read_anchor(self, session_ref: SessionRef) -> dict | None:
         token = session_filename_token(session_ref)
@@ -461,24 +474,12 @@ class EffectCommitter:
         return _parse_anchor(data)
 
     def _remove_anchor(self, token: str, generation_id: str) -> None:
-        try:
-            self._anchor_path(token, generation_id).unlink()
-        except OSError:  # pragma: no cover - already gone
-            pass
+        self._repo.remove_seed_anchor_if_unreferenced(token, generation_id)
 
-    def _remove_anchors_except(self, token: str, keep_generation_id: str | None) -> int:
-        directory = self._anchor_session_dir(token)
-        if not directory.exists():
-            return 0
-        removed = 0
-        for path in directory.glob("*.anchor"):
-            if keep_generation_id is None or path.stem != keep_generation_id:
-                try:
-                    path.unlink()
-                    removed += 1
-                except OSError:  # pragma: no cover
-                    pass
-        return removed
+    def _remove_anchors_except(self, token: str, _keep_generation_id: str | None) -> int:
+        # The repository re-derives the authoritative generation while holding its
+        # cross-process mutation lock; the caller's prior read is diagnostic only.
+        return self._repo.clean_seed_anchors(token)
 
     def clean_orphan_anchors(self, session_ref: SessionRef) -> int:
         """Remove anchors not matching the current committed generation.

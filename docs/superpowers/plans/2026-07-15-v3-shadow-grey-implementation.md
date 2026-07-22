@@ -8,6 +8,16 @@
 
 **Tech Stack:** Python 3.10-3.13, stdlib dataclasses/enum/hashlib/hmac/struct/zlib/concurrent.futures, `portalocker>=2.10`, pytest, mandatory seeded property loops, ruff, AstrBot v4.26.5.
 
+> **Formula-v2 authoritative execution note (2026-07-22):**
+> `docs/superpowers/specs/2026-07-18-v3core-formula-v2-label-free-reaction-learning-spec.md`
+> supersedes this plan's historical formula-v1 SNN/STDP steps. On every adjacent turn,
+> Path B is invoked: L2 marginal prediction/update and the length baseline use their own
+> current-turn validity gates, while `PendingOutcome.label_free_eligible` gates **only**
+> L1 preference credit. An origin `IDLE` turn is therefore L1-ineligible but does not
+> censor the next adjacent observation from L2/baseline. Offline evaluation is pinned to
+> `neutral_eval_v2`, state schema 2 / codec 4, and the scalar formula-v2 profile; legacy
+> SNN/STDP profile names are read-only compatibility, not evaluation selectors.
+
 ---
 
 ## Execution Rules
@@ -391,6 +401,9 @@ def test_old_generation_cannot_commit_after_quarantine_aba(tmp_path: Path) -> No
 
 ## Task 10: Orchestrator, Canonical Trace, Replay, And Scalar Performance Proof
 
+> **DoD (回溯红队 a16 MAJOR·必守):** codec 是 float16 有损量化器,而 dynamics/core 输出是 float64、不在 codec 网格上——实测 `decode(encode(x)) != x` 对真实计算产物成立。持久化边界【必须先量化(encode→decode)再算 payload_digest 再 commit】,且 commit 之后【以解码态为唯一 canonical 内存态】继续推进。加测试断言:对真实计算产物(量化后)`decode(encode(x)) == x`。否则崩溃重载后内存轨迹与量化轨迹分叉,§15.1 digest 确定性与 §8.3 "retry recomputes from the same pre-state bytes" 都会破。
+
+
 **Files:** Modify `sylanne_alpha/v3core/effects/{__init__.py,models.py}`; create `sylanne_alpha/v3core/trace/{__init__.py,models.py,canonical.py}`, `sylanne_alpha/v3core/learning/replay.py`, `sylanne_alpha/v3core/orchestrator.py`, `tests/test_v3_orchestrator.py`, `tests/test_v3_trace_replay.py`, `tests/test_v3_scalar_performance.py`.
 
 - [ ] **RED:** Assert stage order, immutable ComputeProfile, closed effects, no side effects, deterministic degradation, byte-identical trace under the same fingerprint, and the acyclic digest order payload -> trace -> journal. `ExperienceBuffer` stores a committed revision key, never a same-turn trace digest.
@@ -401,6 +414,9 @@ def test_old_generation_cannot_commit_after_quarantine_aba(tmp_path: Path) -> No
 - [ ] Commit locally: `git commit -m "feat(v3): orchestrate deterministic shadow decisions"`.
 
 ## Task 11: EffectCommitter, Migration, And Recovery
+
+> **DoD (回溯红队 a16 MAJOR·必守):** codec 是 float16 有损量化器,而 dynamics/core 输出是 float64、不在 codec 网格上——实测 `decode(encode(x)) != x` 对真实计算产物成立。持久化边界【必须先量化(encode→decode)再算 payload_digest 再 commit】,且 commit 之后【以解码态为唯一 canonical 内存态】继续推进。加测试断言:对真实计算产物(量化后)`decode(encode(x)) == x`。否则崩溃重载后内存轨迹与量化轨迹分叉,§15.1 digest 确定性与 §8.3 "retry recomputes from the same pre-state bytes" 都会破。
+
 
 **Files:** Create `effect_committer.py`, `migration_coordinator.py`, `tests/test_v3_effect_committer.py`, `tests/test_v3_migration.py`.
 

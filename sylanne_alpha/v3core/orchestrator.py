@@ -42,10 +42,13 @@ from .effects.models import (
 from .expression.policy import ExpressionConstraints, expression_policy, next_style_ring
 from .features import decision_state as compute_decision_state
 from .formula_v1 import (
+    ACTION_MODEL_REVISION,
     AXIS_DIM,
     COMPUTE_PROFILES,
     EXPERIENCE_CAPACITY,
     FORMULA_DIGEST,
+    FORMULA_VERSION,
+    FORMULA_V2_PROFILE_ID,
     LF_CENSOR_REASON_NON_ADJACENT,
     LF_ELIGIBLE_ORIGIN_CONTEXTS,
     SNN_NEURONS,
@@ -65,6 +68,7 @@ from .state.codec import (
 )
 from .state.models import (
     EXPERIENCE_FEATURE_DIM,
+    STATE_SCHEMA_VERSION,
     ExperienceRecord,
     PendingOutcome,
     V3State,
@@ -230,7 +234,19 @@ def orchestrate(invocation: object) -> OrchestratorResult:
         raise ValueError(
             f"compute profile {profile.profile_id!r} is inconsistent with the frozen manifest"
         )
-    snn_enabled, ticks, stdp_enabled, reuse_last = expected
+    if profile.formula_version != FORMULA_VERSION or profile.model_version != ACTION_MODEL_REVISION:
+        raise ValueError("compute profile formula/model revision is not formula-v2 current")
+    # Legacy bridge DTOs remain readable during the grey transition, but formula-v2
+    # canonicalizes them before any compute/trace identity is derived.  Their retired
+    # SNN/STDP/tick/reuse switches cannot select a live branch.
+    profile = replace(
+        profile,
+        profile_id=FORMULA_V2_PROFILE_ID,
+        snn_enabled=False,
+        ticks=0,
+        stdp_enabled=False,
+        reuse_last_summary=False,
+    )
     actual_action, quality_score = _decode_projected(invocation.projected_actual_outcome)
     turn_revision = base.revision + 1
 
@@ -258,11 +274,15 @@ def orchestrate(invocation: object) -> OrchestratorResult:
         base.label_free.pref_offset if base.label_free is not None else tuple(0.0 for _ in range(AXIS_DIM))
     )
     lf_marginal_mu = tuple(0.0 for _ in range(AXIS_DIM))
-    # The same_sender relation actually consumed by path B this turn (spec §1.4).
-    # None when path B does not run; otherwise the frozen bridge fact (or None when
-    # no reaction_facts was supplied), recorded so offline replay reproduces the
-    # exact settlement.
-    lf_reaction_same_sender: bool | None = None
+    # Deterministic traces record the frozen invocation fact whether or not an
+    # adjacent pending outcome exists.  It is core input, not merely a settlement
+    # receipt; dropping it on censored turns makes replay unable to reconstruct the
+    # exact input stream (spec §1.4).
+    lf_reaction_same_sender = (
+        invocation.reaction_facts.same_sender
+        if invocation.reaction_facts is not None
+        else None
+    )
     pending = base.pending_outcome
     if pending is not None and _is_adjacent(pending.sequence, envelope.sequence):
         # Path A: label-gated settlement (design 8.3 / 11.2), semantics unchanged.
@@ -287,24 +307,15 @@ def orchestrate(invocation: object) -> OrchestratorResult:
         lf_censor_reason = lf.reason
         lf_pref_offset_after = lf.new_label_free.pref_offset
         lf_marginal_mu = lf.marginal_mu
-        lf_reaction_same_sender = (
-            invocation.reaction_facts.same_sender
-            if invocation.reaction_facts is not None
-            else None
-        )
 
     # -- SNN stage DELETED (formula v2) --------------------------------------
     # The reservoir was structurally silent (max membrane ~0.32 vs a 0.65 threshold
     # floor), so it never influenced the drive, and its only *live* consumer -- the
-    # snn-novelty proposal -- is gone.  The compute-profile load-shedding flags
-    # (snn_enabled/ticks/stdp_enabled/reuse_last) survive on the ComputeProfile but no
-    # longer gate any reservoir, so every profile now advances the same continuous
-    # trajectory.  ``last_snn_summary`` is permanently ``None`` (nothing produces a
-    # summary), so REUSE_LAST_SNN_SUMMARY still degrades deterministically.  The trace
-    # keeps neutral spike/summary telemetry fields for schema stability.
+    # The retired novelty subsystem is gone. Compatibility profile fields survive on
+    # the DTO, but the validated input has already been canonicalized to the single
+    # formula-v2 scalar profile. The trace keeps neutral legacy telemetry fields only
+    # for schema stability; they do not select computation or degradation.
     degradation_reason = "NONE"
-    if reuse_last and base.last_snn_summary is None:
-        degradation_reason = "REUSE_WITHOUT_SUMMARY_FALLBACK"
     spike_counts = tuple(0 for _ in range(SNN_NEURONS))
     first_latencies = tuple(-1 for _ in range(SNN_NEURONS))
     trace_summary = tuple(0.0 for _ in range(SNN_SUMMARY_DIM))
@@ -398,19 +409,21 @@ def orchestrate(invocation: object) -> OrchestratorResult:
     # Append one entry and keep only the last 64 (bounded FIFO, design section 13).
     new_experiences = (base.experiences + (record,))[-EXPERIENCE_CAPACITY:]
 
-    last_summary = base.last_snn_summary  # vestigial reuse slot: always None now
+    # A decoded legacy summary may exist for read compatibility, but no formula-v2
+    # producer carries it into a new persistent revision.
+    last_summary = None
 
     # -- build the float64 compute product, then quantize on the persist edge -
     raw_next = V3State(
         session_ref=base.session_ref,
-        schema_version=base.schema_version,
+        schema_version=STATE_SCHEMA_VERSION,
         source_digest=base.source_digest,
         state_generation_id=base.state_generation_id,
         revision=turn_revision,
         writer_epoch=envelope.sequence.writer_epoch,
         session_generation=base.session_generation,
-        formula_version=base.formula_version,
-        model_revision=base.model_revision,
+        formula_version=FORMULA_VERSION,
+        model_revision=ACTION_MODEL_REVISION,
         last_committed_turn_sequence=envelope.sequence,
         last_committed_turn_id=envelope.turn_id,
         latent_axes=next_latent,

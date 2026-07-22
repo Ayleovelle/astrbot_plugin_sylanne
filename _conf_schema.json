@@ -154,7 +154,9 @@
     "description": "Embedding 记忆使用的 Provider ID",
     "type": "string",
     "default": "",
-    "hint": "填写 AstrBot 中配置的 embedding provider ID；留空则不启用向量召回。"
+    "_special": "select_provider",
+    "ui_tier": "primary",
+    "hint": "启用 embedding 记忆后：只有一个 embedding provider 时自动选择；有多个时在“模型策略”中选择。"
   },
   "sylanne_alpha_embedding_memory_top_k": {
     "description": "Embedding 召回 top-K 条数",
@@ -162,18 +164,34 @@
     "default": 3,
     "hint": "每次召回最多返回的相似记忆条数。"
   },
+  "sylanne_alpha_aux_provider_id": {
+    "description": "共享辅助文本模型 Provider（可选）",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "ui_tier": "primary",
+    "hint": "留空时跟随当前会话或 AstrBot 默认聊天模型；选择后供评估、记忆整理、生活模拟、关系分类与说说草稿共享。"
+  },
+  "sylanne_alpha_assessor_llm_enabled": {
+    "description": "启用辅助语义评估",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。开启后，即时判断及未单独指定模型的记忆/关系评估可跟随辅助模型或当前聊天模型，并可能产生额外 LLM 调用。"
+  },
   "sylanne_alpha_fast_assessor_enabled": {
     "description": "启用即时判断 LLM",
     "type": "bool",
     "default": true,
-    "hint": "默认开启；前台同步等待（2s），即时情绪直接注入当前轮回复。"
+    "invisible": true,
+    "hint": "旧版未接入生产路径的兼容键；保留读取但不再作为启用依据。请使用“启用辅助语义评估”。"
   },
   "sylanne_alpha_fast_assessor_provider_id": {
     "description": "即时判断 LLM Provider（前台同步）",
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "前台同步等待 2s，需要响应快的小模型。即时情绪直接影响当前轮回复语气。推荐设置：温度 0，top-p 0.1，Max Tokens 无需设置（插件已接管）。"
+    "ui_tier": "advanced_provider",
+    "hint": "高级覆盖：留空时使用共享辅助模型，再跟随当前聊天模型；仅在确实需要更快的小模型时单独选择。"
   },
   "sylanne_alpha_assessor_max_tokens": {
     "description": "语义评估 LLM 最大输出 token",
@@ -216,7 +234,8 @@
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "用于模拟 Sylanne 生活的 LLM；建议用便宜的小模型。启用生活模拟时必填，留空会静默失效（生活状态冻结、主动消息可能复读）。"
+    "ui_tier": "advanced_provider",
+    "hint": "高级覆盖：留空时使用共享辅助模型，再跟随 AstrBot 默认聊天模型；无需为生活模拟单独配置。"
   },
   "sylanne_alpha_life_simulation_interval_seconds": {
     "description": "生活模拟间隔（秒）",
@@ -265,14 +284,16 @@
     "description": "启用主评估器（深度情感分析，后台异步）",
     "type": "bool",
     "default": false,
-    "hint": "默认关闭；开启后情绪估计使用独立 provider，不占用主聊天模型。后台深度语义分析结果喂给长期状态引擎。"
+    "invisible": true,
+    "hint": "旧版未接入生产路径的兼容键；后台任务仍由各自的记忆/调度功能开关控制。"
   },
   "sylanne_alpha_main_assessor_provider_id": {
     "description": "主评估器 LLM Provider ID（后台异步）",
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "后台深度语义分析，不阻塞回复，可用强模型。推荐设置：温度 0，top-p 0.1。"
+    "ui_tier": "advanced_provider",
+    "hint": "高级覆盖：留空时使用共享辅助模型，再跟随当前/默认聊天模型。"
   },
   "sylanne_alpha_locked_persona_prompt": {
     "description": "锁定的人格 system prompt（覆盖动态生成）",
@@ -291,6 +312,7 @@
     "type": "string",
     "default": "",
     "_special": "select_provider",
+    "ui_tier": "advanced_provider",
     "hint": "指定用于转述的多模态 LLM provider；留空则自动检测已配置的多模态 provider。"
   },
   "sylanne_alpha_owner_id": {
@@ -304,7 +326,8 @@
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "Phase 2B：低频后台判会话关系语域（恋人/朋友/同事）。留空则复用 assessor provider。"
+    "ui_tier": "advanced_provider",
+    "hint": "高级覆盖：低频后台判会话关系语域；留空时使用评估器链、共享辅助模型，再跟随当前/默认聊天模型。"
   },
   "sylanne_alpha_cross_session_mode": {
     "description": "跨群记忆总开关（v2.5.0 旁挂人核）",
@@ -375,7 +398,8 @@
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "留空则依次回退 sylanne_alpha_life_simulation_provider_id / main_assessor / assessor。"
+    "ui_tier": "advanced_provider",
+    "hint": "高级覆盖：留空时依次使用生活模拟、主评估器、旧评估器、共享辅助模型与默认聊天模型。"
   },
   "sylanne_alpha_qzone_min_score": {
     "description": "ShareIntent 分数达到此阈值才尝试生成说说候选",

@@ -63,6 +63,7 @@ trusting any pin here:
 
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
@@ -294,25 +295,30 @@ def test_mid_axis_recovers_within_its_envelope(recoveries: list[dict]) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# K resampling
+# Retired K-resampling evidence
 # --------------------------------------------------------------------------- #
 
 
-def test_k32_is_reported_as_not_implementable_rather_than_faked() -> None:
-    """SNN_ALLOWED_TICKS declares 32 but COMPUTE_PROFILES never does."""
+def test_formula_v2_gate_has_no_live_retired_profile_evidence() -> None:
+    report = v3_stability.run_gate(2718, 120, sessions=1, k_turns=K_TURNS)
+    assert report["evaluation_profile_id"] == "FORMULA_V2_SCALAR"
+    assert "k_resampling" not in report
+    report_text = json.dumps(report, sort_keys=True).lower()
+    assert "snn_16" not in report_text
+    assert "full_24" not in report_text
+    assert "stdp" not in report_text
 
-    report = v3_stability.k_divergence_report(2718, 40)
-    assert report["pairs"]["24_vs_32"]["status"] == "NOT_IMPLEMENTABLE"
-    assert report["pairs"]["16_vs_32"]["status"] == "NOT_IMPLEMENTABLE"
-    assert "COMPUTE_PROFILES" in report["k32_note"]
 
+def test_legacy_k_divergence_api_is_an_explicit_non_executing_tombstone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_if_executed(*_args, **_kwargs):
+        raise AssertionError("retired profile must not be replayed as formula-v2 evidence")
 
-def test_k16_vs_k24_js_divergence_is_below_the_gate() -> None:
+    monkeypatch.setattr(v3_stability, "k_action_distribution", fail_if_executed)
     report = v3_stability.k_divergence_report(2718, K_TURNS)
-    pair = report["pairs"]["16_vs_24"]
-    assert pair["js_divergence"] < v3_stability.MAX_JS_DIVERGENCE
-    # Honesty guard (formula v2): K=16 and K=24 are SNN tick counts, and the SNN is
-    # deleted, so the two profiles now advance the identical continuous trajectory and
-    # the divergence is ~0 by construction.  This is NOT a demonstration of a
-    # meaningful K-invariance -- there is no K-dependent computation left to vary.
-    assert pair["within_gate"] is True
+    assert report == {
+        "status": "RETIRED_LEGACY_COMPATIBILITY",
+        "live_gate": False,
+        "reason": "formula v2 has no tick-count selector",
+    }

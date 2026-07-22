@@ -19,17 +19,24 @@ thread_name_prefix="sylanne-v3")`` and v3 futures are never placed in a plugin's
 from __future__ import annotations
 
 import asyncio
+import inspect
 import threading
 import time
+from dataclasses import replace
 
+import portalocker
 import pytest
 
 from sylanne_alpha.v2core.shadow_snapshot import V2SeedSnapshotV1
 from sylanne_alpha.v3bridge import limits
 from sylanne_alpha.v3bridge.actual_action import ActualAction
 from sylanne_alpha.v3bridge.comparator import ShadowComparison, compare, to_core_action
-from sylanne_alpha.v3bridge._state_repository import FaultPoint
-from sylanne_alpha.v3bridge.effect_committer import EffectCommitter
+from sylanne_alpha.v3bridge._state_repository import (
+    FaultPoint,
+    RepositoryBudgetExceeded,
+    RepositoryCorruptionError,
+)
+from sylanne_alpha.v3bridge.effect_committer import EffectCommitter, LoadedState
 from sylanne_alpha.v3bridge.migration_coordinator import MigrationCoordinator
 from sylanne_alpha.v3bridge.models import LoadSnapshotV1, RepositoryAdmissionState
 from sylanne_alpha.v3bridge.profile_selector import (
@@ -45,6 +52,7 @@ from sylanne_alpha.v3bridge.shadow_supervisor import (
     SessionQueues,
     ShadowJob,
     ShadowSupervisor,
+    _discard_future_result,
 )
 from sylanne_alpha.v3bridge.turn_registry import SequenceLedger, SequenceStatus
 from sylanne_alpha.v3core import formula_v1 as formula
@@ -184,31 +192,43 @@ def _build_supervisor(tmp_path, **kwargs):
 # --------------------------------------------------------------------------- #
 
 
-def test_profile_selector_nominal_is_full_24_stdp() -> None:
+def test_profile_selector_nominal_is_formula_v2_scalar() -> None:
     selection = ProfileSelector().select(_snapshot())
     assert selection.level == 0
-    assert selection.profile_name == "FULL_24_STDP"
+    assert selection.profile_name == formula.FORMULA_V2_PROFILE_ID
     assert selection.profile is not None
+    assert selection.profile.profile_id == formula.FORMULA_V2_PROFILE_ID
+    assert (
+        selection.profile.snn_enabled,
+        selection.profile.ticks,
+        selection.profile.stdp_enabled,
+        selection.profile.reuse_last_summary,
+    ) == formula.FORMULA_V2_SCALAR
     assert selection.skip is False and selection.dropped is False
 
 
 @pytest.mark.parametrize(
     "fill, expected_level, expected_name",
     [
-        (0.0, 0, "FULL_24_STDP"),
-        (0.25, 1, "FULL_24_NO_STDP"),
-        (0.50, 2, "SNN_16_NO_STDP"),
-        (0.70, 3, "REUSE_LAST_SNN_SUMMARY"),
-        (0.85, 4, "DETERMINISTIC_CONTINUOUS_ONLY"),
+        (0.0, 0, formula.FORMULA_V2_PROFILE_ID),
+        (0.25, 1, formula.FORMULA_V2_PROFILE_ID),
+        (0.50, 2, formula.FORMULA_V2_PROFILE_ID),
+        (0.70, 3, formula.FORMULA_V2_PROFILE_ID),
+        (0.85, 4, formula.FORMULA_V2_PROFILE_ID),
         (1.0, 5, "SKIP_V3_TURN"),
     ],
 )
-def test_profile_ladder_maps_each_fill_threshold(fill, expected_level, expected_name) -> None:
+def test_pressure_ladder_keeps_level_but_all_live_compute_is_scalar(
+    fill, expected_level, expected_name
+) -> None:
     selection = ProfileSelector().select(_snapshot(fill=fill))
     assert selection.level == expected_level
     assert selection.profile_name == expected_name
     if expected_level == 5:
         assert selection.skip is True and selection.profile is None
+    else:
+        assert selection.skip is False and selection.profile is not None
+        assert selection.profile.profile_id == formula.FORMULA_V2_PROFILE_ID
 
 
 def test_profile_degrade_triggers_on_any_axis() -> None:
@@ -257,17 +277,37 @@ def test_repository_hard_stop_forces_skip_and_drop() -> None:
     assert selection.profile is None
 
 
-def test_reuse_without_prior_summary_falls_back_to_deterministic() -> None:
-    selector = ProfileSelector()
-    selection = selector.select(_snapshot(fill=0.70), has_prior_summary=False)
-    assert selection.level == 3
-    assert selection.profile_name == "DETERMINISTIC_CONTINUOUS_ONLY"
-    assert selection.reason == "REUSE_WITHOUT_SUMMARY"
+def test_profile_selector_has_no_legacy_summary_control_surface() -> None:
+    assert "has_prior_summary" not in inspect.signature(ProfileSelector.select).parameters
+
+
+def test_orphan_result_cleanup_does_not_swallow_cancelled_error_payload() -> None:
+    class CancelledResult:
+        @staticmethod
+        def cancelled() -> bool:
+            return False
+
+        @staticmethod
+        def result():
+            raise asyncio.CancelledError
+
+        @staticmethod
+        def exception():
+            raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        _discard_future_result(CancelledResult())
 
 
 def test_build_compute_profile_rejects_skip() -> None:
     with pytest.raises(ValueError):
         build_compute_profile("SKIP_V3_TURN")
+
+
+@pytest.mark.parametrize("legacy_profile_id", formula.LEGACY_READ_ONLY_PROFILE_IDS)
+def test_build_compute_profile_rejects_legacy_read_only_profiles(legacy_profile_id) -> None:
+    with pytest.raises(KeyError):
+        build_compute_profile(legacy_profile_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -545,6 +585,129 @@ def test_slow_repository_io_does_not_stall_the_event_loop(tmp_path) -> None:
     asyncio.run(scenario(tmp_path))
 
 
+@pytest.mark.parametrize(
+    ("phase", "exception_type"),
+    (
+        ("load", RepositoryCorruptionError),
+        ("load", portalocker.exceptions.LockException),
+        ("commit", RepositoryBudgetExceeded),
+        ("commit", OSError),
+    ),
+)
+def test_repository_failures_drop_only_the_bad_job_and_driver_keeps_pumping(
+    tmp_path,
+    phase,
+    exception_type,
+) -> None:
+    """Persistence failures are per-job fail-closed events, never driver death."""
+
+    async def scenario(tmp_path):
+        inner = EffectCommitter.open(tmp_path)
+        ref = _session_ref()
+        _seed_session(inner, ref)
+
+        class FailingOnceCommitter:
+            def __init__(self) -> None:
+                self.failed = False
+
+            def __getattr__(self, name):
+                return getattr(inner, name)
+
+            def load_state(self, session_ref):
+                if phase == "load" and not self.failed:
+                    self.failed = True
+                    raise exception_type("forced persistence failure")
+                return inner.load_state(session_ref)
+
+            def commit_turn(self, command):
+                if phase == "commit" and not self.failed:
+                    self.failed = True
+                    raise exception_type("forced persistence failure")
+                return inner.commit_turn(command)
+
+        ledger = SequenceLedger()
+        telemetry = TelemetrySink()
+        supervisor = ShadowSupervisor(
+            committer=FailingOnceCommitter(),
+            ledger=ledger,
+            counters=IsolationCounters(),
+            telemetry_sink=telemetry,
+            job_timeout_s=None,
+            drain_timeout_s=0.01,
+        )
+        await supervisor.initialize()
+        first = _make_job(ledger, ref, supervisor.epoch)
+        second = _make_job(ledger, ref, supervisor.epoch)
+        supervisor.offer(first)
+        supervisor.offer(second)
+
+        try:
+            await asyncio.wait_for(supervisor.join(), timeout=2.0)
+            assert supervisor._driver_task is not None
+            assert not supervisor._driver_task.done()
+            assert supervisor.outstanding == 0
+            assert ledger.status(ref, first.sequence) is SequenceStatus.DROPPED
+            assert ledger.status(ref, second.sequence) is SequenceStatus.COMMITTED
+            failure = next(
+                item for item in telemetry.recent() if item.outcome == "DROPPED_RUNTIME_ERROR"
+            )
+            assert failure.profile_selection_reason == exception_type.__name__
+            assert any(item.outcome == "COMMITTED" for item in telemetry.recent())
+        finally:
+            await supervisor.terminate()
+
+    asyncio.run(scenario(tmp_path))
+
+
+def test_load_snapshot_failure_keeps_its_declared_outcome_and_driver_liveness(tmp_path) -> None:
+    """A best-effort load observation failure must not turn into a vocabulary error."""
+
+    async def scenario(tmp_path):
+        calls = 0
+
+        def flaky_snapshot():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OSError("forced load snapshot failure")
+            return _snapshot()
+
+        committer = EffectCommitter.open(tmp_path)
+        ledger = SequenceLedger()
+        telemetry = TelemetrySink()
+        ref = _session_ref()
+        _seed_session(committer, ref)
+        supervisor = ShadowSupervisor(
+            committer=committer,
+            ledger=ledger,
+            counters=IsolationCounters(),
+            telemetry_sink=telemetry,
+            load_snapshot_provider=flaky_snapshot,
+            job_timeout_s=None,
+        )
+        await supervisor.initialize()
+        first = _make_job(ledger, ref, supervisor.epoch)
+        second = _make_job(ledger, ref, supervisor.epoch)
+        supervisor.offer(first)
+        supervisor.offer(second)
+
+        try:
+            await asyncio.wait_for(supervisor.join(), timeout=2.0)
+            assert supervisor.outstanding == 0
+            assert ledger.status(ref, first.sequence) is SequenceStatus.DROPPED
+            assert ledger.status(ref, second.sequence) is SequenceStatus.COMMITTED
+            assert [record.outcome for record in telemetry.recent()] == [
+                "DROPPED_LOAD_ERROR",
+                "COMMITTED",
+            ]
+            assert supervisor._driver_task is not None
+            assert not supervisor._driver_task.done()
+        finally:
+            await supervisor.terminate()
+
+    asyncio.run(scenario(tmp_path))
+
+
 def test_terminate_does_not_stall_the_event_loop_while_the_repo_lock_is_held(tmp_path) -> None:
     """terminate()'s seal_epoch must not block the loop behind our own worker's lock.
 
@@ -617,6 +780,187 @@ def test_terminate_does_not_stall_the_event_loop_while_the_repo_lock_is_held(tmp
         assert supervisor.shutdown_trace == SHUTDOWN_ORDER
 
     asyncio.run(scenario(tmp_path))
+
+
+def test_terminate_bounds_a_wedged_epoch_seal_and_records_the_failure(tmp_path) -> None:
+    """A stuck repository fence cannot hold plugin/v2 teardown forever."""
+
+    async def scenario(tmp_path):
+        inner = EffectCommitter.open(tmp_path)
+        entered = threading.Event()
+        release = threading.Event()
+
+        class WedgedSealCommitter:
+            def __getattr__(self, name):
+                return getattr(inner, name)
+
+            def seal_epoch(self, _epoch):
+                entered.set()
+                release.wait()
+
+        supervisor = ShadowSupervisor(
+            committer=WedgedSealCommitter(),
+            ledger=SequenceLedger(),
+            counters=IsolationCounters(),
+            telemetry_sink=TelemetrySink(),
+            shutdown_step_timeout_s=0.05,
+        )
+        await supervisor.initialize()
+
+        await asyncio.wait_for(supervisor.terminate(), timeout=0.5)
+        assert entered.is_set()
+        assert ("seal_epoch", "TimeoutError") in supervisor.shutdown_failures
+        assert supervisor.shutdown_trace == SHUTDOWN_ORDER
+
+        release.set()
+        await asyncio.sleep(0)
+
+    asyncio.run(scenario(tmp_path))
+
+
+def test_terminate_bounds_a_wedged_private_worker_shutdown(tmp_path) -> None:
+    """A wedged non-publishing compute is bounded and retired fail-closed.
+
+    Cancelling the driver while it awaits a running executor future must preserve
+    ``CancelledError`` for teardown, but the accepted job still needs one terminal
+    accounting outcome.  Unlike an in-flight commit, pure compute cannot publish
+    after cancellation, so leaving it outstanding is a permanent quota/registry
+    leak rather than an orphan fence waiting for the real repository result.
+    """
+
+    async def scenario(tmp_path):
+        committer = EffectCommitter.open(tmp_path)
+        ref = _session_ref()
+        _seed_session(committer, ref)
+        entered = threading.Event()
+        release = threading.Event()
+
+        def wedged_compute(invocation):
+            entered.set()
+            release.wait()
+            return orchestrator.orchestrate(invocation)
+
+        ledger = SequenceLedger()
+        telemetry = TelemetrySink()
+        supervisor = ShadowSupervisor(
+            committer=committer,
+            ledger=ledger,
+            counters=IsolationCounters(),
+            telemetry_sink=telemetry,
+            compute=wedged_compute,
+            job_timeout_s=None,
+            drain_timeout_s=0.01,
+            shutdown_step_timeout_s=0.05,
+        )
+        await supervisor.initialize()
+        job = _make_job(ledger, ref, supervisor.epoch)
+        supervisor.offer(job)
+        assert await asyncio.to_thread(entered.wait, 2.0)
+
+        await asyncio.wait_for(supervisor.terminate(), timeout=0.5)
+        try:
+            assert ("executor_shutdown", "TimeoutError") in supervisor.shutdown_failures
+            assert supervisor.shutdown_trace == SHUTDOWN_ORDER
+            assert supervisor.outstanding == 0
+            assert ledger.status(ref, job.sequence) is SequenceStatus.DROPPED
+            assert [record.outcome for record in telemetry.recent()] == ["SHUTDOWN_DROPPED"]
+        finally:
+            # Never strand the non-daemon executor worker when a RED assertion fires.
+            release.set()
+
+        def worker_stopped() -> bool:
+            deadline = time.monotonic() + 2.0
+            while ShadowSupervisor.worker_thread_names() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            return not ShadowSupervisor.worker_thread_names()
+
+        assert await asyncio.to_thread(worker_stopped)
+
+    asyncio.run(scenario(tmp_path))
+
+
+def test_orphan_fence_survives_loop_close_after_bounded_terminate(tmp_path) -> None:
+    """A timed-out commit must reconcile even after its owning loop is gone.
+
+    Both bounded shutdown steps can expire while ``commit_turn`` holds the
+    repository lock immediately before pointer publication.  ``terminate`` then
+    returns, the host is free to close its loop, and the worker may publish later.
+    The worker-side completion fence must still make the ledger/telemetry and
+    outstanding accounting agree with the durable write.
+    """
+
+    armed = threading.Event()
+    commit_holds_lock = threading.Event()
+    release_commit = threading.Event()
+
+    def injector(point) -> None:
+        if point is FaultPoint.BEFORE_POINTER_PUBLISH and armed.is_set() and not commit_holds_lock.is_set():
+            commit_holds_lock.set()
+            # A bounded wait keeps a RED assertion from stranding a non-daemon worker.
+            release_commit.wait(2.0)
+
+    committer = EffectCommitter.open(tmp_path, fault_injector=injector)
+    ref = _session_ref()
+    _seed_session(committer, ref)
+    before = committer.load_state(ref)
+    assert before is not None
+    armed.set()
+
+    ledger = SequenceLedger()
+    telemetry = TelemetrySink()
+    supervisor = ShadowSupervisor(
+        committer=committer,
+        ledger=ledger,
+        counters=IsolationCounters(),
+        telemetry_sink=telemetry,
+        job_timeout_s=None,
+        drain_timeout_s=0.01,
+        shutdown_step_timeout_s=0.03,
+    )
+    job = None
+    loop = asyncio.new_event_loop()
+    default_executor = None
+
+    async def terminate_while_commit_is_blocked() -> None:
+        nonlocal job
+        await supervisor.initialize()
+        job = _make_job(ledger, ref, supervisor.epoch)
+        supervisor.offer(job)
+        assert await asyncio.to_thread(commit_holds_lock.wait, 2.0), "commit never reached the publication fault point"
+
+        await asyncio.wait_for(supervisor.terminate(), timeout=0.5)
+        assert ("seal_epoch", "TimeoutError") in supervisor.shutdown_failures
+        assert ("executor_shutdown", "TimeoutError") in supervisor.shutdown_failures
+        # The true outcome is unknowable until the blocked repository call returns.
+        assert supervisor.outstanding == 1
+
+    try:
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(terminate_while_commit_is_blocked())
+
+        # Mirror host shutdown: cancel pending bounded-step helpers, then close the
+        # loop before allowing the repository worker to finish.
+        pending = asyncio.all_tasks(loop)
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        default_executor = getattr(loop, "_default_executor", None)
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+        release_commit.set()
+        if default_executor is not None:
+            default_executor.shutdown(wait=True, cancel_futures=True)
+
+    assert job is not None
+    after = committer.load_state(ref)
+    assert after is not None and after.state.revision > before.state.revision, (
+        "the commit did not publish after bounded terminate returned"
+    )
+    assert supervisor.outstanding == 0, "the closed loop dropped the orphan completion fence"
+    assert ledger.status(ref, job.sequence) is SequenceStatus.COMMITTED
+    assert [record.outcome for record in telemetry.recent()] == ["COMMITTED_ORPHANED"]
 
 
 class _SlowTailCommitter:
@@ -783,9 +1127,66 @@ def test_profile_is_frozen_before_the_core_runs(tmp_path) -> None:
         # no clock, no deadline, no cancellation callback.
         assert recorder.arg_counts[0] == 1
         profile = invocation.envelope.compute_profile
-        assert profile.profile_id == "FULL_24_STDP"
+        assert profile.profile_id == formula.FORMULA_V2_PROFILE_ID
         # profile is consistent with the frozen manifest (core would reject otherwise)
-        assert (profile.snn_enabled, profile.ticks, profile.stdp_enabled, profile.reuse_last_summary) == formula.FULL_24_STDP
+        assert (
+            profile.snn_enabled,
+            profile.ticks,
+            profile.stdp_enabled,
+            profile.reuse_last_summary,
+        ) == formula.FORMULA_V2_SCALAR
+
+    asyncio.run(scenario(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "legacy_summary",
+    (None, tuple(0.25 for _ in range(formula.SNN_SUMMARY_DIM))),
+)
+def test_supervisor_pressure_selection_ignores_legacy_snn_summary(
+    tmp_path, legacy_summary
+) -> None:
+    async def scenario(tmp_path):
+        inner = EffectCommitter.open(tmp_path)
+        ref = _session_ref()
+        _seed_session(inner, ref)
+
+        class LegacySummaryView:
+            def __getattr__(self, name):
+                return getattr(inner, name)
+
+            def load_state(self, session_ref):
+                loaded = inner.load_state(session_ref)
+                assert loaded is not None
+                return LoadedState(
+                    state=replace(loaded.state, last_snn_summary=legacy_summary),
+                    base=loaded.base,
+                )
+
+        recorder = _Recorder()
+        ledger = SequenceLedger()
+        telemetry = TelemetrySink()
+        supervisor = ShadowSupervisor(
+            committer=LegacySummaryView(),
+            ledger=ledger,
+            counters=IsolationCounters(),
+            telemetry_sink=telemetry,
+            compute=recorder,
+            load_snapshot_provider=lambda: _snapshot(fill=0.70),
+            job_timeout_s=None,
+        )
+        await supervisor.initialize()
+        supervisor.offer(_make_job(ledger, ref, supervisor.epoch))
+        await supervisor.join()
+        await supervisor.terminate()
+
+        profile = recorder.invocations[0].envelope.compute_profile
+        assert profile.profile_id == formula.FORMULA_V2_PROFILE_ID
+        record = telemetry.last()
+        assert record is not None
+        assert record.profile_id == formula.FORMULA_V2_PROFILE_ID
+        assert record.load_level == 3
+        assert record.profile_selection_reason == "LOAD_PRESSURE"
 
     asyncio.run(scenario(tmp_path))
 

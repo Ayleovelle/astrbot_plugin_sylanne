@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import hmac
 import os
 import sys
 
@@ -88,6 +89,12 @@ except ImportError:
             return decorator
 
         def on_llm_response(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
+        def on_agent_done(self, *args, **kwargs):
             def decorator(func):
                 return func
 
@@ -231,7 +238,7 @@ stop_webui_server = _sylanne_webui_server.stop_webui_server
 # ---------------------------------------------------------------------------
 PLUGIN_NAME = "astrbot_plugin_sylanne"
 # Release identity — keep in sync with metadata.yaml `version` and the @register() below.
-PLUGIN_VERSION = "2.5.0-grey.5"
+PLUGIN_VERSION = "2.5.0-grey.6"
 PUBLIC_API_VERSION = "1.0"
 MAX_LLM_REQUEST_PROMPT_CHARS = 12000
 _MAX_PAYLOAD_SERIALIZED_CHARS = 60000
@@ -405,6 +412,15 @@ def _optional_tool_use_filter(**kwargs: Any):
     return dec(**kwargs)
 
 
+def _optional_agent_done_filter(**kwargs: Any):
+    """AstrBot 旧版本无 on_agent_done 时安全降级为不注册该钩子。"""
+
+    dec = getattr(filter, "on_agent_done", None)
+    if dec is None:
+        return lambda f: f
+    return dec(**kwargs)
+
+
 def _model_function_tool(**kwargs: Any):
     """Register a model-callable function tool, including zero-argument tools."""
     return filter.llm_tool(**kwargs)
@@ -426,8 +442,7 @@ def _model_function_tool(**kwargs: Any):
 
 _V3_MAX_PENDING_TURNS = 256
 _V3_SETTLED_HISTORY = 64
-#: v3 关停的硬上界。v3 卡住绝不能拖住 v2 的收尾（红线：v3 fail → v2 照常完成）。
-V3_SHADOW_TERMINATE_TIMEOUT_S = 10.0
+_V3_SHADOW_TERMINATE_TIMEOUT_S = 5.0
 
 
 class _V3PendingTurn:
@@ -440,6 +455,9 @@ class _V3PendingTurn:
         "message_id",
         "observation",
         "context",
+        "session_ref",
+        "speaker_digest",
+        "is_group",
         "token",
     )
 
@@ -452,6 +470,9 @@ class _V3PendingTurn:
         message_id: str,
         observation: Any,
         context: Any,
+        session_ref: Any,
+        speaker_digest: bytes | None,
+        is_group: bool | None,
         token: int,
     ) -> None:
         self.handle = handle
@@ -460,6 +481,9 @@ class _V3PendingTurn:
         self.message_id = message_id
         self.observation = observation
         self.context = context
+        self.session_ref = session_ref
+        self.speaker_digest = speaker_digest
+        self.is_group = is_group
         # 单调递增的栅栏令牌：同一 session_key 上后一轮会顶掉前一轮，令牌让"迟到的
         # 终端回调"能认出自己要结算的那轮已经不在了，从而放手而不是错结下一轮。
         self.token = token
@@ -481,49 +505,76 @@ class _V3ShadowFacade:
         self.accepting = False
         self._identity: Any = None
         self._pending: "collections.OrderedDict[str, _V3PendingTurn]" = collections.OrderedDict()
+        self._migration_tasks: dict[Any, asyncio.Task] = {}
+        self._deferred_offer_tasks: set[asyncio.Task] = set()
+        self._ready_sessions: "collections.OrderedDict[Any, None]" = collections.OrderedDict()
+        self._last_speakers: "collections.OrderedDict[Any, bytes]" = collections.OrderedDict()
+        self._lifecycle_lock = asyncio.Lock()
+        self._initialize_task: asyncio.Task | None = None
+        self._terminate_task: asyncio.Task | None = None
+        self._migration_gate = asyncio.Semaphore(1)
         self._next_token = 0
         self.settled_actions: collections.deque = collections.deque(maxlen=_V3_SETTLED_HISTORY)
         # 每进程一次性随机身份/密钥：只活在内存，绝不落盘、绝不进 trace。
         self._instance_id = f"sylanne-v3-{os.urandom(8).hex()}"
         self._correlation_secret = os.urandom(32)
-        self._identity_secret = os.urandom(32)
 
     # -- 生命周期 ---------------------------------------------------------
 
     async def initialize(self, *, root: Any, supervisor_kwargs: dict | None = None) -> bool:
-        """先 acquire epoch 再起 worker；任何失败只 fail-close v3。"""
+        """Coalesce concurrent starts; caller cancellation cannot cancel startup."""
 
-        if not self.enabled or self.runtime is not None:
-            return False
+        async with self._lifecycle_lock:
+            if not self.enabled or self.runtime is not None:
+                return False
+            if self._terminate_task is not None and self._terminate_task.done():
+                self._terminate_task = None
+            if self._terminate_task is not None and not self._terminate_task.done():
+                return False
+            if self._initialize_task is None:
+                self._initialize_task = asyncio.create_task(
+                    self._initialize(root=root, supervisor_kwargs=supervisor_kwargs)
+                )
+            task = self._initialize_task
+        return bool(await asyncio.shield(task))
+
+    async def _initialize(self, *, root: Any, supervisor_kwargs: dict | None) -> bool:
         runtime = None
         try:
             from sylanne_alpha.v3bridge.integration import V3ShadowRuntime
-            from sylanne_alpha.v3bridge.session_identity import SessionIdentityKey
-
-            runtime = V3ShadowRuntime(
-                root=root,
-                plugin_instance_id=self._instance_id,
-                correlation_secret=self._correlation_secret,
-                **(supervisor_kwargs or {}),
+            from sylanne_alpha.v3bridge.session_identity import (
+                load_or_create_session_identity_key,
+            )
+            root_path = Path(root)
+            identity = await asyncio.to_thread(
+                load_or_create_session_identity_key,
+                root_path / "session_identity.key",
+            )
+            runtime = await asyncio.to_thread(
+                lambda: V3ShadowRuntime(
+                    root=root_path,
+                    plugin_data_root=root_path.parent,
+                    plugin_instance_id=self._instance_id,
+                    correlation_secret=self._correlation_secret,
+                    **(supervisor_kwargs or {}),
+                )
             )
             # V3ShadowRuntime.initialize() 内部就是「先 committer.acquire_epoch()，
             # 再造 registry/supervisor 起 worker」的顺序，不要在这里重排。
             await runtime.initialize()
-            identity = SessionIdentityKey(
-                key_id=self._instance_id,
-                secret=self._identity_secret,
-            )
-        except Exception as exc:  # noqa: BLE001 - v3 起不来只关 v3，v2 照常
-            logger.warning(f"Sylanne v3 shadow disabled (initialize failed): {exc}")
+        except BaseException as exc:  # cleanup also covers loop-shutdown cancellation
             if runtime is not None:
                 try:
-                    await runtime.terminate()
-                except Exception:  # noqa: BLE001
+                    await asyncio.shield(runtime.terminate())
+                except BaseException:  # noqa: BLE001
                     pass
             self.runtime = None
             self.counters = None
-            self.enabled = False
             self.accepting = False
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            self.enabled = False
+            logger.warning(f"Sylanne v3 shadow disabled (initialize failed): {exc}")
             return False
         self.runtime = runtime
         self.counters = runtime.counters
@@ -536,29 +587,194 @@ class _V3ShadowFacade:
 
         self.accepting = False
 
-    async def terminate(self, *, timeout: float = V3_SHADOW_TERMINATE_TIMEOUT_S) -> None:
-        """有界关停：v3 关不干净也绝不能拖住 v2 的收尾。
-
-        红线「v3 fail → v2 照常完成」里的 fail 不只是抛异常，还包括【卡住】——只 catch
-        Exception 挡不住 hang。故这里再套一层 wait_for：超时就放手，把 v3 的残余留给
-        进程退出收，v2 继续做它的 task 取消/落盘/关 WebUI。
-        """
+    async def terminate(
+        self,
+        *,
+        timeout: float = _V3_SHADOW_TERMINATE_TIMEOUT_S,
+    ) -> None:
+        """Coalesce teardown, but never let wedged v3 IO block plugin shutdown."""
 
         self.accepting = False
-        runtime = self.runtime
-        self.runtime = None
-        self._pending.clear()
-        if runtime is None:
-            return
+        async with self._lifecycle_lock:
+            initialize_task = self._initialize_task
+            if (
+                self.runtime is None
+                and (initialize_task is None or initialize_task.done())
+                and self._terminate_task is None
+            ):
+                return
+            if self._terminate_task is None:
+                self._terminate_task = asyncio.create_task(self._terminate())
+            task = self._terminate_task
         try:
-            await asyncio.wait_for(runtime.terminate(), timeout=timeout)
+            completed = bool(
+                await asyncio.wait_for(asyncio.shield(task), timeout=float(timeout))
+            )
         except asyncio.TimeoutError:
             logger.warning(
-                f"Sylanne v3 shadow terminate timed out after {timeout}s; "
-                "v2 关停继续（v3 残余线程留到进程结束才回收）"
+                "Sylanne v3 shadow terminate timed out; "
+                "cleanup remains tracked while plugin teardown continues"
             )
+            return
+        if not completed:
+            async with self._lifecycle_lock:
+                if self._terminate_task is task:
+                    self._terminate_task = None
+
+    async def _terminate(self) -> bool:
+        initialize_task = self._initialize_task
+        if initialize_task is not None and not initialize_task.done():
+            await asyncio.gather(initialize_task, return_exceptions=True)
+        runtime = self.runtime
+        if runtime is None:
+            return True
+        try:
+            await self.join_private_tasks()
+            await runtime.terminate()
         except Exception as exc:  # noqa: BLE001 - v3 关停失败绝不阻断 v2 关停
             logger.warning(f"Sylanne v3 shadow terminate failed: {exc}")
+            return False
+        self.runtime = None
+        self.counters = None
+        self._identity = None
+        self._pending.clear()
+        self._migration_tasks.clear()
+        self._deferred_offer_tasks.clear()
+        self._ready_sessions.clear()
+        self._last_speakers.clear()
+        self._initialize_task = None
+        return True
+
+    async def join_private_tasks(self) -> None:
+        """Drain migration and deferred-offer tasks owned only by this facade."""
+
+        while True:
+            # A task may finish immediately before its done-callback gets an event-loop
+            # turn to remove it from the owner collection.  Re-gathering that completed
+            # task returns synchronously, which can otherwise spin forever and starve
+            # the callback that would remove it.  Prune completed entries explicitly so
+            # teardown never depends on callback scheduling order.
+            for session_ref, task in tuple(self._migration_tasks.items()):
+                if task.done() and self._migration_tasks.get(session_ref) is task:
+                    self._migration_tasks.pop(session_ref, None)
+            self._deferred_offer_tasks.difference_update(
+                task for task in self._deferred_offer_tasks if task.done()
+            )
+            tasks = tuple(self._migration_tasks.values()) + tuple(self._deferred_offer_tasks)
+            if not tasks:
+                return
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def ensure_session(
+        self,
+        *,
+        plugin: Any,
+        session_key: str,
+        platform_id: Any,
+        unified_msg_origin: Any,
+    ) -> bool:
+        """Start one background seed migration and reserve sequence 1.
+
+        The request path never waits for disk IO. A terminal arriving before the
+        migration completes is deferred inside the private v3 task set.
+        """
+
+        if not self.accepting or self.runtime is None or self._identity is None:
+            return False
+        try:
+            from sylanne_alpha.v3bridge.limits import MAX_REPOSITORY_SESSIONS
+
+            platform = _v3_text(platform_id)
+            origin = _v3_text(unified_msg_origin)
+            if not platform or not origin:
+                return False
+            session_ref = self._identity.session_ref(platform, origin, session_generation=0)
+            if session_ref is None:
+                return False
+            if session_ref in self._ready_sessions:
+                self._ready_sessions.move_to_end(session_ref)
+                return True
+            if session_ref in self._migration_tasks:
+                return False
+            if len(self._migration_tasks) + len(self._ready_sessions) >= MAX_REPOSITORY_SESSIONS:
+                return False
+            self.runtime.reserve_migration_sequence(session_ref)
+            task = asyncio.get_running_loop().create_task(
+                self._migrate_session(plugin, session_key, session_ref)
+            )
+            self._migration_tasks[session_ref] = task
+
+            def completed(done: asyncio.Task, ref: Any = session_ref) -> None:
+                self._migration_tasks.pop(ref, None)
+                try:
+                    ready = bool(done.result())
+                except BaseException:
+                    ready = False
+                if ready:
+                    self._ready_sessions[ref] = None
+                    self._ready_sessions.move_to_end(ref)
+                    while len(self._ready_sessions) > MAX_REPOSITORY_SESSIONS:
+                        self._ready_sessions.popitem(last=False)
+
+            task.add_done_callback(completed)
+            return False
+        except Exception as exc:  # noqa: BLE001 - migration admission is shadow-only
+            logger.debug(f"Sylanne v3 shadow migration scheduling skipped: {exc}")
+            return False
+
+    async def _migrate_session(self, plugin: Any, session_key: str, session_ref: Any) -> bool:
+        try:
+            from sylanne_alpha.v2core.integration import v2core_enabled
+            from sylanne_alpha.v2core.shadow_snapshot import (
+                SeedSnapshotUnavailable,
+                V2SeedSnapshotV1,
+                freeze_seed_snapshot_fallback,
+            )
+            from sylanne_alpha.v3bridge.effect_committer import CommitStatus
+            from sylanne_alpha.v3bridge.migration_coordinator import RecoveryDecision
+            from sylanne_alpha.v3core.formula_v1 import FORMULA_DIGEST
+
+            async with self._migration_gate:
+                if not self.accepting or self.runtime is None:
+                    return False
+                runtime = self.runtime
+                recovery = await asyncio.to_thread(
+                    runtime.recover,
+                    session_ref,
+                    source_digest=FORMULA_DIGEST,
+                    writer_epoch=runtime.epoch,
+                )
+                if recovery.decision is not RecoveryDecision.FRESH_MIGRATION_REQUIRED:
+                    ready = recovery.state is not None
+                    if ready:
+                        runtime.complete_migration_sequence(session_ref)
+                    return ready
+                try:
+                    seed = await freeze_seed_snapshot_fallback(plugin, session_key)
+                except SeedSnapshotUnavailable:
+                    if v2core_enabled(plugin):
+                        return False
+                    seed = V2SeedSnapshotV1()
+                outcome = await asyncio.to_thread(
+                    runtime.migrate,
+                    session_ref,
+                    source_digest=FORMULA_DIGEST,
+                    writer_epoch=runtime.epoch,
+                    seed_snapshot=seed,
+                )
+                ready = outcome.status in {
+                    CommitStatus.COMMITTED,
+                    CommitStatus.ALREADY_MIGRATED,
+                }
+                if ready:
+                    runtime.complete_migration_sequence(session_ref)
+                return ready
+        except Exception as exc:  # noqa: BLE001 - v3 migration never escapes into v2
+            logger.debug(
+                f"Sylanne v3 shadow migration skipped: {type(exc).__name__}: {exc}",
+                exc_info=True,
+            )
+            return False
 
     # -- 请求边界（design 14.1）-------------------------------------------
 
@@ -575,6 +791,16 @@ class _V3ShadowFacade:
         body: Any,
         addressed: bool = True,
         proactive: bool = False,
+        text_warm: float | None = None,
+        text_cold: float | None = None,
+        text_distress: float | None = None,
+        text_question: bool | None = None,
+        text_exclaim: float | None = None,
+        text_punct: float | None = None,
+        text_valence_cue: float | None = None,
+        text_engagement_cue: float | None = None,
+        sender_id: Any = None,
+        is_group: bool | None = None,
     ) -> None:
         """冻结一轮的公开输入事实；不推进 v3 状态，不阻塞 v2。
 
@@ -599,6 +825,11 @@ class _V3ShadowFacade:
             session_ref = self._identity.session_ref(platform, origin, session_generation=0)
             if session_ref is None:
                 return
+            try:
+                sender = _v3_text(sender_id)
+            except Exception:  # noqa: BLE001 - relation becomes unknown, turn remains valid
+                sender = ""
+            speaker_digest = self._identity.speaker_digest(platform, sender or None)
             # 三个上下文位互斥（快照自己会校验），且必须与 context class 一致。
             is_proactive = bool(proactive)
             is_addressed = bool(addressed) and not is_proactive
@@ -617,6 +848,14 @@ class _V3ShadowFacade:
                 proactive=is_proactive,
                 history_present=bool(history_present),
                 gap_seconds=_v3_gap(gap_seconds),
+                text_warm=_v3_optional_finite(text_warm),
+                text_cold=_v3_optional_finite(text_cold),
+                text_distress=_v3_optional_finite(text_distress),
+                text_question=text_question if type(text_question) is bool else None,
+                text_exclaim=_v3_optional_finite(text_exclaim),
+                text_punct=_v3_optional_finite(text_punct),
+                text_valence_cue=_v3_optional_finite(text_valence_cue),
+                text_engagement_cue=_v3_optional_finite(text_engagement_cue),
             )
             facts = build_observation_facts(
                 snapshot,
@@ -641,6 +880,9 @@ class _V3ShadowFacade:
                 message_id=message,
                 observation=(facts.raw_values, facts.previous_action),
                 context=context,
+                session_ref=session_ref,
+                speaker_digest=speaker_digest,
+                is_group=is_group if type(is_group) is bool else None,
                 token=self._next_token,
             )
             while len(self._pending) > _V3_MAX_PENDING_TURNS:
@@ -683,6 +925,7 @@ class _V3ShadowFacade:
         try:
             from sylanne_alpha.v2core.shadow_snapshot import V2ResponseCandidateV1
             from sylanne_alpha.v3bridge.actual_action import project_actual_action
+            from sylanne_alpha.v3core.contracts import ReactionFacts
 
             candidate = V2ResponseCandidateV1(
                 route_kind=route_kind,
@@ -695,18 +938,69 @@ class _V3ShadowFacade:
             )
             action = project_actual_action(candidate)
             self.settled_actions.append(action)
-            self.runtime.offer_response(
-                handle=pending.handle,
-                context=pending.context,
-                observation=pending.observation,
-                actual_action=action,
-                quality_score=None,
-                platform_id=pending.platform_id,
-                unified_msg_origin=pending.unified_msg_origin,
-                message_id=pending.message_id,
-            )
+            # ``same_sender`` is a response-boundary fact (formula-v2 spec §1.4).
+            # A later request can arrive while an earlier response is still in flight;
+            # request-time comparison would then use a stale previous speaker.  Compare
+            # against the latest *settled* speaker first, and only afterward publish this
+            # turn's speaker as the baseline for the next response boundary.
+            previous_speaker = self._last_speakers.get(pending.session_ref)
+            if pending.is_group is False:
+                same_sender: bool | None = True
+            elif previous_speaker is None or pending.speaker_digest is None:
+                same_sender = None
+            else:
+                same_sender = hmac.compare_digest(previous_speaker, pending.speaker_digest)
+            reaction_facts = ReactionFacts(same_sender=same_sender)
+            if pending.speaker_digest is not None:
+                self._last_speakers[pending.session_ref] = pending.speaker_digest
+                self._last_speakers.move_to_end(pending.session_ref)
+                while len(self._last_speakers) > _V3_SETTLED_HISTORY:
+                    self._last_speakers.popitem(last=False)
+            migration = self._migration_tasks.get(pending.session_ref)
+            if migration is None:
+                self._offer_pending(pending, action, reaction_facts)
+            else:
+                task = asyncio.get_running_loop().create_task(
+                    self._offer_after_migration(migration, pending, action, reaction_facts)
+                )
+                self._deferred_offer_tasks.add(task)
+                task.add_done_callback(self._deferred_offer_tasks.discard)
         except Exception as exc:  # noqa: BLE001 - 结算失败只丢这一轮影子
             logger.debug(f"Sylanne v3 shadow settle skipped: {exc}")
+
+    def _offer_pending(
+        self,
+        pending: _V3PendingTurn,
+        action: Any,
+        reaction_facts: Any,
+    ) -> None:
+        runtime = self.runtime
+        if runtime is None:
+            return
+        runtime.offer_response(
+            handle=pending.handle,
+            context=pending.context,
+            observation=pending.observation,
+            actual_action=action,
+            quality_score=None,
+            reaction_facts=reaction_facts,
+            platform_id=pending.platform_id,
+            unified_msg_origin=pending.unified_msg_origin,
+            message_id=pending.message_id,
+        )
+
+    async def _offer_after_migration(
+        self,
+        migration: asyncio.Task,
+        pending: _V3PendingTurn,
+        action: Any,
+        reaction_facts: Any,
+    ) -> None:
+        await asyncio.gather(migration, return_exceptions=True)
+        try:
+            self._offer_pending(pending, action, reaction_facts)
+        except Exception as exc:  # noqa: BLE001 - deferred offer is shadow-only
+            logger.debug(f"Sylanne v3 shadow deferred offer skipped: {exc}")
 
     def has_pending(self, session_key: str) -> bool:
         """这一轮是否还有未结算的捕获（供调用方在多个候选键里挑对的那个）。"""
@@ -732,6 +1026,114 @@ class _V3ShadowFacade:
         except Exception:  # noqa: BLE001 - 判不出来就当普通轮
             return False
 
+    def build_local_g2_report(self) -> dict[str, Any]:
+        """Build the canonical local-shadow G2 evidence from bounded diagnostics."""
+
+        runtime = self.runtime
+        counters = self.counters
+        if runtime is None or counters is None or runtime.registry is None:
+            raise RuntimeError("local G2 report requires an initialized v3 runtime")
+
+        import hashlib
+        import platform
+
+        from sylanne_alpha.v3bridge.build_flags import BUILD_CHANNEL, V3_SHADOW_ENABLED
+        from sylanne_alpha.v3core import formula_v1 as formula
+        from sylanne_alpha.v3core.canonical import canonical_json_bytes, canonical_sha256
+
+        telemetry = runtime.telemetry.recent()
+        registry_stats = runtime.registry.stats()
+        isolation_counters = counters.as_dict()
+        runtime_fingerprint = {
+            "formula_version": formula.FORMULA_VERSION,
+            "formula_digest": formula.FORMULA_DIGEST,
+            "model_revision": formula.ACTION_MODEL_REVISION,
+            "profile_id": formula.FORMULA_V2_PROFILE_ID,
+            "python_minor": f"{sys.version_info.major}.{sys.version_info.minor}",
+            "math_backend": "scalar-v1",
+            "cpu_architecture": platform.machine(),
+        }
+        runtime_fingerprint_digest = hashlib.sha256(
+            b"sylanne.v3.runtime-fingerprint.v1\x00"
+            + canonical_json_bytes(runtime_fingerprint)
+        ).hexdigest()
+        model_fingerprint = {
+            "revision": formula.ACTION_MODEL_REVISION,
+            "formula_digest": formula.FORMULA_DIGEST,
+        }
+        model_fingerprint["digest"] = canonical_sha256(model_fingerprint)
+        accepted_count = sum(1 for record in telemetry if record.queue_accepted)
+        dropped_count = sum(1 for record in telemetry if record.dropped)
+        correlated_count = registry_stats.accepted_terminal_claims
+        report: dict[str, Any] = {
+            "report_kind": "v3_local_shadow_g2_v1",
+            "plugin_version": PLUGIN_VERSION,
+            "source_channel": "grey" if "grey" in PLUGIN_VERSION.lower() else "stable",
+            "build_channel": BUILD_CHANNEL,
+            "build_shadow_enabled": bool(V3_SHADOW_ENABLED),
+            "formula_fingerprint": {
+                "version": formula.FORMULA_VERSION,
+                "digest": formula.FORMULA_DIGEST,
+            },
+            "model_fingerprint": model_fingerprint,
+            "runtime_fingerprint": runtime_fingerprint,
+            "runtime_fingerprint_digest": runtime_fingerprint_digest,
+            "accepted_count": accepted_count,
+            "dropped_count": dropped_count,
+            "correlated_count": correlated_count,
+            "isolation_counters": isolation_counters,
+            "passed": (
+                accepted_count > 0
+                and dropped_count == 0
+                and correlated_count > 0
+                and counters.all_zero()
+            ),
+        }
+        report["report_digest"] = canonical_sha256(report)
+        return report
+
+    @staticmethod
+    def _local_g2_report_path_from_environment() -> Path | None:
+        key = "SYLANNE_V3_GATE_REPORT"
+        if key not in os.environ:
+            return None
+        raw = os.environ[key]
+        if (
+            not raw
+            or raw != raw.strip()
+            or raw.startswith("~")
+            or any(character in raw for character in "\x00*?\"<>|")
+        ):
+            raise ValueError("G2 report path is malformed")
+        path = Path(raw)
+        if path.name in {"", ".", ".."} or path.suffix.lower() != ".json":
+            raise ValueError("G2 report path must name one explicit .json file")
+        if path.exists() and not path.is_file():
+            raise ValueError("G2 report path points to a non-file target")
+        return path
+
+    def write_local_g2_report_from_environment(self) -> dict[str, Any] | None:
+        """Write G2 only when an explicit target is requested by the gate command."""
+
+        path = self._local_g2_report_path_from_environment()
+        if path is None:
+            return None
+
+        from sylanne_alpha.v3core.canonical import canonical_json_bytes, canonical_sha256
+
+        report = self.build_local_g2_report()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(canonical_json_bytes(report) + b"\n")
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            body = dict(loaded)
+            digest = body.pop("report_digest")
+        except (OSError, TypeError, ValueError, KeyError) as exc:
+            raise RuntimeError("requested G2 report is missing or malformed") from exc
+        if loaded != report or digest != canonical_sha256(body):
+            raise RuntimeError("requested G2 report failed canonical validation")
+        return report
+
     @property
     def pending_count(self) -> int:
         return len(self._pending)
@@ -753,6 +1155,13 @@ def _v3_finite(body: Any, name: str) -> float | None:
     return value if math.isfinite(value) else None
 
 
+def _v3_optional_finite(value: Any) -> float | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    resolved = float(value)
+    return resolved if math.isfinite(resolved) else None
+
+
 def _v3_gap(value: Any) -> float | None:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
@@ -772,7 +1181,7 @@ def _v3_shadow_of(owner: Any) -> Any:
     "astrbot_plugin_sylanne",
     "Aylovelle.S.S",
     "Sylanne-Embodiment: sovereign emotional body runtime.",
-    "2.5.0-grey.5",  # keep in sync with metadata.yaml version + PLUGIN_VERSION
+    "2.5.0-grey.6",  # keep in sync with metadata.yaml version + PLUGIN_VERSION
     "https://github.com/Ayleovelle/astrbot_plugin_sylanne",
 )
 class EmotionalStatePlugin(Star):
@@ -1812,6 +2221,22 @@ class EmotionalStatePlugin(Star):
             logger.error(f"Sylanne on_llm_response error: {e}", exc_info=True)
             return
 
+    @_optional_agent_done_filter()
+    async def on_agent_done(
+        self,
+        event: Any,
+        run_context: Any,
+        response: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """在 AstrBot 覆盖写会话历史前清掉本轮隐藏语义节拍标记。"""
+
+        try:
+            self._llm_response_pipeline.on_agent_done(event, run_context, response)
+        except Exception as e:
+            logger.warning(f"Sylanne on_agent_done scrub failed: {e}", exc_info=True)
+
     # 只对"把文本念出来/发出去"类工具清理 text 参数（白名单）。绝不碰 FileWrite/
     # FileEdit 的 content、execute_python 的 code 等——那些 strip/截断会静默写坏文件/代码。
     _SPEECH_TOOL_NAMES = ("clone_tts", "tts", "send_message_to_user", "send_message")
@@ -1890,6 +2315,9 @@ class EmotionalStatePlugin(Star):
             for seg in chain:
                 if isinstance(seg, Plain):
                     text = strip_draft_blocks(seg.text)
+                    text = self._llm_response_pipeline.scrub_owned_semantic_markers(
+                        event, text
+                    )
                     if text:
                         seg.text = text
                         cleaned_chain.append(seg)
@@ -3812,10 +4240,9 @@ class EmotionalStatePlugin(Star):
                 es_bridge.deactivate()
         except Exception as e:
             logger.debug(f"Sylanne emotion_spirit bridge deactivate skipped: {e}")
-        # v3 shadow：v2 的 save 已经排干，这里 await v3 自己的有序关停（它内部会 drain
-        # 在途影子、封 epoch、shutdown 私有线程池并等每个 worker 线程退出）。必须在下面
-        # 那轮【通用 task 取消】之前完成：v3 的 task/线程从来不在 _background_tasks 里，
-        # 通用取消捞不到它们，等到那之后再收就是在关停后留活线程。
+        # v3 shadow：v2 的 save 已经排干，这里给 v3 自己的有序关停一个有限窗口。正常时
+        # 它仍在下面那轮【通用 task 取消】之前完成；若 commit/fsync/线程退出永久卡住，facade
+        # 会保留清理 task 但按上限返回，绝不能把 v2 与整个插件退出一起拖死。
         await self._v3_shadow.terminate()
         # 收集所有需要取消的任务
         tasks_to_cancel: list = []

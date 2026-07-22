@@ -125,9 +125,12 @@ RECORD_TYPES = ("episode_header", "turn")
 # dataset is cryptographically isolated from any v1 dataset regardless of the id;
 # the rename makes that isolation legible in the header/manifest too.
 INITIAL_STATE_ID = "neutral_eval_v2"
-EVALUATION_PROFILE_ID = "FULL_24_STDP"
+# Formula-v2 evaluation is pinned to a scalar profile whose compatibility fields
+# are all neutral.  The former FULL_24_STDP name is legacy-read compatibility, not
+# a live evaluation selector.
+EVALUATION_PROFILE_ID = "FORMULA_V2_SCALAR"
 SPLITS = ("train", "dev", "test")
-CONTROL_IDS = ("learned", "frozen", "random", "zero-lr")
+CONTROL_IDS = ("label_free_on", "label_free_frozen")
 
 #: The legal action set per context, derived from the frozen formula manifest
 #: rather than restated by hand, so it can never drift from the scorer's masks.
@@ -825,7 +828,7 @@ def _validate_header(row: dict) -> None:
     if row["pending_credit_censored"] is not True:
         raise DatasetError("episode boundary credit must be censored")
     if row["evaluation_profile_id"] != EVALUATION_PROFILE_ID:
-        raise DatasetError("episode header must fix the FULL_24_STDP evaluation profile")
+        raise DatasetError(f"episode header must fix the {EVALUATION_PROFILE_ID} evaluation profile")
     if len(bytes.fromhex(row["episode_seed"])) != 16:
         raise DatasetError("episode_seed must be 128 bits")
     # The manifest declares the derivation; enforce it at read time too, or a
@@ -986,7 +989,7 @@ def validate_manifest(manifest: dict) -> None:
             f"provenance class {manifest['provenance_class']!r} is not declared/immutable"
         )
     if manifest["evaluation_profile_id"] != EVALUATION_PROFILE_ID:
-        raise DatasetError("manifest must fix the FULL_24_STDP evaluation profile")
+        raise DatasetError(f"manifest must fix the {EVALUATION_PROFILE_ID} evaluation profile")
     if manifest["initial_state_id"] != INITIAL_STATE_ID:
         raise DatasetError(f"manifest must fix the {INITIAL_STATE_ID} initial state")
     if manifest["source_digest_key_destroyed"] is not True:

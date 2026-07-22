@@ -22,7 +22,9 @@ so the learner and its controls are scored on identical inputs.
 from __future__ import annotations
 
 import ast
+import copy
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -33,6 +35,10 @@ from sylanne_alpha.v3core.learning.label_free import _update_pref_offset
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
+
+
+def _gate_manifest() -> dict:
+    return json.loads((FIXTURE_DIR / "v3_gate_manifest_v1.json").read_text(encoding="utf-8"))
 
 # The reaction is driven by ENGAGEMENT (channel 26), which feeds r_react but NO
 # outcome axis (project_outcome never reads channel 26), so a planted engagement<->
@@ -176,6 +182,142 @@ def _no_tone_dataset(tmp_path: Path, *, episodes: int = 8, turns: int = 24):
     )
 
 
+def _labeled_no_tone_dataset(tmp_path: Path, *, episodes: int = 4, turns: int = 12):
+    """A labelled corpus where label-free ON/OFF must be directly comparable."""
+
+    return _dataset(
+        [
+            v3_export.SourceEpisode(
+                privacy_scope="SYNTHETIC",
+                session_identity=f"lf3-{ordinal}",
+                ordinal=ordinal,
+                turns=tuple(
+                    replace(
+                        _turn(
+                            index + 1,
+                            channels={
+                                _LENGTH_CHANNEL: float(20 + index),
+                                _SURPRISE_CHANNEL: 0.35 + 0.3 * (index % 2),
+                            },
+                        ),
+                        actual_action="HOLD" if index % 2 else "SPEAK",
+                    )
+                    for index in range(turns)
+                ),
+            )
+            for ordinal in range(episodes)
+        ],
+        tmp_path,
+        "lf3-labeled",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Frozen formula-v2 gate contract
+# --------------------------------------------------------------------------- #
+
+
+def test_preregistered_gate_is_formula_v2_codec4_and_freezes_lf1_to_lf4() -> None:
+    gate = _gate_manifest()
+
+    validated = v3_replay.validate_gate_manifest(gate)
+
+    assert validated["initial_state"]["initial_state_id"] == "neutral_eval_v2"
+    assert validated["initial_state"]["state_schema_version"] == 2
+    assert validated["initial_state"]["state_codec_version"] == 4
+    assert validated["initial_state"]["formula_version"] == "sylanne.v3.formula.v2"
+    assert validated["evaluation_profile"]["evaluation_profile_id"] == "FORMULA_V2_SCALAR"
+    assert set(validated["label_free_gates"]) == {"LF_1", "LF_2", "LF_3", "LF_4"}
+    assert validated["label_free_gates"]["LF_1"]["metric"] == "marginal_axis_mae"
+    assert validated["label_free_gates"]["LF_2"]["min_reaction_valid_settled_turns"] == 150
+    assert validated["label_free_gates"]["LF_3"]["max_relative_regression"] == 0.005
+    assert validated["label_free_gates"]["LF_4"]["min_gain_removal_fraction"] == 0.50
+
+
+@pytest.mark.parametrize(
+    ("path", "legacy_value"),
+    (
+        (("initial_state", "initial_state_id"), "neutral_eval_v1"),
+        (("initial_state", "state_codec_version"), 3),
+        (("initial_state", "formula_version"), "sylanne.v3.formula.v1"),
+        (("evaluation_profile", "evaluation_profile_id"), "FULL_24_STDP"),
+    ),
+)
+def test_gate_manifest_validation_rejects_legacy_formula_v1_semantics(
+    path: tuple[str, str], legacy_value: object
+) -> None:
+    gate = _gate_manifest()
+    gate[path[0]][path[1]] = legacy_value
+
+    with pytest.raises(v3_replay.ReplayError, match="formula-v2 gate manifest"):
+        v3_replay.validate_gate_manifest(gate)
+
+
+def test_formula_v2_evaluation_profile_has_no_retired_snn_stdp_semantics() -> None:
+    profile = v3_export.evaluation_profile()
+
+    assert profile.profile_id == "FORMULA_V2_SCALAR"
+    assert profile.snn_enabled is False
+    assert profile.ticks == 0
+    assert profile.stdp_enabled is False
+    assert profile.reuse_last_summary is False
+
+
+def test_formula_v2_ablation_and_gate_have_no_live_retired_selector() -> None:
+    gate_text = json.dumps(_gate_manifest(), sort_keys=True).lower()
+    assert "snn" not in gate_text
+    assert "stdp" not in gate_text
+    assert all("snn" not in name.lower() and "stdp" not in name.lower() for name, _ in v3_ablation.LADDER)
+    assert set(v3_ablation.CONTROLS) == {"label_free_on", "label_free_frozen"}
+
+
+def test_label_free_gates_consume_the_manifest_evidence_floor(tmp_path: Path) -> None:
+    dataset = _planted_dataset(tmp_path, episodes=1, turns=8)
+    strict = _gate_manifest()
+    relaxed = copy.deepcopy(strict)
+    relaxed["label_free_gates"]["LF_2"]["min_reaction_valid_settled_turns"] = 1
+    relaxed["label_free_gates"]["LF_2"]["min_episodes"] = 1
+
+    strict_report = v3_ablation.run_label_free_gates(
+        dataset, gate_manifest=strict, split=None, resamples=100, seed=7
+    )
+    relaxed_report = v3_ablation.run_label_free_gates(
+        dataset, gate_manifest=relaxed, split=None, resamples=100, seed=7
+    )
+
+    assert strict_report["insufficient_evidence"] is True
+    assert relaxed_report["insufficient_evidence"] is False
+    assert relaxed_report["evidence"]["min_reaction_valid"] == 1
+    assert relaxed_report["evidence"]["min_episodes"] == 1
+    assert (
+        relaxed_report["LF_4_permutation_control"]["required_collapse"]
+        == relaxed["label_free_gates"]["LF_4"]["min_gain_removal_fraction"]
+    )
+
+
+def test_lf3_non_interference_is_executed_from_frozen_thresholds(tmp_path: Path) -> None:
+    gate = _gate_manifest()
+    report = v3_ablation.run_label_free_gates(
+        _labeled_no_tone_dataset(tmp_path),
+        gate_manifest=gate,
+        split=None,
+        resamples=100,
+        seed=7,
+    )
+
+    lf3 = report["LF_3_non_interference"]
+    frozen = gate["label_free_gates"]["LF_3"]
+    assert lf3["status"] == "OK"
+    assert lf3["max_relative_regression"] == frozen["max_relative_regression"]
+    assert (
+        lf3["max_hold_contradiction_degradation_percentage_points"]
+        == frozen["max_hold_contradiction_degradation_percentage_points"]
+    )
+    assert set(lf3["required_zero_counters"]) == set(frozen["required_zero_counters"])
+    assert all(value == 0 for value in lf3["observed_zero_counters"].values())
+    assert lf3["passed"] is True
+
+
 # --------------------------------------------------------------------------- #
 # Planted corpus: LF-2 passes, LF-4 collapses, L1 recovers the offset direction
 # --------------------------------------------------------------------------- #
@@ -297,12 +439,12 @@ def test_label_free_gates_are_wired_into_the_ablation_report(tmp_path: Path) -> 
         [dataset_path],
         gate_manifest=json.loads((FIXTURE_DIR / "v3_gate_manifest_v1.json").read_text(encoding="utf-8")),
         gate_manifest_digest=v3_export.file_digest(FIXTURE_DIR / "v3_gate_manifest_v1.json"),
-        controls=("learned", "frozen"),
+        controls=("label_free_on", "label_free_frozen"),
         resamples=200,
         split=None,
     )
     assert "label_free" in report
-    assert report["label_free"]["report_kind"] == "v3_label_free_gates_v1"
+    assert report["label_free"]["report_kind"] == "v3_label_free_gates_v2"
 
 
 def test_the_label_free_record_carries_no_action_field() -> None:

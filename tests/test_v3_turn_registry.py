@@ -950,3 +950,43 @@ def test_v2_actual_action_duplicate_flag_is_defensive_unmatched_evidence() -> No
     )
 
     assert project_actual_action(candidate) is ActualAction.UNMATCHED_RESPONSE
+
+
+def test_sequence_ledger_resumes_after_committed_migration_sequence() -> None:
+    ledger = SequenceLedger(max_sessions=2, history_capacity=8)
+    session_ref = _session("migration-resume")
+    migration = TurnSequence(writer_epoch=7, local_sequence=1)
+
+    assert ledger.resume_committed(session_ref=session_ref, sequence=migration)
+    assert ledger.status_high_watermarks(session_ref).committed == migration
+    assert ledger.allocate(session_ref=session_ref, writer_epoch=7) == TurnSequence(7, 2)
+
+
+def test_sequence_ledger_reserves_migration_without_claiming_a_durable_commit() -> None:
+    ledger = SequenceLedger(max_sessions=2, history_capacity=8)
+    session_ref = _session("migration-reserved")
+    migration = TurnSequence(writer_epoch=7, local_sequence=1)
+
+    assert ledger.reserve(session_ref=session_ref, sequence=migration)
+    assert ledger.status(session_ref, migration) is SequenceStatus.RESERVED
+    assert ledger.status_high_watermarks(session_ref).committed is None
+    assert ledger.allocate(session_ref=session_ref, writer_epoch=7) == TurnSequence(7, 2)
+
+    assert ledger.resume_committed(session_ref=session_ref, sequence=migration)
+    assert ledger.status(session_ref, migration) is SequenceStatus.COMMITTED
+    assert ledger.status_high_watermarks(session_ref).committed == migration
+
+
+def test_sequence_ledger_resume_never_regresses_a_newer_epoch() -> None:
+    ledger = SequenceLedger(max_sessions=2, history_capacity=8)
+    session_ref = _session("migration-resume")
+
+    assert ledger.resume_committed(
+        session_ref=session_ref,
+        sequence=TurnSequence(writer_epoch=8, local_sequence=4),
+    )
+    assert not ledger.resume_committed(
+        session_ref=session_ref,
+        sequence=TurnSequence(writer_epoch=7, local_sequence=99),
+    )
+    assert ledger.allocate(session_ref=session_ref, writer_epoch=8) == TurnSequence(8, 5)

@@ -44,9 +44,10 @@ import hashlib
 import threading
 import time
 from collections import OrderedDict, deque
-from concurrent.futures import Future as _ConcurrentFuture, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
+from typing import Protocol
 
 from sylanne_alpha.v3bridge.actual_action import ActualAction
 from sylanne_alpha.v3bridge.comparator import compare as _default_compare
@@ -73,6 +74,7 @@ from sylanne_alpha.v3bridge.turn_registry import SequenceLedger, TurnHandle, Tur
 from sylanne_alpha.v3core.canonical import canonical_sha256
 from sylanne_alpha.v3core.contracts import (
     CoreInvocation,
+    ReactionFacts,
     SessionRef,
     TurnContextClass,
     TurnEnvelope,
@@ -102,6 +104,14 @@ SHUTDOWN_ORDER = (
 
 class _CoreTimeout(Exception):
     """Internal signal: the private executor did not finish within the bound."""
+
+
+class _ResultFuture(Protocol):
+    """Structural result surface shared by asyncio and concurrent futures."""
+
+    def cancelled(self) -> bool: ...
+
+    def result(self) -> object: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -144,6 +154,7 @@ class ShadowJob:
     actual_action: ActualAction
     quality_score: float | None
     deadline_monotonic: float
+    reaction_facts: ReactionFacts | None = None
     handle: TurnHandle | None = None
 
     def __post_init__(self) -> None:
@@ -159,6 +170,8 @@ class ShadowJob:
             raise TypeError("actual_action must have exact type ActualAction")
         if self.quality_score is not None and type(self.quality_score) is not float:
             raise TypeError("quality_score must be float or None")
+        if self.reaction_facts is not None and type(self.reaction_facts) is not ReactionFacts:
+            raise TypeError("reaction_facts must be ReactionFacts or None")
         if type(self.deadline_monotonic) is not float:
             raise TypeError("deadline_monotonic must have exact type float")
         if self.handle is not None and type(self.handle) is not TurnHandle:
@@ -295,11 +308,13 @@ class ShadowSupervisor:
         monotonic=time.monotonic,
         compute=orchestrate,
         load_snapshot_provider=None,
+        repository_admission_provider=None,
         per_session_cap: int = MAX_PER_SESSION_QUEUE,
         global_cap: int = MAX_GLOBAL_QUEUE,
         max_sessions: int = MAX_ACTIVE_SESSIONS,
         job_timeout_s: float | None = 30.0,
         drain_timeout_s: float = 5.0,
+        shutdown_step_timeout_s: float = 5.0,
     ) -> None:
         self._committer = committer
         self._ledger = ledger
@@ -312,8 +327,10 @@ class ShadowSupervisor:
         self._monotonic = monotonic
         self._compute = compute
         self._load_snapshot_provider = load_snapshot_provider
+        self._repository_admission_provider = repository_admission_provider
         self._job_timeout_s = job_timeout_s
         self._drain_timeout_s = float(drain_timeout_s)
+        self._shutdown_step_timeout_s = max(0.0, float(shutdown_step_timeout_s))
 
         self._queues = SessionQueues(
             per_session_cap=per_session_cap, global_cap=global_cap, max_sessions=max_sessions
@@ -339,10 +356,24 @@ class ShadowSupervisor:
         self._aux_tasks: set = set()
         self._tracked: set = set()
         self._inflight = None
+        # Only an in-flight repository commit may outlive driver cancellation and
+        # still publish.  Its done-fence owns finalization/accounting until the real
+        # outcome is known; every other cancelled phase is read/pure compute and can
+        # be retired fail-closed immediately. ``_commit_cancellation_job`` is the
+        # one-turn handoff marker consumed by ``_pump``; ``_orphan_commit_job`` stays
+        # live until the executor reports the true repository result.
+        self._commit_cancellation_job: ShadowJob | None = None
+        self._orphan_commit_job: ShadowJob | None = None
+        # The orphan completion callback runs on the private worker so it can still
+        # reconcile a late repository result after the host loop has closed.  Protect
+        # its ownership handoff and outstanding counter from the loop/worker race.
+        self._completion_lock = threading.Lock()
 
         self._outstanding = 0
         self._p95_samples: deque = deque(maxlen=64)
         self._shutdown_trace: list = []
+        self._shutdown_failures: deque = deque(maxlen=16)
+        self._shutdown_helpers: set = set()
 
     # -- introspection -------------------------------------------------------
 
@@ -363,12 +394,17 @@ class ShadowSupervisor:
         return tuple(self._shutdown_trace)
 
     @property
+    def shutdown_failures(self) -> tuple:
+        return tuple(self._shutdown_failures)
+
+    @property
     def queued_count(self) -> int:
         return self._queues.total
 
     @property
     def outstanding(self) -> int:
-        return self._outstanding
+        with self._completion_lock:
+            return self._outstanding
 
     @property
     def tracked_task_count(self) -> int:
@@ -396,11 +432,15 @@ class ShadowSupervisor:
         self._all_done.set()
         self._sidecar_park = asyncio.Event()
         self._shutdown_trace = []
+        self._shutdown_failures.clear()
         self._shutdown_started = False
         self._accepting = True
         self._running = True
         self._committer_admission_open = True
-        self._outstanding = 0
+        with self._completion_lock:
+            self._outstanding = 0
+            self._orphan_commit_job = None
+        self._commit_cancellation_job = None
 
         self._driver_task = self._loop.create_task(self._driver())
         self._tracked.add(self._driver_task)
@@ -421,7 +461,8 @@ class ShadowSupervisor:
         now = self._monotonic()
         status = self._queues.offer(job, now)
         if status is OfferStatus.ACCEPTED:
-            self._outstanding += 1
+            with self._completion_lock:
+                self._outstanding += 1
             if self._all_done is not None:
                 self._all_done.clear()
             if self._registry is not None and job.handle is not None:
@@ -460,10 +501,7 @@ class ShadowSupervisor:
         for job in self._queues.drain_all():
             self._ledger.mark_dropped(job.session_ref, job.sequence)
             self._finalize(job, dropped=True)
-            if self._outstanding > 0:
-                self._outstanding -= 1
-        if self._outstanding == 0 and self._all_done is not None:
-            self._all_done.set()
+            self._release_outstanding()
         trace.append("mark_unqueued_dropped")
 
         # 3. cancel the replay / metric sidecars.
@@ -493,7 +531,11 @@ class ShadowSupervisor:
         #    behind it would delay the fence instead of the loop.  The step order is
         #    unchanged: the await still completes before "seal_epoch" is traced.
         if self._epoch is not None:
-            await asyncio.to_thread(self._committer.seal_epoch, self._epoch)
+            await self._bounded_shutdown_step(
+                "seal_epoch",
+                self._committer.seal_epoch,
+                self._epoch,
+            )
         trace.append("seal_epoch")
 
         # 7. cancel any leftover tracked tasks (the driver and residue).
@@ -507,15 +549,23 @@ class ShadowSupervisor:
             await asyncio.gather(*self._tracked, return_exceptions=True)
         trace.append("gather_tracked_tasks")
 
-        # 9. shut down the private executor; do not return until every worker exits.
+        # 9. ask the private executor to stop, bounded like every blocking teardown
+        #    step.  A running OS thread cannot be cancelled; if this bound expires,
+        #    its commit completion fence reconciles directly on that worker later.
         #    ``shutdown(wait=True)`` joins worker threads, so calling it directly here
         #    would block the whole event loop until an orphaned (timed-out) compute
         #    thread finishes — v2's own teardown runs after ours, so a wedged core
-        #    would wedge v2.  Hand the join to a helper thread instead: the await still
-        #    does not return until every v3 worker has exited (plan Task 12), but the
-        #    loop stays live meanwhile and a caller-side timeout can still fire.
+        #    would wedge v2.  Hand the join to a helper thread instead so the loop stays
+        #    live while the bounded wait is active.  The helper may outlive this
+        #    coroutine after a timeout; correctness therefore cannot depend on the loop
+        #    remaining alive until the join finishes.
         if self._executor is not None:
-            await asyncio.to_thread(self._executor.shutdown, wait=True, cancel_futures=True)
+            await self._bounded_shutdown_step(
+                "executor_shutdown",
+                self._executor.shutdown,
+                wait=True,
+                cancel_futures=True,
+            )
         trace.append("executor_shutdown")
 
         # 10. clear the supervisor-owned registries.
@@ -528,6 +578,27 @@ class ShadowSupervisor:
         trace.append("clear_registries")
 
         self._initialized = False
+
+    async def _bounded_shutdown_step(self, name: str, fn, *args, **kwargs) -> None:
+        """Run blocking teardown without letting a wedged OS call hold the host."""
+
+        task = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
+        self._shutdown_helpers.add(task)
+
+        def completed(done: asyncio.Task) -> None:
+            self._shutdown_helpers.discard(done)
+            _discard_future_result(done)
+
+        task.add_done_callback(completed)
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(task),
+                timeout=self._shutdown_step_timeout_s,
+            )
+        except asyncio.TimeoutError:
+            self._shutdown_failures.append((name, "TimeoutError"))
+        except Exception as exc:  # noqa: BLE001 - teardown must continue fail-closed
+            self._shutdown_failures.append((name, type(exc).__name__))
 
     # -- driver + sidecars ---------------------------------------------------
 
@@ -549,7 +620,21 @@ class ShadowSupervisor:
             if not batch:
                 break
             for job in batch:
-                await self._process_job(job)
+                try:
+                    await self._process_job(job)
+                except asyncio.CancelledError:
+                    # A commit cancellation is owned by its orphan fence because the
+                    # worker may still publish.  Loads/profile reads/pure compute
+                    # cannot publish, so retire those immediately instead of leaking
+                    # one accepted job and leaving ``_all_done`` cleared forever.
+                    if self._commit_cancellation_job is job:
+                        self._commit_cancellation_job = None
+                    else:
+                        self._contain_shutdown_cancellation(job)
+                        self._release_outstanding()
+                    raise
+                except Exception as exc:  # noqa: BLE001 - one bad shadow job is isolated
+                    self._contain_job_failure(job, exc)
                 self._release_outstanding()
 
     async def _idle_replay_sidecar(self) -> None:
@@ -611,9 +696,22 @@ class ShadowSupervisor:
             return
 
         # Phase PROFILE: select and FREEZE one profile before any core stage.
-        snapshot = self._load_snapshot()
-        has_prior = loaded.state.last_snn_summary is not None
-        selection = self._profile_selector.select(snapshot, has_prior_summary=has_prior)
+        try:
+            snapshot = await self._load_snapshot()
+        except _CoreTimeout:
+            self._timeout(job, "", 0, checkpoints)
+            return
+        except Exception:  # noqa: BLE001 - load observation is shadow-only
+            self._finalize(job, dropped=True)
+            self._emit(
+                job,
+                "DROPPED_LOAD_ERROR",
+                dropped=True,
+                timed_out=False,
+                checkpoints=checkpoints,
+            )
+            return
+        selection = self._profile_selector.select(snapshot)
         if selection.skip:
             outcome = "REPOSITORY_HARD_STOP" if selection.dropped else "SKIP"
             self._finalize(job, dropped=True)
@@ -623,6 +721,7 @@ class ShadowSupervisor:
             )
             return
         profile = selection.profile  # frozen from here on
+        assert profile is not None  # ProfileSelection guarantees this for non-skip results.
 
         invocation = self._build_invocation(job, loaded.state, profile)
 
@@ -764,66 +863,84 @@ class ShadowSupervisor:
         straight through ``_pump``'s decrement.  The ledger and the disk disagreed about
         a turn that really happened.
 
-        The fence is a done-callback on the *executor* future, not on the asyncio
-        wrapper.  That distinction is the whole trick: cancelling the wrapper fires its
-        callbacks immediately with a CancelledError, when the true commit status is still
-        unknown; the concurrent future completes only when the worker thread is actually
-        finished and therefore carries the real status.  ``concurrent.futures`` runs that
-        callback on the worker thread, so it is reposted to the loop.
-
-        Why the repost is guaranteed to be executed rather than dropped on the floor:
-        terminate step 9 awaits ``asyncio.to_thread(executor.shutdown, wait=True)``, so
-        (a) the loop is provably alive and being serviced for the whole window, and (b)
-        that shutdown joins the worker thread, which cannot happen until this callback
-        has already run and queued its repost.  The repost is therefore in the loop's
-        ready queue before step 9's own await can resume, and runs before terminate
-        returns -- ``outstanding`` reaches zero and the ledger matches the disk.
+        The driver awaits a shielded asyncio wrapper, while the fence is a done-callback
+        on the underlying *executor* future.  Driver cancellation therefore leaves the
+        wrapper attached to the real result; the concurrent future completes only when
+        the worker thread is actually finished and carries the true status.
+        ``concurrent.futures`` runs that callback on the worker thread.  It settles the
+        thread-safe ledger/registry and bounded telemetry sink there instead of merely
+        reposting to the host loop: bounded executor shutdown may return first and the
+        host may close its loop before the repository call completes.  An ownership
+        marker makes an early normal callback a no-op; the cancellation handler settles
+        synchronously if completion won that narrow race.
         """
 
         assert self._loop is not None and self._executor is not None
         executor_future = self._executor.submit(self._committer.commit_turn, command)
         awaited = asyncio.wrap_future(executor_future, loop=self._loop)
-        # Registered AFTER wrap_future, so the wrapper's own state-copy callback runs
-        # first and the awaiting driver is always given its turn ahead of the fence.
+        # Registered AFTER wrap_future, so the wrapper receives the real result first.
         executor_future.add_done_callback(
-            lambda done_future: self._repost_orphan_fence(
-                done_future, awaited, job, profile_id, level, checkpoints, compute_us
+            lambda done_future: self._complete_orphan_fence(
+                done_future, job, profile_id, level, checkpoints, compute_us
             )
         )
         self._inflight = awaited
         try:
-            return await awaited
+            # Shield keeps the wrapper attached to the real concurrent-future result.
+            # Driver cancellation is handled below without converting a completed
+            # commit into a cancelled wrapper and without guessing publication status.
+            return await asyncio.shield(awaited)
+        except asyncio.CancelledError:
+            self._commit_cancellation_job = job
+            with self._completion_lock:
+                self._orphan_commit_job = job
+            # The executor may have finished just before cancellation was delivered,
+            # in which case its callback already ran while no orphan marker existed.
+            # Settle synchronously on the loop so that narrow race cannot lose the
+            # real outcome; a later worker callback becomes an identity-guarded no-op.
+            if executor_future.done():
+                self._settle_orphaned_commit(
+                    executor_future,
+                    job,
+                    profile_id,
+                    level,
+                    checkpoints,
+                    compute_us,
+                )
+            raise
         finally:
             self._inflight = None
 
-    def _repost_orphan_fence(self, executor_future, awaited, job, profile_id, level, checkpoints, compute_us) -> None:
-        """Runs on the v3 worker thread: hop the decision back onto the loop."""
+    def _complete_orphan_fence(
+        self, executor_future, job, profile_id, level, checkpoints, compute_us
+    ) -> None:
+        """Runs on the v3 worker and settles without depending on host-loop liveness."""
 
-        loop = self._loop
-        if loop is None or loop.is_closed():
-            return
-        try:
-            loop.call_soon_threadsafe(
-                self._settle_orphaned_commit,
-                executor_future, awaited, job, profile_id, level, checkpoints, compute_us,
-            )
-        except RuntimeError:  # pragma: no cover - the loop closed between check and call
-            pass
+        self._settle_orphaned_commit(
+            executor_future,
+            job,
+            profile_id,
+            level,
+            checkpoints,
+            compute_us,
+        )
 
     def _settle_orphaned_commit(
-        self, executor_future, awaited, job, profile_id, level, checkpoints, compute_us
+        self, executor_future, job, profile_id, level, checkpoints, compute_us
     ) -> None:
-        """Runs on the loop: record a commit whose supervising await was cut off.
+        """Record a commit whose supervising await was cut off.
 
-        Fires only when ``awaited`` was cancelled, which is exactly "the driver was
-        cancelled out of the await and will never record this outcome".  When the await
-        is intact the driver owns the outcome and this is a no-op, so the two paths can
-        never both finalize the same job.  Both run on the loop thread, so the check and
-        the finalize are not racing each other.
+        Fires only after ``_commit_offload`` marks this job orphaned, which is exactly
+        "the driver was cancelled out of the await and will never record this outcome".
+        When the await is intact the driver owns the outcome and this is a no-op, so the
+        two paths can never both finalize the same job.  The ownership check is locked
+        because either the loop's cancellation path or the worker callback may win.
         """
 
-        if not awaited.cancelled():
-            return  # the awaiting driver resumed normally and owns this outcome
+        with self._completion_lock:
+            if self._orphan_commit_job is not job:
+                return  # the awaiting driver resumed normally and owns this outcome
+            self._orphan_commit_job = None
 
         if executor_future.cancelled() or executor_future.exception() is not None:
             # Nothing reached the repository: either the executor shutdown cancelled a
@@ -864,10 +981,59 @@ class ShadowSupervisor:
     def _release_outstanding(self) -> None:
         """Retire exactly one accepted job from the outstanding count."""
 
-        if self._outstanding > 0:
-            self._outstanding -= 1
-        if self._outstanding == 0 and self._all_done is not None:
+        with self._completion_lock:
+            if self._outstanding > 0:
+                self._outstanding -= 1
+            all_done = self._outstanding == 0
+        if not all_done or self._all_done is None:
+            return
+        if threading.get_ident() == self._loop_thread_ident:
             self._all_done.set()
+            return
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        try:
+            loop.call_soon_threadsafe(self._all_done.set)
+        except RuntimeError:  # the host loop closed between the check and the post
+            pass
+
+    def _contain_job_failure(self, job: ShadowJob, exc: Exception) -> None:
+        """Fail one job closed without allowing persistence/telemetry to kill the driver."""
+
+        try:
+            self._finalize(job, dropped=True)
+        except Exception:  # noqa: BLE001 - ledger/registry failure cannot escape the shadow
+            pass
+        try:
+            self._emit(
+                job,
+                "DROPPED_RUNTIME_ERROR",
+                dropped=True,
+                timed_out=False,
+                checkpoints=[],
+                reason=type(exc).__name__,
+            )
+        except Exception:  # noqa: BLE001 - observability is best-effort, driver liveness is not
+            pass
+
+    def _contain_shutdown_cancellation(self, job: ShadowJob) -> None:
+        """Retire a cancelled non-commit phase without swallowing cancellation."""
+
+        try:
+            self._finalize(job, dropped=True)
+        except Exception:  # noqa: BLE001 - teardown accounting remains fail-isolated
+            pass
+        try:
+            self._emit(
+                job,
+                "SHUTDOWN_DROPPED",
+                dropped=True,
+                timed_out=False,
+                checkpoints=[],
+            )
+        except Exception:  # noqa: BLE001 - telemetry cannot block teardown
+            pass
 
     async def _run_core(self, invocation: CoreInvocation):
         return await self._offload(self._compute, invocation, timeout=self._job_timeout_s)
@@ -886,18 +1052,31 @@ class ShadowSupervisor:
             profile_id=profile_id, level=level,
         )
 
-    def _load_snapshot(self) -> LoadSnapshotV1:
+    async def _load_snapshot(self) -> LoadSnapshotV1:
         if self._load_snapshot_provider is not None:
-            snapshot = self._load_snapshot_provider()
+            snapshot = await self._offload(
+                self._load_snapshot_provider,
+                timeout=self._job_timeout_s,
+            )
             if type(snapshot) is not LoadSnapshotV1:
                 raise TypeError("load_snapshot_provider must return a LoadSnapshotV1")
             return snapshot
+        admission = RepositoryAdmissionState.OPEN
+        if self._repository_admission_provider is not None:
+            admission = await self._offload(
+                self._repository_admission_provider,
+                timeout=self._job_timeout_s,
+            )
+            if type(admission) is not RepositoryAdmissionState:
+                raise TypeError(
+                    "repository_admission_provider must return RepositoryAdmissionState"
+                )
         now = self._monotonic()
         return LoadSnapshotV1(
             global_queue_fill=self._queues.fill_ratio(),
             oldest_job_age_ms=self._queues.oldest_age_ms(now),
             committed_compute_p95_ms=self._p95_ms(),
-            repository_admission=RepositoryAdmissionState.OPEN,
+            repository_admission=admission,
         )
 
     def _p95_ms(self) -> float:
@@ -922,7 +1101,12 @@ class ShadowSupervisor:
         )
         core_action = to_core_action(job.actual_action)
         projected = None if core_action is None else (core_action, job.quality_score)
-        return CoreInvocation(envelope=envelope, base_state=base_state, projected_actual_outcome=projected)
+        return CoreInvocation(
+            envelope=envelope,
+            base_state=base_state,
+            projected_actual_outcome=projected,
+            reaction_facts=job.reaction_facts,
+        )
 
     @staticmethod
     def _derive_seed(job: ShadowJob, profile) -> bytes:
@@ -978,6 +1162,8 @@ class ShadowSupervisor:
     ) -> None:
         if self._telemetry_sink is None:
             return
+        if not reason and profile_id:
+            reason = "NOMINAL" if level == 0 else "LOAD_PRESSURE"
         telemetry = RuntimeTelemetry(
             turn_id=job.turn_id,
             session_key_id=job.session_ref.key_id,
@@ -1000,17 +1186,20 @@ class ShadowSupervisor:
         self._telemetry_sink.record(telemetry)
 
 
-def _discard_future_result(future: "_ConcurrentFuture") -> None:
-    """Retrieve (and drop) an orphaned executor future's result to avoid warnings.
+def _discard_future_result(future: _ResultFuture) -> None:
+    """Retrieve (and drop) a completed future's ordinary failure to avoid warnings.
 
-    A cancelled future raises ``CancelledError`` (a ``BaseException`` in modern
-    Python), so the guard is deliberately broad — the whole point is to swallow the
-    orphaned outcome of a timed-out invocation.
+    Both asyncio and concurrent futures expose this structural surface.  A genuinely
+    cancelled future is already accounted for by its owner and needs no retrieval;
+    an ``asyncio.CancelledError`` carried as a result payload is deliberately *not*
+    swallowed because cancellation must keep its control-flow meaning.
     """
 
+    if future.cancelled():
+        return
     try:
-        future.exception()
-    except BaseException:  # noqa: BLE001 - cancelled/failed orphans are intentionally ignored
+        future.result()
+    except Exception:  # noqa: BLE001 - ordinary failed orphans are intentionally ignored
         pass
 
 

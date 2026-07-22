@@ -33,6 +33,8 @@ from urllib.parse import parse_qs, urlparse
 
 from pathlib import Path
 
+from sylanne_alpha.webui_routes import build_model_routing_payload
+
 
 def _get_plugin_version() -> str:
     """从 metadata.yaml 读取版本号（缓存结果）。"""
@@ -561,24 +563,7 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
 
     async def handle_settings_get(request: web.Request) -> web.Response:
         current_plugin = _plugin(plugin)
-        schema = _load_schema(current_plugin)
-        config = dict(getattr(current_plugin, "_config", {}) or {})
-        # Ensure every schema key is present in values (use default if unconfigured)
-        # 敏感字段(token/密钥等)的值掩码，避免明文回传给前端泄露
-        values = {}
-        for key, meta in schema.items():
-            raw = config.get(key, meta.get("default"))
-            if _is_sensitive_key(key) and raw:
-                values[key] = "********"
-            else:
-                values[key] = raw
-        return web.json_response(
-            {
-                "schema": schema,
-                "values": values,
-                "providers": await _provider_items(current_plugin),
-            }
-        )
+        return web.json_response(await _settings_payload(current_plugin))
 
     async def handle_settings_post(request: web.Request) -> web.Response:
         try:
@@ -1929,18 +1914,7 @@ def start_webui_thread_server(
                 elif path == "/api/settings":
                     with _plugin_access_lock:
                         current_plugin = _plugin(plugin)
-                        schema = _load_schema(current_plugin)
-                        config = dict(getattr(current_plugin, "_config", {}) or {})
-                        values = {}
-                        for key, meta in schema.items():
-                            raw = config.get(key, meta.get("default"))
-                            if _is_sensitive_key(key) and raw:
-                                values[key] = "********"
-                            else:
-                                values[key] = raw
-                    self._send_json(
-                        {"schema": schema, "values": values, "providers": []}
-                    )
+                    self._send_json(asyncio.run(_settings_payload(current_plugin)))
                 elif path == "/api/computation_logs":
                     _last_diag_request = time.time()
                     with _plugin_access_lock:
@@ -2553,10 +2527,13 @@ async def _provider_items(plugin: Any) -> list[dict[str, Any]]:
             }
         )
 
+    # Dedicated registries must win deduplication.  AstrBot's generic registry
+    # may include embedding providers; visiting it first would mislabel them as
+    # text models and make the compact embedding selector appear empty.
     for method_name, provider_type in (
-        ("get_all_providers", "llm"),
-        ("get_all_llm_providers", "llm"),
         ("get_all_embedding_providers", "embedding"),
+        ("get_all_llm_providers", "llm"),
+        ("get_all_providers", "llm"),
     ):
         getter = getattr(context, method_name, None)
         if not callable(getter):
@@ -2573,6 +2550,24 @@ async def _provider_items(plugin: Any) -> list[dict[str, Any]]:
         for provider in iterable:
             add(provider, provider_type)
     return items
+
+
+async def _settings_payload(plugin: Any) -> dict[str, Any]:
+    """Build the identical settings response for aiohttp and stdlib modes."""
+
+    schema = _load_schema(plugin)
+    config = dict(getattr(plugin, "_config", {}) or {})
+    values: dict[str, Any] = {}
+    for key, meta in schema.items():
+        raw = config.get(key, meta.get("default"))
+        values[key] = "********" if _is_sensitive_key(key) and raw else raw
+    providers = await _provider_items(plugin)
+    return {
+        "schema": schema,
+        "values": values,
+        "providers": providers,
+        "model_routing": build_model_routing_payload(config, schema, providers),
+    }
 
 
 def _known_sessions(plugin: Any, *, requested: str = "") -> list[str]:

@@ -46,7 +46,7 @@ import struct
 import zlib
 from math import isfinite
 
-from ..formula_v1 import AXIS_DIM, OBSERVATION_DIM, SNN_SUMMARY_DIM
+from ..formula_v1 import AXIS_DIM, FORMULA_VERSION, OBSERVATION_DIM, SNN_SUMMARY_DIM
 from .models import (
     ACTION_COUNT,
     EXPERIENCE_FEATURE_DIM,
@@ -56,6 +56,7 @@ from .models import (
     LATENT_DIM,
     STYLE_RING_CAPACITY,
     STYLE_SIGNATURE_FIELDS,
+    STATE_SCHEMA_VERSION,
     THETA_PARAMS,
     WORKSPACE_BROADCAST_DIM,
     ActionBeliefs,
@@ -89,6 +90,7 @@ SUPPORTED_STATE_CODEC_VERSIONS = (1, 2, 3, 4)
 #: The legacy (v1/v2) SnnState segment was sized by these frozen constants; kept
 #: here only so the read migration can skip past a legacy segment exactly.
 _LEGACY_SNN_NEURON_COUNT = 96
+_LEGACY_FORMULA_VERSION = "sylanne.v3.formula.v1"
 MAX_STATE_BYTES_DEFAULT = None
 
 _ACTION_ORDER = (Action.SPEAK, Action.HOLD, Action.CLARIFY, Action.REACH)
@@ -277,6 +279,12 @@ def encode_state(state: V3State, *, max_bytes: int | None = MAX_STATE_BYTES_DEFA
 
     if type(state) is not V3State:
         raise StateCodecError("encode_state requires a V3State")
+    if (
+        state.schema_version != STATE_SCHEMA_VERSION
+        or state.formula_version != FORMULA_VERSION
+        or state.model_revision != FORMULA_VERSION
+    ):
+        raise StateCodecError("encode_state requires the current schema/formula header")
     writer = _Writer()
     writer.raw(STATE_CODEC_MAGIC)
     writer.u16(STATE_CODEC_VERSION)
@@ -444,6 +452,12 @@ def decode_state(blob: object) -> V3State:
         raise StateCodecError("unsupported state codec version")
 
     header = _read_header(reader)
+    if header["schema_version"] > STATE_SCHEMA_VERSION:
+        raise StateCodecError("state schema is newer than this codec")
+    if header["formula_version"] not in (_LEGACY_FORMULA_VERSION, FORMULA_VERSION):
+        raise StateCodecError("state formula version is not a supported legacy/current value")
+    if header["model_revision"] not in (_LEGACY_FORMULA_VERSION, FORMULA_VERSION):
+        raise StateCodecError("state model revision is not a supported legacy/current value")
     # v1 -> v2 read migration: a pre-fix blob packed latent_axes as float16, so it is
     # read back on the half grid.  Every float16 is exactly representable as a float
     # (and as a float32), so the widening is lossless and needs no rescaling: the v1
@@ -471,14 +485,17 @@ def decode_state(blob: object) -> V3State:
     return _guard(
         lambda: V3State(
             session_ref=header["session_ref"],
-            schema_version=header["schema_version"],
+            # Reading a legacy codec is the migration boundary: callers never see
+            # a schema1/formula_v1 DTO that a current producer could accidentally
+            # persist as codec4.  Frozen legacy pending revisions remain untouched.
+            schema_version=STATE_SCHEMA_VERSION,
             source_digest=header["source_digest"],
             state_generation_id=header["state_generation_id"],
             revision=header["revision"],
             writer_epoch=header["writer_epoch"],
             session_generation=header["session_generation"],
-            formula_version=header["formula_version"],
-            model_revision=header["model_revision"],
+            formula_version=FORMULA_VERSION,
+            model_revision=FORMULA_VERSION,
             last_committed_turn_sequence=header["last_committed_turn_sequence"],
             last_committed_turn_id=header["last_committed_turn_id"],
             latent_axes=latent,

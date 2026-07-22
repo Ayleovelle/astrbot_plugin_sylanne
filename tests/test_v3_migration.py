@@ -21,7 +21,7 @@ from sylanne_alpha.v3bridge.effect_committer import (
     MigrationCommit,
     TurnCommit,
 )
-from sylanne_alpha.v3bridge._state_repository import FaultPoint
+from sylanne_alpha.v3bridge._state_repository import FaultPoint, RepositoryBudgetExceeded
 from sylanne_alpha.v3bridge.limits import MAX_STATE_BYTES
 from sylanne_alpha.v3bridge.session_identity import SessionIdentityKey, session_filename_token
 from sylanne_alpha.v3bridge.migration_coordinator import (
@@ -286,6 +286,45 @@ def test_concurrent_migration_produces_a_single_seed(tmp_path: Path) -> None:
     assert committer.pointer_generation(_ref()) == gen_one
     loaded = committer.load_state(_ref())
     assert loaded is not None and loaded.state.state_generation_id == gen_one
+
+
+def test_seed_anchor_cannot_cross_the_repository_hard_cap(tmp_path: Path) -> None:
+    """Anchor staging must reserve capacity before any durable seed is published."""
+
+    committer = EffectCommitter.open(tmp_path, hard_limit_bytes=1)
+    epoch = 1
+    frame = seed_frame_from_v2(_snapshot())
+    generation = new_generation_id()
+    initial = SeedProjector().build_initial_state(
+        frame,
+        session_ref=_ref(),
+        state_generation_id=generation,
+        source_digest="a" * 64,
+        writer_epoch=epoch,
+    )
+    anchor = build_seed_anchor(
+        generation,
+        frame,
+        session_generation=0,
+        provenance="V2_SEED",
+    )
+
+    with pytest.raises(RepositoryBudgetExceeded, match="seed anchor"):
+        committer.commit_migration(
+            MigrationCommit(
+                session_ref=_ref(),
+                initial_state=initial,
+                anchor=anchor,
+                trace_bytes=b"migration-trace",
+                turn_id=f"v3-migration-{generation}",
+                turn_sequence=TurnSequence(epoch, 1),
+            )
+        )
+
+    repo = committer.repository
+    assert repo.usage_bytes() <= repo.hard_limit_bytes
+    assert not list((repo.root / "anchors").rglob("*.anchor"))
+    assert committer.load_state(_ref()) is None
 
 
 def test_learned_state_is_never_reprojected_by_a_second_migration(tmp_path: Path) -> None:
