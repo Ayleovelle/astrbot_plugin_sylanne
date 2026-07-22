@@ -51,16 +51,16 @@ SELECTOR_SURFACE = (
 # --------------------------------------------------------------------------
 
 
-def _stable_metadata(tmp_path: Path) -> Path:
-    """A temporary metadata copy whose version is a stable release version."""
+def _grey_metadata(tmp_path: Path) -> Path:
+    """A temporary metadata copy whose version is a grey release version."""
     source = (package_plugin.ROOT / "metadata.yaml").read_text(encoding="utf-8")
     patched = re.sub(
         r'(?m)^version:\s*.*$',
-        'version: "2.5.0"',
+        'version: "2.5.0-grey.7"',
         source,
         count=1,
     )
-    assert 'version: "2.5.0"' in patched
+    assert 'version: "2.5.0-grey.7"' in patched
     target = tmp_path / "metadata.yaml"
     target.write_text(patched, encoding="utf-8")
     return target
@@ -119,13 +119,13 @@ def _build(tmp_path: Path, channel: str, *, metadata: Path | None = None) -> Pat
 
 @pytest.fixture(scope="module")
 def grey_archive(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    return _build(tmp_path_factory.mktemp("grey"), "grey")
+    root = tmp_path_factory.mktemp("grey")
+    return _build(root, "grey", metadata=_grey_metadata(root))
 
 
 @pytest.fixture(scope="module")
 def stable_archive(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    root = tmp_path_factory.mktemp("stable")
-    return _build(root, "stable", metadata=_stable_metadata(root))
+    return _build(tmp_path_factory.mktemp("stable"), "stable")
 
 
 # --------------------------------------------------------------------------
@@ -224,20 +224,19 @@ def _walk_keys(node: object) -> list[str]:
 # --------------------------------------------------------------------------
 
 
-def test_stable_packaging_rejects_checked_in_grey_metadata(tmp_path: Path) -> None:
-    """The checked-in grey metadata may never be shipped as a stable artifact."""
+def test_grey_packaging_rejects_checked_in_stable_metadata(tmp_path: Path) -> None:
     version = package_plugin._read_metadata_version(
         (package_plugin.ROOT / "metadata.yaml").read_bytes()
     )
-    assert "grey" in version.lower(), "baseline assumption: checked-in metadata is grey"
+    assert version == "2.5.0"
 
-    with pytest.raises(RuntimeError, match="stable"):
-        _build(tmp_path, "stable")
-
-
-def test_grey_packaging_rejects_stable_metadata(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="grey"):
-        _build(tmp_path, "grey", metadata=_stable_metadata(tmp_path))
+        _build(tmp_path, "grey")
+
+
+def test_stable_packaging_rejects_grey_metadata(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="stable"):
+        _build(tmp_path, "stable", metadata=_grey_metadata(tmp_path))
 
 
 def test_metadata_override_may_not_be_the_tracked_metadata_file(tmp_path: Path) -> None:
@@ -247,11 +246,11 @@ def test_metadata_override_may_not_be_the_tracked_metadata_file(tmp_path: Path) 
     HEAD-cleanliness check and ship uncommitted bytes under an old commit id.
     """
     with pytest.raises(RuntimeError, match="temporary copy"):
-        _build(tmp_path, "grey", metadata=package_plugin.ROOT / "metadata.yaml")
+        _build(tmp_path, "stable", metadata=package_plugin.ROOT / "metadata.yaml")
 
     # ... including via a non-normalized path spelling.
     with pytest.raises(RuntimeError, match="temporary copy"):
-        _build(tmp_path, "grey", metadata=package_plugin.ROOT / "docs" / ".." / "metadata.yaml")
+        _build(tmp_path, "stable", metadata=package_plugin.ROOT / "docs" / ".." / "metadata.yaml")
 
 
 def test_metadata_override_does_not_exempt_other_inputs_from_the_head_check(
@@ -262,15 +261,14 @@ def test_metadata_override_does_not_exempt_other_inputs_from_the_head_check(
     monkeypatch.setattr(package_plugin, "_paths_differing_from_head", lambda: {dirty})
 
     with pytest.raises(RuntimeError, match="HEAD"):
-        _build(tmp_path, "stable", metadata=_stable_metadata(tmp_path))
+        _build(tmp_path, "grey", metadata=_grey_metadata(tmp_path))
 
 
-def test_stable_archive_carries_the_temporary_stable_version(stable_archive: Path) -> None:
-    assert _manifest(stable_archive)["metadata_version"] == "2.5.0"
-    with zipfile.ZipFile(stable_archive) as zf:
+def test_grey_archive_carries_the_temporary_grey_version(grey_archive: Path) -> None:
+    assert _manifest(grey_archive)["metadata_version"] == "2.5.0-grey.7"
+    with zipfile.ZipFile(grey_archive) as zf:
         shipped = zf.read(f"{PLUGIN}/metadata.yaml").decode("utf-8")
-    assert 'version: "2.5.0"' in shipped
-    assert "grey" not in shipped.split("version:")[1].split("\n")[0]
+    assert 'version: "2.5.0-grey.7"' in shipped
 
 
 # --------------------------------------------------------------------------
@@ -278,8 +276,8 @@ def test_stable_archive_carries_the_temporary_stable_version(stable_archive: Pat
 # --------------------------------------------------------------------------
 
 
-def test_manifest_records_channel_version_commit_and_digests(grey_archive: Path) -> None:
-    manifest = _manifest(grey_archive)
+def test_manifest_records_channel_version_commit_and_digests(stable_archive: Path) -> None:
+    manifest = _manifest(stable_archive)
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=package_plugin.ROOT,
@@ -288,15 +286,13 @@ def test_manifest_records_channel_version_commit_and_digests(grey_archive: Path)
         check=True,
     ).stdout.strip()
 
-    assert manifest["channel"] == "grey"
-    assert manifest["metadata_version"] == package_plugin._read_metadata_version(
-        (package_plugin.ROOT / "metadata.yaml").read_bytes()
-    )
+    assert manifest["channel"] == "stable"
+    assert manifest["metadata_version"] == "2.5.0"
     assert manifest["git_commit"] == commit
     assert re.fullmatch(r"[0-9a-f]{64}", manifest["payload_digest"])
     assert re.fullmatch(r"[0-9a-f]{64}", manifest["generated_file_digest"])
 
-    with zipfile.ZipFile(grey_archive) as zf:
+    with zipfile.ZipFile(stable_archive) as zf:
         flags = zf.read(FLAGS_ARCNAME)
     assert manifest["generated_file_digest"] == hashlib.sha256(flags).hexdigest()
     assert manifest["generated_files"][FLAGS_ARCNAME] == hashlib.sha256(flags).hexdigest()
@@ -389,8 +385,8 @@ def test_compression_level_policy_is_actually_applied(
 def test_repeated_builds_from_the_same_tracked_tree_are_byte_identical(
     tmp_path: Path,
 ) -> None:
-    first = package_plugin.build_package(tmp_path / "a" / "p.zip", channel="grey")
-    second = package_plugin.build_package(tmp_path / "b" / "p.zip", channel="grey")
+    first = package_plugin.build_package(tmp_path / "a" / "p.zip", channel="stable")
+    second = package_plugin.build_package(tmp_path / "b" / "p.zip", channel="stable")
 
     assert first.read_bytes() == second.read_bytes()
     assert _independent_file_digest(first) == _independent_file_digest(second)
@@ -440,18 +436,18 @@ def test_refuses_when_a_tracked_archive_input_differs_from_head(
     monkeypatch.setattr(package_plugin, "_paths_differing_from_head", lambda: {dirty})
 
     with pytest.raises(RuntimeError, match="HEAD"):
-        _build(tmp_path, "grey")
+        _build(tmp_path, "stable")
 
 
 def test_ignores_head_differences_outside_the_archive_input_set(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Dirty docs/tests/scripts must not block a grey build."""
+    """Dirty docs/tests/scripts must not block a stable build."""
     unrelated = (package_plugin.ROOT / "scripts" / "package_plugin.py").resolve()
     monkeypatch.setattr(package_plugin, "_paths_differing_from_head", lambda: {unrelated})
 
-    assert _build(tmp_path, "grey").is_file()
+    assert _build(tmp_path, "stable").is_file()
 
 
 def test_refuses_when_the_generated_flag_disagrees_with_the_channel(
@@ -461,11 +457,11 @@ def test_refuses_when_the_generated_flag_disagrees_with_the_channel(
     monkeypatch.setattr(
         package_plugin,
         "_render_build_flags",
-        lambda channel: b'V3_SHADOW_ENABLED: bool = False\nBUILD_CHANNEL: str = "stable"\n',
+        lambda channel: b'V3_SHADOW_ENABLED: bool = True\nBUILD_CHANNEL: str = "grey"\n',
     )
 
     with pytest.raises(RuntimeError, match="generated"):
-        _build(tmp_path, "grey")
+        _build(tmp_path, "stable")
 
 
 def test_refuses_when_a_v3_source_file_is_untracked(
@@ -478,7 +474,7 @@ def test_refuses_when_a_v3_source_file_is_untracked(
     monkeypatch.setattr(package_plugin, "_tracked_files", lambda: real - {victim})
 
     with pytest.raises(RuntimeError, match="untracked"):
-        _build(tmp_path, "grey")
+        _build(tmp_path, "stable")
 
 
 def test_refuses_duplicate_archive_paths(
@@ -495,7 +491,7 @@ def test_refuses_duplicate_archive_paths(
     )
 
     with pytest.raises(RuntimeError, match="duplicate"):
-        _build(tmp_path, "grey")
+        _build(tmp_path, "stable")
 
 
 def test_refuses_case_fold_colliding_archive_paths(
@@ -512,7 +508,7 @@ def test_refuses_case_fold_colliding_archive_paths(
     )
 
     with pytest.raises(RuntimeError, match="case-fold"):
-        _build(tmp_path, "grey")
+        _build(tmp_path, "stable")
 
 
 @pytest.mark.parametrize(
@@ -539,12 +535,12 @@ def test_refuses_engine_identity_and_runtime_files(
     )
 
     with pytest.raises(RuntimeError, match="_engine"):
-        _build(tmp_path, "grey")
+        _build(tmp_path, "stable")
 
 
-def test_engine_python_sources_are_still_allowed(grey_archive: Path) -> None:
+def test_engine_python_sources_are_still_allowed(stable_archive: Path) -> None:
     """The refusal must be about runtime data, not about shipping the engine."""
-    with zipfile.ZipFile(grey_archive) as zf:
+    with zipfile.ZipFile(stable_archive) as zf:
         engine = [
             n for n in zf.namelist()
             if n.startswith(f"{PLUGIN}/sylanne_alpha/_engine/")
@@ -556,7 +552,7 @@ def test_engine_python_sources_are_still_allowed(grey_archive: Path) -> None:
 
 
 def test_unrelated_untracked_file_is_excluded_and_left_untouched(tmp_path: Path) -> None:
-    probe = package_plugin.ROOT / "sylanne_alpha" / "_grey_channel_untracked_probe.py"
+    probe = package_plugin.ROOT / "sylanne_alpha" / "_stable_channel_untracked_probe.py"
     assert not probe.exists(), "probe path must not collide with a real file"
     payload = b"# untracked probe; packaging must ignore me\n"
 
@@ -577,11 +573,11 @@ def test_unrelated_untracked_file_is_excluded_and_left_untouched(tmp_path: Path)
 
     try:
         probe.write_bytes(payload)
-        archive = _build(tmp_path, "grey")
+        archive = _build(tmp_path, "stable")
 
         with zipfile.ZipFile(archive) as zf:
             names = zf.namelist()
-        assert f"{PLUGIN}/sylanne_alpha/_grey_channel_untracked_probe.py" not in names
+        assert f"{PLUGIN}/sylanne_alpha/_stable_channel_untracked_probe.py" not in names
         assert probe.read_bytes() == payload
 
         for path, content in before.items():

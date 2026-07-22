@@ -15,7 +15,7 @@ from scripts import package_plugin
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_GREY_VERSION = "2.5.0-grey.7"
+GREY_OVERRIDE_VERSION = "2.5.0-grey.7"
 EXPECTED_STABLE_VERSION = "2.5.0"
 _RESOLVE_CHANNEL_COMMAND = (
     "CHANNEL=$(python -c \"from pathlib import Path; "
@@ -28,8 +28,8 @@ _RESOLVE_CHANNEL_COMMAND = (
 
 def _main_source(
     *,
-    plugin_version: str = EXPECTED_GREY_VERSION,
-    register_version: str = EXPECTED_GREY_VERSION,
+    plugin_version: str = EXPECTED_STABLE_VERSION,
+    register_version: str = EXPECTED_STABLE_VERSION,
     extra_module_source: str = "",
 ) -> bytes:
     return "\n".join(
@@ -201,33 +201,33 @@ def _step_by_name(steps: list[dict[str, str]], name: str) -> dict[str, str]:
     return matches[0]
 
 
-def test_checked_in_release_identity_is_grey_7_and_consistent() -> None:
+def test_checked_in_release_identity_is_stable_and_consistent() -> None:
     metadata_version = package_plugin._read_metadata_version((ROOT / "metadata.yaml").read_bytes())
     main_tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
 
-    assert metadata_version == EXPECTED_GREY_VERSION
+    assert metadata_version == EXPECTED_STABLE_VERSION
     assert _module_string_assignment(main_tree, "PLUGIN_VERSION") == metadata_version
     assert _register_version(main_tree) == metadata_version
 
 
 def test_release_identity_rejects_metadata_only_drift() -> None:
     with pytest.raises(RuntimeError, match="release identity mismatch"):
-        package_plugin._validate_release_identity("2.5.0-grey.6", _main_source())
+        package_plugin._validate_release_identity(GREY_OVERRIDE_VERSION, _main_source())
 
 
 def test_release_identity_rejects_plugin_version_only_drift() -> None:
     with pytest.raises(RuntimeError, match="release identity mismatch"):
         package_plugin._validate_release_identity(
-            EXPECTED_GREY_VERSION,
-            _main_source(plugin_version="2.5.0-grey.6"),
+            EXPECTED_STABLE_VERSION,
+            _main_source(plugin_version=GREY_OVERRIDE_VERSION),
         )
 
 
 def test_release_identity_rejects_register_version_only_drift() -> None:
     with pytest.raises(RuntimeError, match="release identity mismatch"):
         package_plugin._validate_release_identity(
-            EXPECTED_GREY_VERSION,
-            _main_source(register_version="2.5.0-grey.6"),
+            EXPECTED_STABLE_VERSION,
+            _main_source(register_version=GREY_OVERRIDE_VERSION),
         )
 
 
@@ -235,8 +235,8 @@ def test_release_identity_rejects_register_version_only_drift() -> None:
     "extra_module_source",
     (
         "PLUGIN_VERSION = 42",
-        'PLUGIN_VERSION: str = "2.5.0-grey.7"',
-        'if True:\n    PLUGIN_VERSION = "2.5.0-grey.7"',
+        'PLUGIN_VERSION: str = "2.5.0"',
+        'if True:\n    PLUGIN_VERSION = "2.5.0"',
     ),
     ids=("second-assign", "annassign", "control-flow-assign"),
 )
@@ -245,23 +245,23 @@ def test_release_identity_rejects_any_second_module_scope_write(
 ) -> None:
     with pytest.raises(RuntimeError, match="exactly one PLUGIN_VERSION"):
         package_plugin._validate_release_identity(
-            EXPECTED_GREY_VERSION,
+            EXPECTED_STABLE_VERSION,
             _main_source(extra_module_source=extra_module_source),
         )
 
 
-def test_stable_override_rewrites_all_packaged_release_identities(
+def test_grey_override_rewrites_all_packaged_release_identities(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     plugin_root = tmp_path / "plugin"
     plugin_root.mkdir()
     checked_in_metadata = plugin_root / "metadata.yaml"
-    checked_in_metadata.write_text(f'version: "{EXPECTED_GREY_VERSION}"\n', encoding="utf-8")
+    checked_in_metadata.write_text(f'version: "{EXPECTED_STABLE_VERSION}"\n', encoding="utf-8")
     main = plugin_root / "main.py"
     main.write_bytes(_main_source())
-    override = tmp_path / "stable-metadata.yaml"
-    override.write_text(f'version: "{EXPECTED_STABLE_VERSION}"\n', encoding="utf-8")
+    override = tmp_path / "grey-metadata.yaml"
+    override.write_text(f'version: "{GREY_OVERRIDE_VERSION}"\n', encoding="utf-8")
 
     tracked = {checked_in_metadata.resolve(), main.resolve()}
     monkeypatch.setattr(package_plugin, "ROOT", plugin_root)
@@ -271,7 +271,7 @@ def test_stable_override_rewrites_all_packaged_release_identities(
 
     archive = package_plugin.build_package(
         tmp_path / "plugin.zip",
-        channel="stable",
+        channel="grey",
         metadata_override=override,
     )
     main_arcname = f"{package_plugin.PLUGIN_NAME}/main.py"
@@ -284,9 +284,9 @@ def test_stable_override_rewrites_all_packaged_release_identities(
         )
         manifest = json.loads(zipped.read(package_plugin.MANIFEST_ARCNAME))
 
-    assert metadata_version == EXPECTED_STABLE_VERSION
-    assert plugin_version == metadata_version
-    assert register_version == metadata_version
+    assert metadata_version == GREY_OVERRIDE_VERSION
+    assert plugin_version == GREY_OVERRIDE_VERSION
+    assert register_version == GREY_OVERRIDE_VERSION
     assert main_arcname in manifest["generated_files"]
 
 
