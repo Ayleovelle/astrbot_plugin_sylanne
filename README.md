@@ -19,7 +19,7 @@
 <p align="center">
   <a href="https://sylanne.app"><strong>官网</strong></a> &nbsp;·&nbsp;
   <a href="https://github.com/Ayleovelle/SylannEngine">计算引擎 SDK</a> &nbsp;·&nbsp;
-  <a href="theory/">理论</a> &nbsp;·&nbsp;
+  <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne/tree/main/theory">理论</a> &nbsp;·&nbsp;
   <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases">更新日志</a> &nbsp;·&nbsp;
   <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/download/v1.2.0/scar_void_arxiv_paper_zh_v3.pdf">论文 (中文)</a> &nbsp;·&nbsp;
   <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/download/v1.2.0/scar_void_arxiv_paper_v2.pdf">Paper (EN)</a>
