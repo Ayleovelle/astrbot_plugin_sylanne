@@ -9,6 +9,7 @@ import re
 import stat
 import struct
 import subprocess
+import tempfile
 import unicodedata
 import zipfile
 from dataclasses import dataclass
@@ -67,6 +68,14 @@ FILE_EXTERNAL_ATTR = 0o100644 << 16
 DIR_EXTERNAL_ATTR = (0o40755 << 16) | 0x10
 
 _VERSION_PATTERN = re.compile(r"(?m)^version:[ \t]*(.+?)[ \t]*$")
+_SEMVER_COMPONENT = r"(?:0|[1-9][0-9]*)"
+_STABLE_VERSION_PATTERN = re.compile(
+    rf"{_SEMVER_COMPONENT}\.{_SEMVER_COMPONENT}\.{_SEMVER_COMPONENT}"
+)
+_GREY_VERSION_PATTERN = re.compile(
+    rf"{_SEMVER_COMPONENT}\.{_SEMVER_COMPONENT}\.{_SEMVER_COMPONENT}"
+    rf"-grey\.{_SEMVER_COMPONENT}"
+)
 
 INCLUDE_ROOT_FILES = {
     "__init__.py",
@@ -173,6 +182,18 @@ def _tracked_files() -> set[str]:
             "git ls-files returned an empty file list; refusing to package"
         )
     return tracked
+
+
+def _tracked_source_paths() -> set[str]:
+    """All tracked worktree paths protected from output and sidecar writes."""
+    records = _git_nul_records(
+        ["ls-files", "-z", "--"],
+        max_bytes=MAX_GIT_NUL_LISTING_BYTES,
+        max_records=MAX_GIT_NUL_LISTING_RECORDS,
+    )
+    if not records:
+        raise RuntimeError("git ls-files returned no tracked sources; refusing to package")
+    return {_checked_repo_relative_path(raw) for raw in records}
 
 
 def _git_binary_output(args: list[str], *, input_data: bytes | None = None) -> bytes:
@@ -297,6 +318,189 @@ def _repo_path(relative: str) -> Path:
 def _lexical_absolute(path: Path) -> Path:
     """Make a filesystem path absolute without resolving symlinks."""
     return Path(os.path.abspath(os.fspath(path)))
+
+
+def _filesystem_identity_key(path: Path) -> str:
+    """Return a platform-independent, case-folded lexical path identity."""
+    rendered = _lexical_absolute(path).as_posix()
+    return unicodedata.normalize("NFC", rendered).casefold()
+
+
+def _identity_is_below(path_key: str, directory_key: str) -> bool:
+    return path_key.startswith(f"{directory_key.rstrip('/')}/")
+
+
+def _checked_output_locations(output: Path) -> tuple[Path, Path]:
+    """Validate repo-local output locations before any directory or file write."""
+    output = _lexical_absolute(output)
+    checksum = output.parent / f"{output.name}.sha256"
+    output_key = _filesystem_identity_key(output)
+    checksum_key = _filesystem_identity_key(checksum)
+    root_key = _filesystem_identity_key(ROOT)
+    artifact_key = _filesystem_identity_key(ROOT / f"{PLUGIN_NAME}.zip")
+    artifact_checksum_key = f"{artifact_key}.sha256"
+    dist_key = _filesystem_identity_key(ROOT / "dist")
+
+    output_is_repo_local = output_key == root_key or _identity_is_below(
+        output_key,
+        root_key,
+    )
+    output_is_allowed = (
+        output_key == artifact_key
+        or _identity_is_below(output_key, dist_key)
+        or not output_is_repo_local
+    )
+    if not output_is_allowed:
+        raise RuntimeError(
+            "output inside the repository must be "
+            f"{PLUGIN_NAME}.zip or live below dist/; refusing to package"
+        )
+
+    checksum_is_repo_local = checksum_key == root_key or _identity_is_below(
+        checksum_key,
+        root_key,
+    )
+    checksum_is_allowed = (
+        checksum_key == artifact_checksum_key
+        or _identity_is_below(checksum_key, dist_key)
+        or not checksum_is_repo_local
+    )
+    if not checksum_is_allowed:
+        raise RuntimeError(
+            "checksum output inside the repository must accompany the root artifact "
+            "or live below dist/; refusing to package"
+        )
+    if output_key == checksum_key:
+        raise RuntimeError("archive output aliases its checksum sidecar; refusing to package")
+    return output, checksum
+
+
+def _resolved_absolute(path: Path) -> Path:
+    try:
+        return path.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise RuntimeError(f"cannot resolve output path {path}; refusing to package") from exc
+
+
+def _checked_resolved_output_locations(output: Path, checksum: Path) -> None:
+    """Ensure repo-local aliases still resolve only to the two output areas."""
+    resolved_root = _resolved_absolute(ROOT)
+    resolved_root_key = _filesystem_identity_key(resolved_root)
+    resolved_artifact_key = _filesystem_identity_key(
+        resolved_root / f"{PLUGIN_NAME}.zip"
+    )
+    resolved_artifact_checksum_key = f"{resolved_artifact_key}.sha256"
+    resolved_dist_key = _filesystem_identity_key(resolved_root / "dist")
+    lexical_root_key = _filesystem_identity_key(ROOT)
+
+    for label, target, artifact_key in (
+        ("output", output, resolved_artifact_key),
+        ("checksum", checksum, resolved_artifact_checksum_key),
+    ):
+        resolved_key = _filesystem_identity_key(_resolved_absolute(target))
+        resolves_into_repo = resolved_key == resolved_root_key or _identity_is_below(
+            resolved_key,
+            resolved_root_key,
+        )
+        if resolves_into_repo and not (
+            resolved_key == artifact_key
+            or _identity_is_below(resolved_key, resolved_dist_key)
+        ):
+            raise RuntimeError(
+                f"{label} path resolves into a repository source location; "
+                "refusing to package"
+            )
+
+        lexical_key = _filesystem_identity_key(target)
+        is_lexically_repo_local = (
+            lexical_key == lexical_root_key
+            or _identity_is_below(lexical_key, lexical_root_key)
+        )
+        if is_lexically_repo_local and not (
+            resolved_key == artifact_key
+            or _identity_is_below(resolved_key, resolved_dist_key)
+        ):
+            raise RuntimeError(
+                f"{label} path leaves its allowed repository output location "
+                "through a symlink or junction; refusing to package"
+            )
+
+
+def _paths_share_existing_file(left: Path, right: Path) -> bool:
+    try:
+        left_stat = os.stat(left)
+        right_stat = os.stat(right)
+    except (FileNotFoundError, OSError):
+        return False
+    same_identity = _same_stable_file_identity(left_stat, right_stat)
+    if same_identity is not None:
+        return same_identity
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return False
+
+
+def _validate_output_targets(
+    output: Path,
+    checksum: Path,
+    tracked_sources: set[str],
+    metadata_override: Path | None,
+) -> None:
+    """Reject lexical, resolved, and existing-file aliases of package inputs."""
+    _checked_resolved_output_locations(output, checksum)
+    if (
+        _filesystem_identity_key(output) == _filesystem_identity_key(checksum)
+        or _filesystem_identity_key(_resolved_absolute(output))
+        == _filesystem_identity_key(_resolved_absolute(checksum))
+        or _paths_share_existing_file(output, checksum)
+    ):
+        raise RuntimeError(
+            "archive output aliases its checksum sidecar; refusing to package"
+        )
+
+    artifact_key = _filesystem_identity_key(ROOT / f"{PLUGIN_NAME}.zip")
+    output_is_root_artifact = _filesystem_identity_key(output) == artifact_key
+    protected = [
+        (
+            ROOT / Path(relative),
+            _filesystem_identity_key(ROOT / Path(relative)) == artifact_key,
+        )
+        for relative in sorted(tracked_sources)
+    ]
+    if metadata_override is not None:
+        protected.append((metadata_override, False))
+
+    for label, target in (("output", output), ("checksum", checksum)):
+        try:
+            target_lstat = os.lstat(target)
+        except FileNotFoundError:
+            target_lstat = None
+        except OSError as exc:
+            raise RuntimeError(f"cannot inspect {label} path {target}; refusing") from exc
+        if target_lstat is not None and stat.S_ISDIR(target_lstat.st_mode):
+            raise RuntimeError(f"{label} path is a directory; refusing to package")
+
+        target_key = _filesystem_identity_key(target)
+        resolved_target_key = _filesystem_identity_key(_resolved_absolute(target))
+        for source, is_tracked_root_artifact in protected:
+            source_key = _filesystem_identity_key(source)
+            if (
+                label == "output"
+                and output_is_root_artifact
+                and is_tracked_root_artifact
+            ):
+                continue
+            resolved_source_key = _filesystem_identity_key(_resolved_absolute(source))
+            if (
+                target_key == source_key
+                or resolved_target_key == resolved_source_key
+                or _paths_share_existing_file(target, source)
+            ):
+                raise RuntimeError(
+                    f"{label} path aliases tracked or release input {source}; "
+                    "refusing to package"
+                )
 
 
 def _filesystem_path_to_repo_relative(path: Path) -> str | None:
@@ -857,7 +1061,14 @@ def _validate_release_identity(metadata_version: str, main_data: bytes) -> None:
 
 
 def _metadata_channel_for_version(version: str) -> str:
-    return "grey" if "grey" in version.lower() else "stable"
+    if _STABLE_VERSION_PATTERN.fullmatch(version):
+        return "stable"
+    if _GREY_VERSION_PATTERN.fullmatch(version):
+        return "grey"
+    raise RuntimeError(
+        f"metadata version {version!r} must be X.Y.Z or X.Y.Z-grey.N; "
+        "refusing to package"
+    )
 
 
 def _validate_metadata_channel(version: str, channel: str) -> None:
@@ -1084,6 +1295,159 @@ def _write_archive(output: Path, entries: list[tuple[str, bytes]]) -> None:
             archive.writestr(info, content, compresslevel=ZIP_COMPRESSLEVEL)
 
 
+def _reserve_sibling_temp(target: Path, marker: str) -> Path:
+    try:
+        descriptor, raw_path = tempfile.mkstemp(
+            prefix=f".{target.name}.",
+            suffix=f".{marker}.tmp",
+            dir=target.parent,
+        )
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot reserve temporary {marker} beside {target}; refusing to package"
+        ) from exc
+    os.close(descriptor)
+    return Path(raw_path)
+
+
+def _discard_file(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _commit_output_pair(
+    new_output: Path,
+    new_checksum: Path,
+    output: Path,
+    checksum: Path,
+) -> None:
+    """Install ZIP + checksum as a rollback-safe two-file transaction."""
+    output_existed = os.path.lexists(output)
+    checksum_existed = os.path.lexists(checksum)
+    output_backup: Path | None = None
+    checksum_backup: Path | None = None
+    try:
+        if output_existed:
+            output_backup = _reserve_sibling_temp(output, "zip-backup")
+        if checksum_existed:
+            checksum_backup = _reserve_sibling_temp(checksum, "checksum-backup")
+    except BaseException:
+        _discard_file(output_backup)
+        _discard_file(checksum_backup)
+        raise
+
+    output_backed_up = False
+    checksum_backed_up = False
+    output_installed = False
+    checksum_installed = False
+    commit_succeeded = False
+    try:
+        if output_backup is not None:
+            os.replace(output, output_backup)
+            output_backed_up = True
+        if checksum_backup is not None:
+            os.replace(checksum, checksum_backup)
+            checksum_backed_up = True
+
+        os.replace(new_output, output)
+        output_installed = True
+        os.replace(new_checksum, checksum)
+        checksum_installed = True
+        commit_succeeded = True
+    except BaseException as exc:
+        rollback_errors: list[BaseException] = []
+
+        try:
+            if checksum_backed_up and checksum_backup is not None:
+                os.replace(checksum_backup, checksum)
+                checksum_backed_up = False
+            elif checksum_installed and not checksum_existed:
+                _discard_file(checksum)
+        except BaseException as rollback_exc:
+            rollback_errors.append(rollback_exc)
+
+        try:
+            if output_backed_up and output_backup is not None:
+                os.replace(output_backup, output)
+                output_backed_up = False
+            elif output_installed and not output_existed:
+                _discard_file(output)
+        except BaseException as rollback_exc:
+            rollback_errors.append(rollback_exc)
+
+        if rollback_errors:
+            details = "; ".join(str(error) for error in rollback_errors)
+            preserved = [
+                str(path)
+                for path, still_holds_old_data in (
+                    (output_backup, output_backed_up),
+                    (checksum_backup, checksum_backed_up),
+                )
+                if path is not None and still_holds_old_data
+            ]
+            preserved_message = ", ".join(preserved) if preserved else "none"
+            raise RuntimeError(
+                "package pair commit failed and rollback was incomplete; "
+                f"preserved backups: {preserved_message}; errors: {details}"
+            ) from exc
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise RuntimeError(
+            "package pair commit failed; previous ZIP and checksum were restored"
+        ) from exc
+    finally:
+        _discard_file(new_output)
+        _discard_file(new_checksum)
+        if commit_succeeded or not output_backed_up:
+            _discard_file(output_backup)
+        if commit_succeeded or not checksum_backed_up:
+            _discard_file(checksum_backup)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 16), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_output_pair(
+    output: Path,
+    checksum: Path,
+    entries: list[tuple[str, bytes]],
+    *,
+    tracked_sources: set[str],
+    metadata_override: Path | None,
+) -> None:
+    archive_temp: Path | None = None
+    checksum_temp: Path | None = None
+    try:
+        archive_temp = _reserve_sibling_temp(output, "zip")
+        checksum_temp = _reserve_sibling_temp(checksum, "checksum")
+        _write_archive(archive_temp, entries)
+        with checksum_temp.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(f"{_file_sha256(archive_temp)}  {output.name}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        _validate_output_targets(
+            output,
+            checksum,
+            tracked_sources,
+            metadata_override,
+        )
+        _commit_output_pair(archive_temp, checksum_temp, output, checksum)
+        archive_temp = None
+        checksum_temp = None
+    finally:
+        _discard_file(archive_temp)
+        _discard_file(checksum_temp)
+
+
 def build_package(
     output: Path,
     channel: str,
@@ -1092,16 +1456,30 @@ def build_package(
     if channel not in CHANNELS:
         raise ValueError(f"unknown channel {channel!r}; expected one of {list(CHANNELS)}")
 
-    _checked_metadata_override(metadata_override)
+    output, checksum_path = _checked_output_locations(output)
+    checked_metadata_override = _checked_metadata_override(metadata_override)
     commit = _head_commit()
+    tracked_v3_sources = _tracked_files()
+    tracked_sources = _tracked_source_paths()
+    _validate_output_targets(
+        output,
+        checksum_path,
+        tracked_sources,
+        checked_metadata_override,
+    )
 
-    untracked = _untracked_v3_sources(_tracked_files())
+    untracked = _untracked_v3_sources(tracked_v3_sources)
     if untracked:
         listed = ", ".join(str(path.relative_to(ROOT)) for path in untracked)
         raise RuntimeError(f"untracked v3 source files: {listed}; refusing to package")
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    checksum_path = output.parent / f"{output.name}.sha256"
+    _validate_output_targets(
+        output,
+        checksum_path,
+        tracked_sources,
+        checked_metadata_override,
+    )
 
     entries = _archive_entries(
         channel,
@@ -1134,13 +1512,15 @@ def build_package(
         raise RuntimeError("generated build flags missing from archive; refusing to package")
 
     manifest = _render_manifest(channel, version, commit, generated, payload_digest(entries))
-    _write_archive(output, _sort_entries([*entries, (MANIFEST_ARCNAME, manifest)]))
-
     # The whole-zip digest describes the closed file, so it can only live beside
-    # it — never inside the archive it is supposed to authenticate.
-    checksum_path.write_text(
-        f"{hashlib.sha256(output.read_bytes()).hexdigest()}  {output.name}\n",
-        encoding="utf-8",
+    # it — never inside the archive it is supposed to authenticate. Both files
+    # are completed as siblings before the rollback-safe pair commit begins.
+    _write_output_pair(
+        output,
+        checksum_path,
+        _sort_entries([*entries, (MANIFEST_ARCNAME, manifest)]),
+        tracked_sources=tracked_sources,
+        metadata_override=checked_metadata_override,
     )
     return output
 

@@ -442,6 +442,445 @@ def test_metadata_override_rejects_parent_symlink_alias_of_tracked_metadata(
         package_plugin._read_metadata_override(alias)
 
 
+def _stub_minimal_package_build(
+    monkeypatch: pytest.MonkeyPatch,
+    plugin_root: Path,
+    *,
+    tracked_sources: set[str] | None = None,
+) -> None:
+    main_data = (
+        b'PLUGIN_VERSION = "2.5.0"\n'
+        b'@register("probe", "2718 Labs", "probe", "2.5.0", "https://example.invalid")\n'
+        b"class Plugin:\n"
+        b"    pass\n"
+    )
+    entries = [
+        (f"{package_plugin.PLUGIN_NAME}/", b""),
+        (package_plugin.MAIN_ARCNAME, main_data),
+        (package_plugin.METADATA_ARCNAME, b'version: "2.5.0"\n'),
+        (package_plugin.BUILD_FLAGS_ARCNAME, b"# generated flags\n"),
+    ]
+
+    monkeypatch.setattr(package_plugin, "ROOT", plugin_root)
+    monkeypatch.setattr(package_plugin, "_head_commit", lambda: "a" * 40)
+    monkeypatch.setattr(package_plugin, "_tracked_files", set)
+    monkeypatch.setattr(package_plugin, "_untracked_v3_sources", lambda tracked: [])
+    monkeypatch.setattr(
+        package_plugin,
+        "_tracked_source_paths",
+        lambda: tracked_sources or set(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        package_plugin,
+        "_archive_entries",
+        lambda *args, **kwargs: entries,
+    )
+
+
+@pytest.mark.parametrize(
+    "relative_output",
+    [
+        Path("README.md"),
+        Path("readME.md"),
+        Path("dist") / ".." / "README.md",
+    ],
+)
+def test_output_may_not_overwrite_a_release_input(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    relative_output: Path,
+) -> None:
+    plugin_root = tmp_path / "plugin"
+    plugin_root.mkdir()
+    readme = plugin_root / "README.md"
+    original = b"# keep this tracked release input\n"
+    readme.write_bytes(original)
+    _stub_minimal_package_build(monkeypatch, plugin_root)
+
+    with pytest.raises(RuntimeError, match="output|release input|dist"):
+        package_plugin.build_package(plugin_root / relative_output, channel="stable")
+
+    assert readme.read_bytes() == original
+
+
+def test_dist_output_rejects_hardlink_alias_of_tracked_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin_root = tmp_path / "plugin"
+    dist = plugin_root / "dist"
+    dist.mkdir(parents=True)
+    readme = plugin_root / "README.md"
+    original = b"# tracked source must survive\n"
+    readme.write_bytes(original)
+    output = dist / "probe.zip"
+    os.link(readme, output)
+    assert os.path.samefile(readme, output)
+    _stub_minimal_package_build(
+        monkeypatch,
+        plugin_root,
+        tracked_sources={"README.md"},
+    )
+
+    with pytest.raises(RuntimeError, match="same file|hardlink|alias|tracked"):
+        package_plugin.build_package(output, channel="stable")
+
+    assert readme.read_bytes() == original
+
+
+def test_external_output_rejects_hardlink_alias_of_tracked_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin_root = tmp_path / "plugin"
+    plugin_root.mkdir()
+    readme = plugin_root / "README.md"
+    original = b"# tracked source must survive\n"
+    readme.write_bytes(original)
+    output = tmp_path / "external-probe.zip"
+    os.link(readme, output)
+    assert os.path.samefile(readme, output)
+    _stub_minimal_package_build(
+        monkeypatch,
+        plugin_root,
+        tracked_sources={"README.md"},
+    )
+
+    with pytest.raises(RuntimeError, match="same file|hardlink|alias|tracked"):
+        package_plugin.build_package(output, channel="stable")
+
+    assert readme.read_bytes() == original
+
+
+def test_root_artifact_rejects_hardlink_alias_of_other_tracked_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin_root = tmp_path / "plugin"
+    plugin_root.mkdir()
+    readme = plugin_root / "README.md"
+    original = b"# tracked source must survive\n"
+    readme.write_bytes(original)
+    output = plugin_root / f"{package_plugin.PLUGIN_NAME}.zip"
+    os.link(readme, output)
+    assert os.path.samefile(readme, output)
+    _stub_minimal_package_build(
+        monkeypatch,
+        plugin_root,
+        tracked_sources={"README.md", f"{package_plugin.PLUGIN_NAME}.zip"},
+    )
+
+    with pytest.raises(RuntimeError, match="same file|hardlink|alias|tracked"):
+        package_plugin.build_package(output, channel="stable")
+
+    assert readme.read_bytes() == original
+
+
+def test_root_artifact_self_exception_does_not_exempt_metadata_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin_root = tmp_path / "plugin"
+    plugin_root.mkdir()
+    output = plugin_root / f"{package_plugin.PLUGIN_NAME}.zip"
+    output.write_bytes(b'version: "2.5.0"\n')
+    checksum = output.parent / f"{output.name}.sha256"
+    monkeypatch.setattr(package_plugin, "ROOT", plugin_root)
+
+    with pytest.raises(RuntimeError, match="release input|metadata|alias"):
+        package_plugin._validate_output_targets(
+            output,
+            checksum,
+            {f"{package_plugin.PLUGIN_NAME}.zip"},
+            output,
+        )
+
+
+def test_checksum_sidecar_rejects_hardlink_alias_of_tracked_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin_root = tmp_path / "plugin"
+    dist = plugin_root / "dist"
+    dist.mkdir(parents=True)
+    readme = plugin_root / "README.md"
+    original = b"# tracked source must survive\n"
+    readme.write_bytes(original)
+    output = dist / "probe.zip"
+    checksum = dist / "probe.zip.sha256"
+    os.link(readme, checksum)
+    assert os.path.samefile(readme, checksum)
+    _stub_minimal_package_build(
+        monkeypatch,
+        plugin_root,
+        tracked_sources={"README.md"},
+    )
+
+    with pytest.raises(RuntimeError, match="checksum|same file|hardlink|alias|tracked"):
+        package_plugin.build_package(output, channel="stable")
+
+    assert not output.exists()
+    assert readme.read_bytes() == original
+
+
+def _create_directory_alias(alias: Path, target: Path) -> None:
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+        return
+    except OSError as symlink_error:
+        if os.name != "nt":
+            pytest.skip(f"directory symlink unavailable: {symlink_error}")
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(alias), str(target)],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        pytest.skip(
+            f"directory symlink/junction unavailable (exit {result.returncode})"
+        )
+
+
+def test_dist_parent_alias_may_not_resolve_to_a_tracked_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin_root = tmp_path / "plugin"
+    ui = plugin_root / "UI"
+    ui.mkdir(parents=True)
+    source = ui / "index.html"
+    original = b"tracked UI bytes\n"
+    source.write_bytes(original)
+    dist_alias = plugin_root / "dist"
+    _create_directory_alias(dist_alias, ui)
+    _stub_minimal_package_build(
+        monkeypatch,
+        plugin_root,
+        tracked_sources={"UI/index.html"},
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="resolve|same file|alias|tracked"):
+            package_plugin.build_package(dist_alias / "index.html", channel="stable")
+        assert source.read_bytes() == original
+    finally:
+        if dist_alias.is_symlink():
+            dist_alias.unlink()
+        elif dist_alias.exists():
+            dist_alias.rmdir()
+
+
+def test_external_parent_alias_may_not_resolve_to_a_tracked_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin_root = tmp_path / "plugin"
+    ui = plugin_root / "UI"
+    ui.mkdir(parents=True)
+    source = ui / "index.html"
+    original = b"tracked UI bytes\n"
+    source.write_bytes(original)
+    external_alias = tmp_path / "external-output"
+    _create_directory_alias(external_alias, ui)
+    _stub_minimal_package_build(
+        monkeypatch,
+        plugin_root,
+        tracked_sources={"UI/index.html"},
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="resolve|same file|alias|tracked"):
+            package_plugin.build_package(
+                external_alias / "index.html",
+                channel="stable",
+            )
+        assert source.read_bytes() == original
+    finally:
+        if external_alias.is_symlink():
+            external_alias.unlink()
+        elif external_alias.exists():
+            external_alias.rmdir()
+
+
+def test_repo_dist_alias_may_not_leave_the_output_area(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin_root = tmp_path / "plugin"
+    plugin_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    dist_alias = plugin_root / "dist"
+    _create_directory_alias(dist_alias, outside)
+    _stub_minimal_package_build(monkeypatch, plugin_root)
+
+    try:
+        with pytest.raises(RuntimeError, match="symlink|junction|allowed"):
+            package_plugin.build_package(dist_alias / "probe.zip", channel="stable")
+        assert not (outside / "probe.zip").exists()
+    finally:
+        if dist_alias.is_symlink():
+            dist_alias.unlink()
+        elif dist_alias.exists():
+            dist_alias.rmdir()
+
+
+def test_pair_commit_rolls_back_both_old_files_when_checksum_replace_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin_root = tmp_path / "plugin"
+    dist = plugin_root / "dist"
+    dist.mkdir(parents=True)
+    output = dist / "probe.zip"
+    checksum = dist / "probe.zip.sha256"
+    old_output = b"old zip bytes\n"
+    old_checksum = b"old checksum bytes\n"
+    output.write_bytes(old_output)
+    checksum.write_bytes(old_checksum)
+    _stub_minimal_package_build(monkeypatch, plugin_root)
+
+    real_replace = os.replace
+    injected = False
+
+    def fail_checksum_install(src: object, dst: object) -> None:
+        nonlocal injected
+        if Path(dst) == checksum and not injected:
+            injected = True
+            raise OSError("injected checksum replace failure")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(package_plugin.os, "replace", fail_checksum_install)
+
+    with pytest.raises(RuntimeError, match="commit|replace|rollback"):
+        package_plugin.build_package(output, channel="stable")
+
+    assert injected
+    assert output.read_bytes() == old_output
+    assert checksum.read_bytes() == old_checksum
+
+
+def test_incomplete_rollback_preserves_the_only_old_output_backup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin_root = tmp_path / "plugin"
+    dist = plugin_root / "dist"
+    dist.mkdir(parents=True)
+    output = dist / "probe.zip"
+    checksum = dist / "probe.zip.sha256"
+    old_output = b"irreplaceable old zip\n"
+    old_checksum = b"old checksum\n"
+    output.write_bytes(old_output)
+    checksum.write_bytes(old_checksum)
+    _stub_minimal_package_build(monkeypatch, plugin_root)
+
+    real_replace = os.replace
+    checksum_install_failed = False
+
+    def fail_install_then_output_restore(src: object, dst: object) -> None:
+        nonlocal checksum_install_failed
+        source = Path(src)
+        destination = Path(dst)
+        if destination == checksum and not checksum_install_failed:
+            checksum_install_failed = True
+            raise OSError("injected checksum install failure")
+        if (
+            destination == output
+            and checksum_install_failed
+            and source.name.endswith(".zip-backup.tmp")
+        ):
+            raise OSError("injected output rollback failure")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(
+        package_plugin.os,
+        "replace",
+        fail_install_then_output_restore,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="incomplete.*preserv|preserv.*backup",
+    ) as excinfo:
+        package_plugin.build_package(output, channel="stable")
+
+    backups = list(dist.glob(".probe.zip.*.zip-backup.tmp"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == old_output
+    assert str(backups[0]) in str(excinfo.value)
+    assert checksum.read_bytes() == old_checksum
+
+
+def test_pair_commit_rolls_back_on_non_oserror_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin_root = tmp_path / "plugin"
+    dist = plugin_root / "dist"
+    dist.mkdir(parents=True)
+    output = dist / "probe.zip"
+    checksum = dist / "probe.zip.sha256"
+    old_output = b"old zip bytes\n"
+    old_checksum = b"old checksum bytes\n"
+    output.write_bytes(old_output)
+    checksum.write_bytes(old_checksum)
+    _stub_minimal_package_build(monkeypatch, plugin_root)
+
+    real_replace = os.replace
+    injected = False
+
+    def fail_checksum_install(src: object, dst: object) -> None:
+        nonlocal injected
+        if Path(dst) == checksum and not injected:
+            injected = True
+            raise RuntimeError("injected non-OSError failure")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(package_plugin.os, "replace", fail_checksum_install)
+
+    with pytest.raises(RuntimeError, match="commit"):
+        package_plugin.build_package(output, channel="stable")
+
+    assert injected
+    assert output.read_bytes() == old_output
+    assert checksum.read_bytes() == old_checksum
+    assert not list(dist.glob(".*.tmp"))
+
+
+def test_output_alias_is_rechecked_after_temp_archive_is_written(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin_root = tmp_path / "plugin"
+    dist = plugin_root / "dist"
+    dist.mkdir(parents=True)
+    readme = plugin_root / "README.md"
+    original = b"# tracked source must survive a late swap\n"
+    readme.write_bytes(original)
+    output = dist / "probe.zip"
+    _stub_minimal_package_build(
+        monkeypatch,
+        plugin_root,
+        tracked_sources={"README.md"},
+    )
+    real_write_archive = package_plugin._write_archive
+
+    def write_then_swap(target: Path, entries: list[tuple[str, bytes]]) -> None:
+        real_write_archive(target, entries)
+        os.link(readme, output)
+
+    monkeypatch.setattr(package_plugin, "_write_archive", write_then_swap)
+
+    with pytest.raises(RuntimeError, match="alias|tracked|release input"):
+        package_plugin.build_package(output, channel="stable")
+
+    assert os.path.samefile(readme, output)
+    assert readme.read_bytes() == original
+    assert not list(dist.glob(".*.tmp"))
+
+
 def test_dirty_path_query_uses_the_captured_commit_and_lexical_nul_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

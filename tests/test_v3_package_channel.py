@@ -239,6 +239,38 @@ def test_stable_packaging_rejects_grey_metadata(tmp_path: Path) -> None:
         _build(tmp_path, "stable", metadata=_grey_metadata(tmp_path))
 
 
+@pytest.mark.parametrize(
+    ("version", "channel"),
+    [
+        ("0.0.0", "stable"),
+        ("2.5.0", "stable"),
+        ("2.5.0-grey.0", "grey"),
+        ("2.5.0-grey.7", "grey"),
+    ],
+)
+def test_metadata_channel_accepts_only_release_version_grammars(
+    version: str,
+    channel: str,
+) -> None:
+    assert package_plugin._metadata_channel_for_version(version) == channel
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "",
+        "2.5.0rc1",
+        "2.5.0-beta.1",
+        "garbage",
+        " 2.5.0 ",
+        "2.5.0-GREY.7",
+    ],
+)
+def test_metadata_channel_rejects_non_release_version_grammars(version: str) -> None:
+    with pytest.raises(RuntimeError, match="version"):
+        package_plugin._metadata_channel_for_version(version)
+
+
 def test_metadata_override_may_not_be_the_tracked_metadata_file(tmp_path: Path) -> None:
     """A generated entry skips the HEAD check, so it must be a real temporary copy.
 

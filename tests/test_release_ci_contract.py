@@ -274,6 +274,7 @@ def test_grey_override_rewrites_all_packaged_release_identities(
     }
     monkeypatch.setattr(package_plugin, "ROOT", plugin_root)
     monkeypatch.setattr(package_plugin, "_tracked_files", lambda: tracked)
+    monkeypatch.setattr(package_plugin, "_tracked_source_paths", lambda: tracked)
     monkeypatch.setattr(
         package_plugin,
         "_head_tree_files",
