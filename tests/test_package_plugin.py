@@ -12,6 +12,33 @@ import pytest
 from scripts import package_plugin
 
 
+class _ChunkedStdout:
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = iter(chunks)
+
+    def read(self, size: int) -> bytes:
+        del size
+        return next(self._chunks, b"")
+
+
+class _FakeGitProcess:
+    def __init__(self, chunks: list[bytes], *, returncode: int = 0) -> None:
+        self.stdout = _ChunkedStdout(chunks)
+        self._returncode = returncode
+        self.killed = False
+        self.waited = False
+
+    def kill(self) -> None:
+        self.killed = True
+
+    def wait(self) -> int:
+        self.waited = True
+        return self._returncode
+
+    def poll(self) -> int | None:
+        return self._returncode if self.waited else None
+
+
 def _git(
     root: Path,
     *args: str,
@@ -29,11 +56,11 @@ def _git(
 def test_tracked_file_query_failure_aborts_packaging(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _fail(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+    def _fail(*args: object, **kwargs: object) -> _FakeGitProcess:
         del args, kwargs
-        raise subprocess.CalledProcessError(128, ["git", "ls-files", "-z"])
+        raise OSError("spawn failed")
 
-    monkeypatch.setattr(package_plugin.subprocess, "run", _fail)
+    monkeypatch.setattr(package_plugin.subprocess, "Popen", _fail)
 
     with pytest.raises(RuntimeError, match="git ls-files"):
         package_plugin._tracked_files()
@@ -44,17 +71,28 @@ def test_empty_tracked_file_query_aborts_packaging(
 ) -> None:
     monkeypatch.setattr(
         package_plugin.subprocess,
-        "run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(
-            args=["git", "ls-files", "-z"],
-            returncode=0,
-            stdout=b"",
-            stderr=b"",
-        ),
+        "Popen",
+        lambda *args, **kwargs: _FakeGitProcess([b""]),
     )
 
     with pytest.raises(RuntimeError, match="empty file list"):
         package_plugin._tracked_files()
+
+
+def test_tracked_file_query_is_scoped_to_v3_source_dirs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def popen(args: list[str], **kwargs: object) -> _FakeGitProcess:
+        del kwargs
+        calls.append(args)
+        return _FakeGitProcess([b"sylanne_alpha/v3core/probe.py\0"])
+
+    monkeypatch.setattr(package_plugin.subprocess, "Popen", popen)
+
+    assert package_plugin._tracked_files() == {"sylanne_alpha/v3core/probe.py"}
+    assert calls == [["git", "ls-files", "-z", "--", *package_plugin.V3_SOURCE_DIRS]]
 
 
 @pytest.mark.parametrize(
@@ -74,12 +112,9 @@ def test_head_tree_query_rejects_unsafe_archive_paths(
     monkeypatch.setattr(package_plugin, "ROOT", tmp_path)
     monkeypatch.setattr(
         package_plugin.subprocess,
-        "run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(
-            args=["git", "ls-tree"],
-            returncode=0,
-            stdout=b"100644 blob " + (b"0" * 40) + b"\t" + record,
-            stderr=b"",
+        "Popen",
+        lambda *args, **kwargs: _FakeGitProcess(
+            [b"100644 blob " + (b"0" * 40) + b"\t" + record]
         ),
     )
 
@@ -174,13 +209,8 @@ def test_head_tree_keeps_regular_entries_as_distinct_lexical_identities(
     monkeypatch.setattr(package_plugin, "ROOT", tmp_path)
     monkeypatch.setattr(
         package_plugin.subprocess,
-        "run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(
-            args=["git", "ls-tree"],
-            returncode=0,
-            stdout=listing,
-            stderr=b"",
-        ),
+        "Popen",
+        lambda *args, **kwargs: _FakeGitProcess([listing]),
     )
 
     entries = package_plugin._head_tree_files("0" * 40)
@@ -189,6 +219,92 @@ def test_head_tree_keeps_regular_entries_as_distinct_lexical_identities(
         ("UI/index.html", oid_a.decode("ascii")),
         ("pages/index.html", oid_b.decode("ascii")),
     ]
+
+
+@pytest.mark.parametrize(
+    ("chunks", "max_bytes", "max_records", "expected"),
+    [
+        ([b"abcdef\0"], 6, 10, "byte"),
+        ([b"a\0b\0c\0"], 100, 2, "record"),
+    ],
+)
+def test_bounded_nul_reader_kills_and_waits_before_excess_accumulation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    chunks: list[bytes],
+    max_bytes: int,
+    max_records: int,
+    expected: str,
+) -> None:
+    process = _FakeGitProcess(chunks)
+    monkeypatch.setattr(package_plugin, "ROOT", tmp_path)
+    monkeypatch.setattr(package_plugin.subprocess, "Popen", lambda *args, **kwargs: process)
+
+    with pytest.raises(RuntimeError, match=expected):
+        package_plugin._git_nul_records(
+            ["ls-tree", "-r", "-z", "0" * 40, "--", "README.md"],
+            max_bytes=max_bytes,
+            max_records=max_records,
+        )
+
+    assert process.killed is True
+    assert process.waited is True
+
+
+@pytest.mark.parametrize(
+    ("chunks", "returncode", "expected"),
+    [
+        ([b"unterminated"], 0, "non-NUL-terminated"),
+        ([b"valid\0"], 128, "exited with 128"),
+    ],
+)
+def test_bounded_nul_reader_fails_closed_on_malformed_or_failed_process(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    chunks: list[bytes],
+    returncode: int,
+    expected: str,
+) -> None:
+    process = _FakeGitProcess(chunks, returncode=returncode)
+    monkeypatch.setattr(package_plugin, "ROOT", tmp_path)
+    monkeypatch.setattr(package_plugin.subprocess, "Popen", lambda *args, **kwargs: process)
+
+    with pytest.raises(RuntimeError, match=expected):
+        package_plugin._git_nul_records(
+            ["ls-files", "-z", "--", *package_plugin.V3_SOURCE_DIRS],
+            max_bytes=100,
+            max_records=10,
+        )
+
+    assert process.waited is True
+
+
+def test_head_tree_query_uses_only_release_allowlist_pathspecs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    oid = b"1" * 40
+    listing = b"100644 blob " + oid + b"\tREADME.md\0"
+    popen_calls: list[list[str]] = []
+
+    def popen(args: list[str], **kwargs: object) -> _FakeGitProcess:
+        del kwargs
+        popen_calls.append(args)
+        return _FakeGitProcess([listing])
+
+    monkeypatch.setattr(package_plugin, "ROOT", tmp_path)
+    monkeypatch.setattr(package_plugin.subprocess, "Popen", popen)
+
+    entries = package_plugin._head_tree_files("0" * 40)
+
+    assert [entry.relative_path for entry in entries] == ["README.md"]
+    command = popen_calls[0][1:]
+    pathspecs = command[command.index("--") + 1 :]
+    assert set(package_plugin.INCLUDE_ROOT_FILES) <= set(pathspecs)
+    assert set(package_plugin.INCLUDE_DIRS) <= set(pathspecs)
+    assert "tests" not in pathspecs
+    assert "scripts" not in pathspecs
+    assert "docs" not in pathspecs
 
 
 def test_selected_entry_limit_is_enforced_before_blob_queries(
@@ -283,6 +399,49 @@ def test_metadata_override_must_be_a_bounded_regular_non_symlink_file(
         package_plugin._read_metadata_override(symlink_probe)
 
 
+def test_metadata_override_rejects_hardlink_alias_of_tracked_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin_root = tmp_path / "plugin"
+    plugin_root.mkdir()
+    tracked_metadata = plugin_root / "metadata.yaml"
+    tracked_metadata.write_bytes(b'version: "2.5.0"\n')
+    _git(plugin_root, "init", "--quiet")
+    _git(plugin_root, "config", "user.name", "Packaging Test")
+    _git(plugin_root, "config", "user.email", "packaging-test@example.invalid")
+    _git(plugin_root, "add", "metadata.yaml")
+    _git(plugin_root, "commit", "--quiet", "-m", "track metadata")
+    alias = tmp_path / "metadata-hardlink.yaml"
+    os.link(tracked_metadata, alias)
+    assert os.path.samefile(tracked_metadata, alias)
+
+    monkeypatch.setattr(package_plugin, "ROOT", plugin_root)
+    with pytest.raises(RuntimeError, match="same file|hardlink|alias"):
+        package_plugin._read_metadata_override(alias)
+
+
+def test_metadata_override_rejects_parent_symlink_alias_of_tracked_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin_root = tmp_path / "plugin"
+    plugin_root.mkdir()
+    tracked_metadata = plugin_root / "metadata.yaml"
+    tracked_metadata.write_bytes(b'version: "2.5.0"\n')
+    alias_parent = tmp_path / "plugin-alias"
+    try:
+        alias_parent.symlink_to(plugin_root, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlink unavailable: {exc}")
+    alias = alias_parent / "metadata.yaml"
+    assert os.path.samefile(tracked_metadata, alias)
+
+    monkeypatch.setattr(package_plugin, "ROOT", plugin_root)
+    with pytest.raises(RuntimeError, match="same file|hardlink|alias"):
+        package_plugin._read_metadata_override(alias)
+
+
 def test_dirty_path_query_uses_the_captured_commit_and_lexical_nul_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -290,25 +449,21 @@ def test_dirty_path_query_uses_the_captured_commit_and_lexical_nul_paths(
     commit = "a" * 40
     calls: list[list[str]] = []
 
-    def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+    def popen(args: list[str], **kwargs: object) -> _FakeGitProcess:
         del kwargs
         calls.append(args)
-        return subprocess.CompletedProcess(
-            args=args,
-            returncode=0,
-            stdout=b"main.py\0UI/new.js\0pages/deleted.js\0",
-            stderr=b"",
-        )
+        return _FakeGitProcess([b"main.py\0UI/new.js\0pages/deleted.js\0"])
 
     monkeypatch.setattr(package_plugin, "ROOT", tmp_path)
-    monkeypatch.setattr(package_plugin.subprocess, "run", run)
+    monkeypatch.setattr(package_plugin.subprocess, "Popen", popen)
 
     assert package_plugin._paths_differing_from_revision(commit) == {
         "main.py",
         "UI/new.js",
         "pages/deleted.js",
     }
-    assert calls == [["git", "diff", "--name-only", "-z", commit, "--"]]
+    assert calls[0][:6] == ["git", "diff", "--name-only", "-z", commit, "--"]
+    assert set(package_plugin.INCLUDE_ROOT_FILES) <= set(calls[0][6:])
 
 
 def test_dirty_path_query_reports_modify_staged_add_and_staged_delete(

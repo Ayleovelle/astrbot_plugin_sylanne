@@ -54,6 +54,9 @@ MAX_SELECTED_ENTRIES = 1024
 MAX_HEAD_BLOB_BYTES = 4 * 1024 * 1024
 MAX_TOTAL_HEAD_BLOB_BYTES = 32 * 1024 * 1024
 MAX_METADATA_OVERRIDE_BYTES = 256 * 1024
+MAX_GIT_NUL_LISTING_BYTES = 2 * 1024 * 1024
+MAX_GIT_NUL_LISTING_RECORDS = 4096
+GIT_NUL_READ_CHUNK_BYTES = 64 * 1024
 
 # One fixed timestamp/permission/compression policy: builds from the same
 # tracked tree must be byte-identical.
@@ -148,33 +151,22 @@ def should_include(path: Path) -> bool:
 
 
 def _tracked_files() -> set[str]:
-    """Set of git-index paths as validated repository-relative POSIX strings.
+    """Set of indexed v3 paths as validated repository-relative POSIX strings.
 
-    Packaging must ship only tracked content: `rglob` over the working tree would
-    otherwise sweep in git-ignored runtime artifacts that match the allowlist —
-    e.g. ``sylanne_core/_identity.json`` (a per-install diagnostic copy_id) — which
-    must never be distributed. Git lookup failures and empty results abort the
-    build instead of silently widening the package to the whole working tree.
+    This intentionally queries only the two v3 source roots used by the
+    untracked-source safety gate. Release payload selection comes from the
+    separately bounded committed-tree query.
     """
-    try:
-        out = subprocess.run(
-            ["git", "ls-files", "-z"],
-            cwd=ROOT,
-            capture_output=True,
-            check=True,
-        ).stdout
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise RuntimeError(
-            "git ls-files failed; refusing to package untracked workspace files"
-        ) from exc
-    if not out:
+    records = _git_nul_records(
+        ["ls-files", "-z", "--", *V3_SOURCE_DIRS],
+        max_bytes=MAX_GIT_NUL_LISTING_BYTES,
+        max_records=MAX_GIT_NUL_LISTING_RECORDS,
+    )
+    if not records:
         raise RuntimeError("git ls-files returned an empty file list; refusing to package")
-    if not out.endswith(b"\0"):
-        raise RuntimeError("git ls-files returned a malformed file list; refusing to package")
     tracked = {
         _checked_repo_relative_path(raw)
-        for raw in out[:-1].split(b"\0")
-        if raw
+        for raw in records
     }
     if not tracked:
         raise RuntimeError(
@@ -194,6 +186,90 @@ def _git_binary_output(args: list[str], *, input_data: bytes | None = None) -> b
         ).stdout
     except (OSError, subprocess.CalledProcessError) as exc:
         raise RuntimeError(f"git {' '.join(args)} failed; refusing to package") from exc
+
+
+def _git_nul_records(
+    args: list[str],
+    *,
+    max_bytes: int,
+    max_records: int,
+) -> list[bytes]:
+    """Stream a NUL-delimited Git listing under hard byte and record bounds."""
+    try:
+        process = subprocess.Popen(
+            ["git", *args],
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"git {' '.join(args)} failed to start; refusing") from exc
+    if process.stdout is None:
+        try:
+            process.kill()
+        finally:
+            process.wait()
+        raise RuntimeError(f"git {' '.join(args)} has no stdout pipe; refusing")
+
+    finished = False
+
+    def stop() -> None:
+        nonlocal finished
+        try:
+            process.kill()
+        except OSError:
+            pass
+        finally:
+            process.wait()
+            finished = True
+
+    records: list[bytes] = []
+    pending = bytearray()
+    total_bytes = 0
+    try:
+        while True:
+            chunk = process.stdout.read(GIT_NUL_READ_CHUNK_BYTES)
+            if not chunk:
+                break
+            if total_bytes + len(chunk) > max_bytes:
+                stop()
+                raise RuntimeError(
+                    f"git {' '.join(args)} exceeded the {max_bytes}-byte listing limit"
+                )
+            total_bytes += len(chunk)
+            pending.extend(chunk)
+            while True:
+                delimiter = pending.find(0)
+                if delimiter < 0:
+                    break
+                if len(records) >= max_records:
+                    stop()
+                    raise RuntimeError(
+                        f"git {' '.join(args)} exceeded the {max_records}-record listing limit"
+                    )
+                record = bytes(pending[:delimiter])
+                del pending[: delimiter + 1]
+                if not record:
+                    stop()
+                    raise RuntimeError(
+                        f"git {' '.join(args)} returned an empty NUL record; refusing"
+                    )
+                records.append(record)
+
+        returncode = process.wait()
+        finished = True
+        if returncode != 0:
+            raise RuntimeError(
+                f"git {' '.join(args)} exited with {returncode}; refusing to package"
+            )
+        if pending:
+            raise RuntimeError(
+                f"git {' '.join(args)} returned a non-NUL-terminated record; refusing"
+            )
+        return records
+    finally:
+        if not finished and process.poll() is None:
+            stop()
 
 
 def _checked_repo_relative_path(raw: bytes) -> str:
@@ -237,6 +313,18 @@ def _checked_revision(revision: str) -> str:
     raise RuntimeError(f"unsafe git revision {revision!r}; refusing to package")
 
 
+def _release_pathspecs() -> list[str]:
+    candidates = {
+        *INCLUDE_ROOT_FILES,
+        *INCLUDE_DIRS,
+        *(path.as_posix() for path in ALLOWED_DOC_ASSETS),
+    }
+    return sorted(
+        _checked_repo_relative_path(candidate.encode("utf-8"))
+        for candidate in candidates
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class HeadTreeEntry:
     relative_path: str
@@ -247,12 +335,13 @@ class HeadTreeEntry:
 def _head_tree_files(revision: str = "HEAD") -> list[HeadTreeEntry]:
     """Return validated regular blobs from a committed Git tree."""
     revision = _checked_revision(revision)
-    out = _git_binary_output(["ls-tree", "-r", "-z", revision, "--"])
-    if not out or not out.endswith(b"\0"):
-        raise RuntimeError("git ls-tree returned an empty or malformed HEAD tree")
-    records = out[:-1].split(b"\0")
-    if not records or any(not record for record in records):
-        raise RuntimeError("git ls-tree returned a malformed HEAD tree")
+    records = _git_nul_records(
+        ["ls-tree", "-r", "-z", revision, "--", *_release_pathspecs()],
+        max_bytes=MAX_GIT_NUL_LISTING_BYTES,
+        max_records=MAX_GIT_NUL_LISTING_RECORDS,
+    )
+    if not records:
+        raise RuntimeError("git ls-tree returned an empty HEAD release tree")
     entries: list[HeadTreeEntry] = []
     for record in records:
         try:
@@ -425,13 +514,14 @@ def _paths_differing_from_revision(revision: str) -> set[str]:
     """
     if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
         raise RuntimeError(f"dirty-path revision {revision!r} is not a captured commit")
-    out = _git_binary_output(["diff", "--name-only", "-z", revision, "--"])
-    if out and not out.endswith(b"\0"):
-        raise RuntimeError("git diff returned malformed NUL-delimited paths")
+    records = _git_nul_records(
+        ["diff", "--name-only", "-z", revision, "--", *_release_pathspecs()],
+        max_bytes=MAX_GIT_NUL_LISTING_BYTES,
+        max_records=MAX_GIT_NUL_LISTING_RECORDS,
+    )
     return {
         _checked_repo_relative_path(raw)
-        for raw in out[:-1].split(b"\0")
-        if raw
+        for raw in records
     }
 
 
@@ -459,6 +549,15 @@ def _checked_metadata_override(metadata_override: Path | None) -> Path | None:
             "refusing to package"
         )
     return absolute
+
+
+def _same_stable_file_identity(
+    left: os.stat_result,
+    right: os.stat_result,
+) -> bool | None:
+    if not left.st_ino or not right.st_ino:
+        return None
+    return left.st_dev == right.st_dev and left.st_ino == right.st_ino
 
 
 def _read_metadata_override(metadata_override: Path | None) -> bytes | None:
@@ -489,6 +588,31 @@ def _read_metadata_override(metadata_override: Path | None) -> bytes | None:
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode):
             raise RuntimeError("metadata override must remain a regular file; refusing")
+        if _same_stable_file_identity(before, opened) is False:
+            raise RuntimeError("metadata override changed before it was opened; refusing")
+
+        tracked_metadata = _lexical_absolute(ROOT / METADATA_RELPATH)
+        try:
+            tracked_stat = os.stat(tracked_metadata)
+        except FileNotFoundError:
+            tracked_stat = None
+        except OSError as exc:
+            raise RuntimeError("cannot identify tracked metadata.yaml; refusing") from exc
+        same_as_tracked = (
+            _same_stable_file_identity(opened, tracked_stat)
+            if tracked_stat is not None
+            else False
+        )
+        if same_as_tracked is not True and tracked_stat is not None:
+            try:
+                same_as_tracked = os.path.samefile(checked, tracked_metadata)
+            except OSError:
+                same_as_tracked = False
+        if same_as_tracked:
+            raise RuntimeError(
+                "metadata override aliases the same file as tracked metadata.yaml; refusing"
+            )
+
         chunks: list[bytes] = []
         remaining = MAX_METADATA_OVERRIDE_BYTES + 1
         while remaining:
