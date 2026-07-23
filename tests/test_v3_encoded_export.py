@@ -321,6 +321,47 @@ def test_manifest_digest_mismatch_is_rejected(tmp_path: Path, exported) -> None:
         )
 
 
+def test_canonical_text_digest_is_line_ending_invariant(tmp_path: Path) -> None:
+    """Git's checkout EOL policy must not change a tracked artifact's identity."""
+
+    lf = tmp_path / "lf.txt"
+    crlf = tmp_path / "crlf.txt"
+    cr = tmp_path / "cr.txt"
+    lf.write_bytes(b"alpha\nbeta\n")
+    crlf.write_bytes(b"alpha\r\nbeta\r\n")
+    cr.write_bytes(b"alpha\rbeta\r")
+
+    expected = hashlib.sha256(b"alpha\nbeta\n").hexdigest()
+    assert v3_export.canonical_text_digest(lf) == expected
+    assert v3_export.canonical_text_digest(crlf) == expected
+    assert v3_export.canonical_text_digest(cr) == expected
+    assert v3_export.file_digest(lf) == expected
+    assert v3_export.file_digest(crlf) == expected
+    assert v3_export.file_digest(cr) == expected
+
+
+def test_dataset_digest_accepts_equivalent_lf_and_crlf_checkouts(
+    tmp_path: Path,
+    exported,
+) -> None:
+    """A manifest generated on either OS must validate after Git EOL conversion."""
+
+    canonical = exported.output.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    lf = tmp_path / "fixture-lf.jsonl"
+    crlf = tmp_path / "fixture-crlf.jsonl"
+    lf.write_bytes(canonical)
+    crlf.write_bytes(canonical.replace(b"\n", b"\r\n"))
+
+    v3_export.load_dataset_with_manifest(lf, exported.manifest)
+    v3_export.load_dataset_with_manifest(crlf, exported.manifest)
+
+
+def test_export_writes_canonical_lf_jsonl(exported) -> None:
+    payload = exported.output.read_bytes()
+    assert payload.endswith(b"\n")
+    assert b"\r" not in payload
+
+
 def test_export_refuses_a_data_directory_that_was_not_explicitly_supplied() -> None:
     with pytest.raises(v3_export.ExportRefused, match="explicit"):
         v3_export.resolve_data_dir(None)
@@ -466,6 +507,9 @@ def test_tracked_fixture_was_produced_by_this_exporter() -> None:
     assert manifest["exporter_source_digest"] == v3_export.exporter_source_digest(), (
         "tests/fixtures/v3_replay_synthetic_v1.jsonl is stale: regenerate it with "
         "scripts/v3_export.py --synthetic after changing the exporter"
+    )
+    assert manifest["exporter_source_digest"] == v3_export.canonical_text_digest(
+        Path(v3_export.__file__)
     )
 
 

@@ -1040,43 +1040,61 @@ def test_disabled_v3_never_imports_or_scans_lexicon(
     _run(go())
 
 
-async def _prompt_bytes(*, enabled: bool, root: Path | None) -> tuple[bytes, bytes]:
+async def _prompt_bytes(
+    *,
+    enabled: bool,
+    root: Path | None,
+    state_root: Path,
+) -> tuple[bytes, bytes]:
     """跑一遍真 prompt 组装路径，回传 (system_prompt, contexts) 的字节。
 
-    每次运行前把全局 random 播成同一个种子：v2 的 [心象] 注入本身带概率分支
-    （v2core/integration.py 的 _NIGHT_WAKE_CUE_PROB=0.25，以及 variant_pool.choose
-    的变体轮换），不控随机就【连 v2 自己两次跑都不逐字节相同】——那样的相等断言是
-    在赌骰子，既证不出 v3 无害，也会随机诈红。播种之后差异就只可能来自 v3。
+    除了给全局 random 播同一个种子，每次还必须使用一个全新的 v2 数据根，并完整
+    terminate 插件。空配置会回落到进程级 AstrBot data 根；只关 v3 facade 则会遗留
+    v2 保存与自主心跳任务，它们既可能改变下一实例加载到的 body，也会与下一次播种
+    共享进程级 random。那不是 v3 改了 prompt，而是测试把不同的运行基线拿来比较。
     """
 
     import random
 
     random.seed(20260715)
-    plugin = main_mod.EmotionalStatePlugin(FakeContext(), {})
-    facade = plugin._v3_shadow
-    facade.enabled = enabled
-    if enabled:
-        assert root is not None
-        assert await facade.initialize(root=root) is True
-    event, request = FakeEvent(), FakeRequest()
-    await plugin._llm_request_pipeline._process_llm_request_final(
-        event, request, "hi there", "qq:GroupMessage:1", False, False, False
+    plugin = main_mod.EmotionalStatePlugin(
+        FakeContext(),
+        {"sylanne_alpha_root": str(state_root)},
     )
-    if enabled:
-        assert facade.pending_count == 1, "开启时这一轮必须被捕获（否则相等是空证）"
-    await facade.terminate()
-    return (
-        str(request.system_prompt).encode("utf-8"),
-        repr(request.contexts).encode("utf-8"),
-    )
+    try:
+        facade = plugin._v3_shadow
+        facade.enabled = enabled
+        if enabled:
+            assert root is not None
+            assert await facade.initialize(root=root) is True
+        event, request = FakeEvent(), FakeRequest()
+        await plugin._llm_request_pipeline._process_llm_request_final(
+            event, request, "hi there", "qq:GroupMessage:1", False, False, False
+        )
+        if enabled:
+            assert facade.pending_count == 1, "开启时这一轮必须被捕获（否则相等是空证）"
+        return (
+            str(request.system_prompt).encode("utf-8"),
+            repr(request.contexts).encode("utf-8"),
+        )
+    finally:
+        await plugin.terminate()
 
 
 def test_request_boundary_prompt_baseline_is_reproducible(tmp_path: Path) -> None:
     """基线自证：播种后两次 disabled 运行必须逐字节相同，下面的相等才有意义。"""
 
     async def go() -> None:
-        first = await _prompt_bytes(enabled=False, root=None)
-        second = await _prompt_bytes(enabled=False, root=None)
+        first = await _prompt_bytes(
+            enabled=False,
+            root=None,
+            state_root=tmp_path / "baseline-first",
+        )
+        second = await _prompt_bytes(
+            enabled=False,
+            root=None,
+            state_root=tmp_path / "baseline-second",
+        )
         assert first == second
 
     _run(go())
@@ -1086,8 +1104,16 @@ def test_request_boundary_prompt_is_byte_identical_with_shadow_on(tmp_path: Path
     """默认关 vs 开启：真 prompt 组装路径产出的 system_prompt/contexts 逐字节相同。"""
 
     async def go() -> None:
-        off_prompt, off_contexts = await _prompt_bytes(enabled=False, root=None)
-        on_prompt, on_contexts = await _prompt_bytes(enabled=True, root=tmp_path / "v3")
+        off_prompt, off_contexts = await _prompt_bytes(
+            enabled=False,
+            root=None,
+            state_root=tmp_path / "off-v2",
+        )
+        on_prompt, on_contexts = await _prompt_bytes(
+            enabled=True,
+            root=tmp_path / "v3",
+            state_root=tmp_path / "on-v2",
+        )
         assert off_prompt == on_prompt, "开启 v3 后 final system_prompt 必须逐字节相同"
         assert off_contexts == on_contexts, "开启 v3 后 req.contexts 必须逐字节相同"
 

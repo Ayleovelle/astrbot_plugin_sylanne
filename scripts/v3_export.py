@@ -308,7 +308,17 @@ def row_digest(row: dict) -> str:
 
 
 def file_digest(path: Path) -> str:
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    """Compatibility alias for canonical tracked-text digests."""
+
+    return canonical_text_digest(path)
+
+
+def canonical_text_digest(path: Path) -> str:
+    """Digest text after canonicalizing checkout-dependent line endings to LF."""
+
+    payload = Path(path).read_bytes()
+    canonical = payload.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 # --------------------------------------------------------------------------- #
@@ -1001,9 +1011,9 @@ def validate_manifest(manifest: dict) -> None:
 def load_dataset_with_manifest(path: Path, manifest: dict) -> Dataset:
     validate_manifest(manifest)
     dataset = read_dataset(path)
-    actual = file_digest(path)
+    actual = canonical_text_digest(path)
     if actual != manifest["dataset_digest"]:
-        raise DatasetError("dataset_digest does not match the dataset bytes")
+        raise DatasetError("dataset_digest does not match the canonical dataset text")
     if dataset.row_count != manifest["row_count"]:
         raise DatasetError("manifest row_count does not match the dataset")
     # Honesty gate: a channel the manifest declares offline-unavailable must be
@@ -1087,9 +1097,9 @@ def exporter_commit() -> str:
 
 
 def exporter_source_digest() -> str:
-    """Canonical digest of this exporter's own source."""
+    """Canonical, checkout-EOL-independent digest of this exporter's source."""
 
-    return hashlib.sha256(Path(__file__).resolve().read_bytes()).hexdigest()
+    return canonical_text_digest(Path(__file__).resolve())
 
 
 def tracked_tree_is_clean() -> bool:
@@ -1267,7 +1277,7 @@ def _write_export(
                 )
 
     body = "\n".join(json.dumps(row, sort_keys=True, ensure_ascii=False) for row in rows) + "\n"
-    output.write_text(body, encoding="utf-8")
+    output.write_bytes(body.encode("utf-8"))
 
     headers = [row for row in rows if row["type"] == "episode_header"]
     turns = [row for row in rows if row["type"] == "turn"]
@@ -1307,7 +1317,7 @@ def _write_export(
         ).hexdigest(),
         "exporter_commit": exporter_commit(),
         "exporter_source_digest": exporter_source_digest(),
-        "dataset_digest": file_digest(output),
+        "dataset_digest": canonical_text_digest(output),
     }
     validate_manifest(manifest)
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
