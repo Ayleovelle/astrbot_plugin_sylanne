@@ -1185,11 +1185,11 @@ def _v3_shadow_of(owner: Any) -> Any:
     "https://github.com/Ayleovelle/astrbot_plugin_sylanne",
 )
 class EmotionalStatePlugin(Star):
-    """Sylanne-Embodiment 情感身体运行时插件。
+    """Sylanne-Embodiment 长期对话状态与行为运行时插件。
 
     继承 AstrBot Star 基类，作为 AstrBot 插件运行。
     通过事件钩子（on_llm_request/on_llm_response）在 LLM 管线中
-    注入情感状态上下文，实现「有身体感的 AI」。
+    注入对话状态上下文，为回复策略与行为调度提供运行时输入。
 
     核心子系统（在 __init__ 中初始化）：
     - _hosts: 会话→宿主映射（每个会话一个 SylanneAlphaHost）
