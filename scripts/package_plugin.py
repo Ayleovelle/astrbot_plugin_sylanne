@@ -4,11 +4,14 @@ import argparse
 import ast
 import hashlib
 import json
+import os
 import re
+import stat
 import struct
 import subprocess
 import unicodedata
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -42,6 +45,15 @@ V3_SOURCE_DIRS = ("sylanne_alpha/v3core", "sylanne_alpha/v3bridge")
 # must never reach a distributed artifact.
 ENGINE_PREFIX = f"{PLUGIN_NAME}/sylanne_alpha/_engine/"
 ENGINE_ALLOWED_NAMES = ("py.typed",)
+REGULAR_BLOB_MODES = {"100644", "100755"}
+
+# Release-input safety envelope. The current stable tree selects 216 files,
+# whose largest blob is 246,376 bytes and total is about 4.55 MiB. These caps
+# leave substantial growth room while bounding every Git subprocess capture.
+MAX_SELECTED_ENTRIES = 1024
+MAX_HEAD_BLOB_BYTES = 4 * 1024 * 1024
+MAX_TOTAL_HEAD_BLOB_BYTES = 32 * 1024 * 1024
+MAX_METADATA_OVERRIDE_BYTES = 256 * 1024
 
 # One fixed timestamp/permission/compression policy: builds from the same
 # tracked tree must be byte-identical.
@@ -135,8 +147,8 @@ def should_include(path: Path) -> bool:
     return relative.parts[0] in INCLUDE_DIRS
 
 
-def _tracked_files() -> set[Path]:
-    """Set of git-tracked files (absolute, resolved).
+def _tracked_files() -> set[str]:
+    """Set of git-index paths as validated repository-relative POSIX strings.
 
     Packaging must ship only tracked content: `rglob` over the working tree would
     otherwise sweep in git-ignored runtime artifacts that match the allowlist —
@@ -149,14 +161,21 @@ def _tracked_files() -> set[Path]:
             ["git", "ls-files", "-z"],
             cwd=ROOT,
             capture_output=True,
-            text=True,
             check=True,
         ).stdout
     except (OSError, subprocess.CalledProcessError) as exc:
         raise RuntimeError(
             "git ls-files failed; refusing to package untracked workspace files"
         ) from exc
-    tracked = {(ROOT / rel).resolve() for rel in out.split("\0") if rel}
+    if not out:
+        raise RuntimeError("git ls-files returned an empty file list; refusing to package")
+    if not out.endswith(b"\0"):
+        raise RuntimeError("git ls-files returned a malformed file list; refusing to package")
+    tracked = {
+        _checked_repo_relative_path(raw)
+        for raw in out[:-1].split(b"\0")
+        if raw
+    }
     if not tracked:
         raise RuntimeError(
             "git ls-files returned an empty file list; refusing to package"
@@ -177,11 +196,11 @@ def _git_binary_output(args: list[str], *, input_data: bytes | None = None) -> b
         raise RuntimeError(f"git {' '.join(args)} failed; refusing to package") from exc
 
 
-def _checked_head_tree_path(raw: bytes) -> Path:
+def _checked_repo_relative_path(raw: bytes) -> str:
     try:
         relative = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise RuntimeError("HEAD tree path is not UTF-8; refusing to package") from exc
+        raise RuntimeError("Git path is not UTF-8; refusing to package") from exc
     parts = relative.split("/")
     if (
         not relative
@@ -191,8 +210,25 @@ def _checked_head_tree_path(raw: bytes) -> Path:
         or "\n" in relative
         or any(part in {"", ".", ".."} for part in parts)
     ):
-        raise RuntimeError(f"unsafe HEAD tree path {relative!r}; refusing to package")
-    return ROOT.joinpath(*parts)
+        raise RuntimeError(f"unsafe Git path {relative!r}; refusing to package")
+    return relative
+
+
+def _repo_path(relative: str) -> Path:
+    return ROOT.joinpath(*relative.split("/"))
+
+
+def _lexical_absolute(path: Path) -> Path:
+    """Make a filesystem path absolute without resolving symlinks."""
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _filesystem_path_to_repo_relative(path: Path) -> str | None:
+    try:
+        relative = _lexical_absolute(path).relative_to(_lexical_absolute(ROOT)).as_posix()
+    except ValueError:
+        return None
+    return _checked_repo_relative_path(relative.encode("utf-8"))
 
 
 def _checked_revision(revision: str) -> str:
@@ -201,43 +237,67 @@ def _checked_revision(revision: str) -> str:
     raise RuntimeError(f"unsafe git revision {revision!r}; refusing to package")
 
 
-def _head_tree_files(revision: str = "HEAD") -> list[Path]:
-    """Return paths named by a committed revision, independent of the checkout."""
+@dataclass(frozen=True, slots=True)
+class HeadTreeEntry:
+    relative_path: str
+    mode: str
+    oid: str
+
+
+def _head_tree_files(revision: str = "HEAD") -> list[HeadTreeEntry]:
+    """Return validated regular blobs from a committed Git tree."""
     revision = _checked_revision(revision)
-    out = _git_binary_output(["ls-tree", "-r", "--name-only", "-z", revision, "--"])
+    out = _git_binary_output(["ls-tree", "-r", "-z", revision, "--"])
     if not out or not out.endswith(b"\0"):
         raise RuntimeError("git ls-tree returned an empty or malformed HEAD tree")
     records = out[:-1].split(b"\0")
     if not records or any(not record for record in records):
         raise RuntimeError("git ls-tree returned a malformed HEAD tree")
-    files = [_checked_head_tree_path(record) for record in records]
-    if len({path.relative_to(ROOT).as_posix() for path in files}) != len(files):
-        raise RuntimeError("git ls-tree returned duplicate HEAD tree paths")
-    return files
-
-
-def _head_blob_bytes(files: list[Path], revision: str = "HEAD") -> dict[Path, bytes]:
-    """Read selected revision blobs through one strictly framed cat-file batch."""
-    if not files:
-        return {}
-    revision = _checked_revision(revision)
-
-    relative_paths: list[str] = []
-    for path in files:
+    entries: list[HeadTreeEntry] = []
+    for record in records:
         try:
-            relative = path.relative_to(ROOT).as_posix()
+            header, raw_path = record.split(b"\t", 1)
         except ValueError as exc:
-            raise RuntimeError(f"archive input {path} is outside the repository") from exc
-        _checked_head_tree_path(relative.encode("utf-8"))
-        relative_paths.append(relative)
+            raise RuntimeError("git ls-tree returned a malformed HEAD tree record") from exc
+        fields = header.split(b" ")
+        if len(fields) != 3:
+            raise RuntimeError("git ls-tree returned a malformed HEAD tree header")
+        try:
+            mode = fields[0].decode("ascii")
+            object_type = fields[1].decode("ascii")
+            oid = fields[2].decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise RuntimeError("git ls-tree returned a non-ASCII object header") from exc
+        relative = _checked_repo_relative_path(raw_path)
+        if mode == "120000":
+            raise RuntimeError(f"HEAD tree symlink {relative!r} is not packageable; refusing")
+        if mode == "160000":
+            raise RuntimeError(f"HEAD tree gitlink {relative!r} is not packageable; refusing")
+        if mode not in REGULAR_BLOB_MODES or object_type != "blob":
+            raise RuntimeError(
+                f"HEAD tree entry {relative!r} has unsupported mode/type "
+                f"{mode!r}/{object_type!r}; refusing"
+            )
+        if re.fullmatch(r"[0-9a-f]{40}", oid) is None:
+            raise RuntimeError(f"HEAD tree entry {relative!r} has an invalid object id")
+        entries.append(HeadTreeEntry(relative_path=relative, mode=mode, oid=oid))
+    if len({entry.relative_path for entry in entries}) != len(entries):
+        raise RuntimeError("git ls-tree returned duplicate HEAD tree paths")
+    return entries
 
-    requests = b"".join(
-        f"{revision}:{relative}\n".encode("utf-8") for relative in relative_paths
-    )
+
+def _head_blob_bytes(entries: list[HeadTreeEntry]) -> dict[str, bytes]:
+    """Read selected tree blobs by OID through one strictly framed cat-file batch."""
+    if not entries:
+        return {}
+
+    checked_sizes = _head_blob_sizes(entries)
+    requests = b"".join(f"{entry.oid}\n".encode("ascii") for entry in entries)
     out = _git_binary_output(["cat-file", "--batch"], input_data=requests)
     cursor = 0
-    blobs: dict[Path, bytes] = {}
-    for path, relative in zip(files, relative_paths, strict=True):
+    blobs: dict[str, bytes] = {}
+    for entry in entries:
+        relative = entry.relative_path
         header_end = out.find(b"\n", cursor)
         if header_end < 0:
             raise RuntimeError(
@@ -249,8 +309,10 @@ def _head_blob_bytes(files: list[Path], revision: str = "HEAD") -> dict[Path, by
         if (
             len(fields) != 3
             or re.fullmatch(rb"[0-9a-f]{40}", fields[0]) is None
+            or fields[0].decode("ascii") != entry.oid
             or fields[1] != b"blob"
             or re.fullmatch(rb"(?:0|[1-9][0-9]*)", fields[2]) is None
+            or int(fields[2]) != checked_sizes[relative]
         ):
             raise RuntimeError(
                 f"git cat-file --batch returned an invalid blob header for {relative!r}; "
@@ -263,7 +325,7 @@ def _head_blob_bytes(files: list[Path], revision: str = "HEAD") -> dict[Path, by
                 f"git cat-file --batch returned invalid blob framing for {relative!r}; "
                 "refusing to package"
             )
-        blobs[path.resolve()] = out[cursor:content_end]
+        blobs[relative] = out[cursor:content_end]
         cursor = content_end + 1
 
     if cursor != len(out):
@@ -271,18 +333,71 @@ def _head_blob_bytes(files: list[Path], revision: str = "HEAD") -> dict[Path, by
     return blobs
 
 
+def _head_blob_sizes(entries: list[HeadTreeEntry]) -> dict[str, int]:
+    """Validate object types/sizes and enforce bounds before capturing blob content."""
+    requests = b"".join(f"{entry.oid}\n".encode("ascii") for entry in entries)
+    out = _git_binary_output(["cat-file", "--batch-check"], input_data=requests)
+    cursor = 0
+    total = 0
+    sizes: dict[str, int] = {}
+    for entry in entries:
+        header_end = out.find(b"\n", cursor)
+        if header_end < 0:
+            raise RuntimeError(
+                f"git cat-file --batch-check omitted {entry.relative_path!r}; refusing"
+            )
+        fields = out[cursor:header_end].split(b" ")
+        cursor = header_end + 1
+        if (
+            len(fields) != 3
+            or re.fullmatch(rb"[0-9a-f]{40}", fields[0]) is None
+            or fields[0].decode("ascii") != entry.oid
+            or fields[1] != b"blob"
+            or re.fullmatch(rb"(?:0|[1-9][0-9]*)", fields[2]) is None
+        ):
+            raise RuntimeError(
+                f"git cat-file --batch-check returned an invalid blob header for "
+                f"{entry.relative_path!r}; refusing"
+            )
+        size = int(fields[2])
+        if size > MAX_HEAD_BLOB_BYTES:
+            raise RuntimeError(
+                f"single HEAD blob {entry.relative_path!r} is {size} bytes, exceeding "
+                f"the {MAX_HEAD_BLOB_BYTES}-byte release limit"
+            )
+        total += size
+        if total > MAX_TOTAL_HEAD_BLOB_BYTES:
+            raise RuntimeError(
+                f"total HEAD blob bytes {total} exceed the "
+                f"{MAX_TOTAL_HEAD_BLOB_BYTES}-byte release limit"
+            )
+        sizes[entry.relative_path] = size
+    if cursor != len(out):
+        raise RuntimeError("git cat-file --batch-check returned trailing data; refusing")
+    return sizes
+
+
 def collect_files(
     exclude_paths: set[Path] | None = None,
     *,
     revision: str = "HEAD",
-) -> list[Path]:
-    resolved_excludes = {path.resolve() for path in (exclude_paths or set())}
+) -> list[HeadTreeEntry]:
+    excluded = {
+        relative
+        for path in (exclude_paths or set())
+        if (relative := _filesystem_path_to_repo_relative(path)) is not None
+    }
     files = [
-        path for path in _head_tree_files(revision)
-        if path.resolve() not in resolved_excludes
-        and should_include(path)
+        entry for entry in _head_tree_files(revision)
+        if entry.relative_path not in excluded
+        and should_include(_repo_path(entry.relative_path))
     ]
-    return sorted(files, key=lambda item: item.relative_to(ROOT).as_posix())
+    if len(files) > MAX_SELECTED_ENTRIES:
+        raise RuntimeError(
+            f"selected entry count {len(files)} exceeds the "
+            f"{MAX_SELECTED_ENTRIES}-entry release limit"
+        )
+    return sorted(files, key=lambda item: item.relative_path)
 
 
 def _git_output(args: list[str]) -> str:
@@ -298,18 +413,26 @@ def _git_output(args: list[str]) -> str:
         raise RuntimeError(f"git {' '.join(args)} failed; refusing to package") from exc
 
 
-def _paths_differing_from_head() -> set[Path]:
-    """Tracked paths whose worktree/index content differs from committed HEAD.
+def _paths_differing_from_revision(revision: str) -> set[str]:
+    """Tracked paths whose worktree/index content differs from captured commit.
 
     This is git's own content comparison, which is eol-normalized: with
     ``core.autocrlf=true`` most worktree files differ from their HEAD blob at the
     byte level while being identical as far as git is concerned. Comparing raw
     bytes instead would refuse every build on a CRLF checkout, so "differs from
-    HEAD" means "``git diff HEAD`` reports it". Archive bytes themselves are
-    read from HEAD blobs and therefore remain reproducible across checkout EOLs.
+    revision" means "``git diff <commit>`` reports it". Archive bytes themselves
+    are read from the same captured commit and remain reproducible across EOLs.
     """
-    out = _git_output(["diff", "--name-only", "-z", "HEAD", "--"])
-    return {(ROOT / rel).resolve() for rel in out.split("\0") if rel}
+    if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        raise RuntimeError(f"dirty-path revision {revision!r} is not a captured commit")
+    out = _git_binary_output(["diff", "--name-only", "-z", revision, "--"])
+    if out and not out.endswith(b"\0"):
+        raise RuntimeError("git diff returned malformed NUL-delimited paths")
+    return {
+        _checked_repo_relative_path(raw)
+        for raw in out[:-1].split(b"\0")
+        if raw
+    }
 
 
 def _head_commit() -> str:
@@ -329,13 +452,73 @@ def _checked_metadata_override(metadata_override: Path | None) -> Path | None:
     """
     if metadata_override is None:
         return None
-    resolved = metadata_override.resolve()
-    if resolved == (ROOT / METADATA_RELPATH).resolve():
+    absolute = _lexical_absolute(metadata_override)
+    if absolute == _lexical_absolute(ROOT / METADATA_RELPATH):
         raise RuntimeError(
             "--metadata must be a temporary copy, not the tracked metadata.yaml; "
             "refusing to package"
         )
-    return resolved
+    return absolute
+
+
+def _read_metadata_override(metadata_override: Path | None) -> bytes | None:
+    """Read a bounded regular override without accepting a symlink or directory."""
+    checked = _checked_metadata_override(metadata_override)
+    if checked is None:
+        return None
+    try:
+        before = os.lstat(checked)
+    except OSError as exc:
+        raise RuntimeError(f"cannot stat metadata override {checked}; refusing") from exc
+    if stat.S_ISLNK(before.st_mode):
+        raise RuntimeError("metadata override must not be a symlink; refusing")
+    if not stat.S_ISREG(before.st_mode):
+        raise RuntimeError("metadata override must be a regular file; refusing")
+    if before.st_size > MAX_METADATA_OVERRIDE_BYTES:
+        raise RuntimeError(
+            f"metadata override is {before.st_size} bytes, exceeding the "
+            f"{MAX_METADATA_OVERRIDE_BYTES}-byte release limit"
+        )
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(checked, flags)
+    except OSError as exc:
+        raise RuntimeError(f"cannot open metadata override {checked}; refusing") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise RuntimeError("metadata override must remain a regular file; refusing")
+        chunks: list[bytes] = []
+        remaining = MAX_METADATA_OVERRIDE_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+    try:
+        after = os.lstat(checked)
+    except OSError as exc:
+        raise RuntimeError("metadata override changed while being read; refusing") from exc
+    if (
+        stat.S_ISLNK(after.st_mode)
+        or not stat.S_ISREG(after.st_mode)
+        or len(data) != opened.st_size
+        or len(data) != after.st_size
+        or (opened.st_ino and after.st_ino and opened.st_ino != after.st_ino)
+        or (opened.st_dev and after.st_dev and opened.st_dev != after.st_dev)
+    ):
+        raise RuntimeError("metadata override changed while being read; refusing")
+    if len(data) > MAX_METADATA_OVERRIDE_BYTES:
+        raise RuntimeError(
+            f"metadata override is over {MAX_METADATA_OVERRIDE_BYTES} bytes; refusing"
+        )
+    return data
 
 
 def _read_metadata_version(data: bytes) -> str:
@@ -591,13 +774,14 @@ def _verify_generated_flags(content: bytes, channel: str) -> None:
         )
 
 
-def _untracked_v3_sources(tracked: set[Path]) -> list[Path]:
+def _untracked_v3_sources(tracked: set[str]) -> list[Path]:
     missing: list[Path] = []
     for relative in V3_SOURCE_DIRS:
         for path in sorted((ROOT / relative).rglob("*.py")):
             if "__pycache__" in path.parts:
                 continue
-            if path.resolve() not in tracked:
+            relative_path = path.relative_to(ROOT).as_posix()
+            if relative_path not in tracked:
                 missing.append(path)
     return missing
 
@@ -616,16 +800,17 @@ def _archive_entries(
     channel: str,
     metadata_override: Path | None = None,
     exclude_paths: set[Path] | None = None,
-    commit: str = "HEAD",
+    *,
+    commit: str,
 ) -> list[tuple[str, bytes]]:
     """Build the full (arcname, uncompressed bytes) set for one channel."""
-    checked_override = _checked_metadata_override(metadata_override)
-    flags_source = (ROOT / BUILD_FLAGS_RELPATH).resolve()
-    main_source = (ROOT / MAIN_RELPATH).resolve()
-    metadata_source = (ROOT / METADATA_RELPATH).resolve()
+    override_metadata = _read_metadata_override(metadata_override)
+    flags_source = BUILD_FLAGS_RELPATH.as_posix()
+    main_source = MAIN_RELPATH.as_posix()
+    metadata_source = METADATA_RELPATH.as_posix()
     replaced_sources = {flags_source}
     dirty_exempt_sources = {flags_source}
-    if checked_override is not None:
+    if override_metadata is not None:
         replaced_sources.update((main_source, metadata_source))
         # The checked-in metadata is irrelevant when a separate override is
         # packaged. main.py remains a tracked input: generated main.py is derived
@@ -633,18 +818,22 @@ def _archive_entries(
         dirty_exempt_sources.add(metadata_source)
 
     files = collect_files(exclude_paths=exclude_paths, revision=commit)
-    head_blobs = _head_blob_bytes(files, revision=commit)
-    resolved_excludes = {path.resolve() for path in (exclude_paths or set())}
+    head_blobs = _head_blob_bytes(files)
+    excluded = {
+        relative
+        for path in (exclude_paths or set())
+        if (relative := _filesystem_path_to_repo_relative(path)) is not None
+    }
 
     dirty = {
-        path
-        for path in _paths_differing_from_head()
-        if path.resolve() not in resolved_excludes
-        and path.resolve() not in dirty_exempt_sources
-        and should_include(path)
+        relative
+        for relative in _paths_differing_from_revision(commit)
+        if relative not in excluded
+        and relative not in dirty_exempt_sources
+        and should_include(_repo_path(relative))
     }
     if dirty:
-        listed = ", ".join(sorted(str(path.relative_to(ROOT)) for path in dirty))
+        listed = ", ".join(sorted(dirty))
         raise RuntimeError(
             f"tracked archive inputs differ from committed HEAD: {listed}; refusing to package"
         )
@@ -658,17 +847,17 @@ def _archive_entries(
     _validate_release_identity(checked_version, checked_main)
 
     entries: list[tuple[str, bytes]] = [(f"{PLUGIN_NAME}/", b"")]
-    for path in files:
-        if path.resolve() in replaced_sources:
+    for entry in files:
+        relative = entry.relative_path
+        if relative in replaced_sources:
             continue  # replaced below; never appended as a duplicate
-        arcname = _normalize_arcname(Path(PLUGIN_NAME, path.relative_to(ROOT)).as_posix())
-        entries.append((arcname, head_blobs[path.resolve()]))
+        arcname = _normalize_arcname(f"{PLUGIN_NAME}/{relative}")
+        entries.append((arcname, head_blobs[relative]))
 
     flags = _render_build_flags(channel)
     _verify_generated_flags(flags, channel)
     entries.append((BUILD_FLAGS_ARCNAME, flags))
-    if checked_override is not None:
-        override_metadata = checked_override.read_bytes()
+    if override_metadata is not None:
         override_version = _read_metadata_version(override_metadata)
         entries.append(
             (
@@ -780,13 +969,13 @@ def build_package(
         raise ValueError(f"unknown channel {channel!r}; expected one of {list(CHANNELS)}")
 
     _checked_metadata_override(metadata_override)
+    commit = _head_commit()
 
     untracked = _untracked_v3_sources(_tracked_files())
     if untracked:
         listed = ", ".join(str(path.relative_to(ROOT)) for path in untracked)
         raise RuntimeError(f"untracked v3 source files: {listed}; refusing to package")
 
-    commit = _head_commit()
     output.parent.mkdir(parents=True, exist_ok=True)
     checksum_path = output.parent / f"{output.name}.sha256"
 

@@ -257,8 +257,12 @@ def test_metadata_override_does_not_exempt_other_inputs_from_the_head_check(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    dirty = (package_plugin.ROOT / "main.py").resolve()
-    monkeypatch.setattr(package_plugin, "_paths_differing_from_head", lambda: {dirty})
+    dirty = "main.py"
+    monkeypatch.setattr(
+        package_plugin,
+        "_paths_differing_from_revision",
+        lambda revision: {dirty},
+    )
 
     with pytest.raises(RuntimeError, match="HEAD"):
         _build(tmp_path, "grey", metadata=_grey_metadata(tmp_path))
@@ -534,24 +538,37 @@ def test_archive_paths_are_forward_slash_nfc(
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("dirty", ["main.py", "UI/new.js", "pages/deleted.js"])
 def test_refuses_when_a_tracked_archive_input_differs_from_head(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    dirty: str,
 ) -> None:
-    dirty = (package_plugin.ROOT / "main.py").resolve()
-    monkeypatch.setattr(package_plugin, "_paths_differing_from_head", lambda: {dirty})
+    monkeypatch.setattr(
+        package_plugin,
+        "_paths_differing_from_revision",
+        lambda revision: {dirty},
+    )
 
     with pytest.raises(RuntimeError, match="HEAD"):
         _build(tmp_path, "stable")
 
 
+@pytest.mark.parametrize(
+    "unrelated",
+    ["docs/note.md", "tests/test_probe.py", "scripts/package_plugin.py"],
+)
 def test_ignores_head_differences_outside_the_archive_input_set(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    unrelated: str,
 ) -> None:
     """Dirty docs/tests/scripts must not block a stable build."""
-    unrelated = (package_plugin.ROOT / "scripts" / "package_plugin.py").resolve()
-    monkeypatch.setattr(package_plugin, "_paths_differing_from_head", lambda: {unrelated})
+    monkeypatch.setattr(
+        package_plugin,
+        "_paths_differing_from_revision",
+        lambda revision: {unrelated},
+    )
 
     assert _build(tmp_path, "stable").is_file()
 
@@ -575,7 +592,7 @@ def test_refuses_when_a_v3_source_file_is_untracked(
     tmp_path: Path,
 ) -> None:
     real = package_plugin._tracked_files()
-    victim = (package_plugin.ROOT / "sylanne_alpha" / "v3core" / "orchestrator.py").resolve()
+    victim = "sylanne_alpha/v3core/orchestrator.py"
     assert victim in real
     monkeypatch.setattr(package_plugin, "_tracked_files", lambda: real - {victim})
 

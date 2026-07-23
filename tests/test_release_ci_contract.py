@@ -263,10 +263,28 @@ def test_grey_override_rewrites_all_packaged_release_identities(
     override = tmp_path / "grey-metadata.yaml"
     override.write_text(f'version: "{GREY_OVERRIDE_VERSION}"\n', encoding="utf-8")
 
-    tracked = {checked_in_metadata.resolve(), main.resolve()}
+    tracked = {"metadata.yaml", "main.py"}
+    head_entries = [
+        package_plugin.HeadTreeEntry("main.py", "100644", "1" * 40),
+        package_plugin.HeadTreeEntry("metadata.yaml", "100644", "2" * 40),
+    ]
+    head_blobs = {
+        "main.py": main.read_bytes(),
+        "metadata.yaml": checked_in_metadata.read_bytes(),
+    }
     monkeypatch.setattr(package_plugin, "ROOT", plugin_root)
     monkeypatch.setattr(package_plugin, "_tracked_files", lambda: tracked)
-    monkeypatch.setattr(package_plugin, "_paths_differing_from_head", lambda: set())
+    monkeypatch.setattr(
+        package_plugin,
+        "_head_tree_files",
+        lambda revision: head_entries,
+    )
+    monkeypatch.setattr(package_plugin, "_head_blob_bytes", lambda entries: head_blobs)
+    monkeypatch.setattr(
+        package_plugin,
+        "_paths_differing_from_revision",
+        lambda revision: set(),
+    )
     monkeypatch.setattr(package_plugin, "_head_commit", lambda: "0" * 40)
 
     archive = package_plugin.build_package(
