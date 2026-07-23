@@ -855,7 +855,20 @@ def _read_metadata_version(data: bytes) -> str:
         raise RuntimeError(
             f"metadata.yaml must declare exactly one top-level version (found {len(matches)})"
         )
-    return matches[0].strip().strip('"').strip("'")
+    raw_value = matches[0].strip()
+    if not raw_value:
+        raise RuntimeError("metadata.yaml version must not be empty")
+    if raw_value[0] in {"'", '"'}:
+        quote = raw_value[0]
+        if len(raw_value) < 2 or raw_value[-1] != quote:
+            raise RuntimeError(
+                "metadata.yaml version has an unmatched outer quote; refusing to package"
+            )
+        version = raw_value[1:-1]
+    else:
+        version = raw_value
+    _metadata_channel_for_version(version)
+    return version
 
 
 class _ModulePluginVersionWriteVisitor(ast.NodeVisitor):
@@ -1326,6 +1339,11 @@ def _commit_output_pair(
     checksum: Path,
 ) -> None:
     """Install ZIP + checksum as a rollback-safe two-file transaction."""
+    output_backup_stage = 1
+    checksum_backup_stage = 2
+    output_install_stage = 3
+    checksum_install_stage = 4
+
     output_existed = os.path.lexists(output)
     checksum_existed = os.path.lexists(checksum)
     output_backup: Path | None = None
@@ -1340,44 +1358,85 @@ def _commit_output_pair(
         _discard_file(checksum_backup)
         raise
 
-    output_backed_up = False
-    checksum_backed_up = False
+    attempted_stage = 0
+    # Conservative until filesystem facts prove otherwise: an interrupt during
+    # reconciliation must leave a possibly-old backup in place, never delete it.
+    output_backed_up = output_backup is not None
+    checksum_backed_up = checksum_backup is not None
     output_installed = False
     checksum_installed = False
     commit_succeeded = False
     try:
         if output_backup is not None:
+            attempted_stage = output_backup_stage
             os.replace(output, output_backup)
-            output_backed_up = True
         if checksum_backup is not None:
+            attempted_stage = checksum_backup_stage
             os.replace(checksum, checksum_backup)
-            checksum_backed_up = True
 
+        attempted_stage = output_install_stage
         os.replace(new_output, output)
-        output_installed = True
+        attempted_stage = checksum_install_stage
         os.replace(new_checksum, checksum)
-        checksum_installed = True
         commit_succeeded = True
     except BaseException as exc:
+        commit_succeeded = False
+
+        def stage_completed(stage: int, source: Path, destination: Path) -> bool:
+            return attempted_stage > stage or (
+                attempted_stage == stage
+                and not os.path.lexists(source)
+                and os.path.lexists(destination)
+            )
+
+        output_backed_up = (
+            output_backup is not None
+            and stage_completed(output_backup_stage, output, output_backup)
+        )
+        checksum_backed_up = (
+            checksum_backup is not None
+            and stage_completed(checksum_backup_stage, checksum, checksum_backup)
+        )
+        output_installed = stage_completed(output_install_stage, new_output, output)
+        checksum_installed = stage_completed(
+            checksum_install_stage,
+            new_checksum,
+            checksum,
+        )
+
         rollback_errors: list[BaseException] = []
+        rollback_interrupts: list[BaseException] = []
 
-        try:
-            if checksum_backed_up and checksum_backup is not None:
-                os.replace(checksum_backup, checksum)
-                checksum_backed_up = False
-            elif checksum_installed and not checksum_existed:
-                _discard_file(checksum)
-        except BaseException as rollback_exc:
-            rollback_errors.append(rollback_exc)
+        def restore_backup(backup: Path, target: Path) -> bool:
+            """Return True only while `backup` still holds the old file."""
+            try:
+                os.replace(backup, target)
+            except BaseException as rollback_exc:
+                if not os.path.lexists(backup) and os.path.lexists(target):
+                    rollback_interrupts.append(rollback_exc)
+                    return False
+                rollback_errors.append(rollback_exc)
+                return True
+            return False
 
-        try:
-            if output_backed_up and output_backup is not None:
-                os.replace(output_backup, output)
-                output_backed_up = False
-            elif output_installed and not output_existed:
-                _discard_file(output)
-        except BaseException as rollback_exc:
-            rollback_errors.append(rollback_exc)
+        def remove_new_target(target: Path) -> None:
+            try:
+                _discard_file(target)
+            except BaseException as rollback_exc:
+                if os.path.lexists(target):
+                    rollback_errors.append(rollback_exc)
+                else:
+                    rollback_interrupts.append(rollback_exc)
+
+        if checksum_backed_up and checksum_backup is not None:
+            checksum_backed_up = restore_backup(checksum_backup, checksum)
+        elif checksum_installed and not checksum_existed:
+            remove_new_target(checksum)
+
+        if output_backed_up and output_backup is not None:
+            output_backed_up = restore_backup(output_backup, output)
+        elif output_installed and not output_existed:
+            remove_new_target(output)
 
         if rollback_errors:
             details = "; ".join(str(error) for error in rollback_errors)
@@ -1394,6 +1453,9 @@ def _commit_output_pair(
                 "package pair commit failed and rollback was incomplete; "
                 f"preserved backups: {preserved_message}; errors: {details}"
             ) from exc
+        for rollback_interrupt in rollback_interrupts:
+            if isinstance(rollback_interrupt, (KeyboardInterrupt, SystemExit)):
+                raise rollback_interrupt
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
         raise RuntimeError(
@@ -1434,10 +1496,16 @@ def _write_output_pair(
             handle.write(f"{_file_sha256(archive_temp)}  {output.name}\n")
             handle.flush()
             os.fsync(handle.fileno())
+        fresh_tracked_sources = _tracked_source_paths()
+        if fresh_tracked_sources != tracked_sources:
+            raise RuntimeError(
+                "tracked source set changed while the package was being built; "
+                "refusing to commit outputs"
+            )
         _validate_output_targets(
             output,
             checksum,
-            tracked_sources,
+            fresh_tracked_sources,
             metadata_override,
         )
         _commit_output_pair(archive_temp, checksum_temp, output, checksum)

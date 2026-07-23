@@ -399,6 +399,47 @@ def test_metadata_override_must_be_a_bounded_regular_non_symlink_file(
         package_plugin._read_metadata_override(symlink_probe)
 
 
+@pytest.mark.parametrize(
+    ("raw_metadata", "expected"),
+    [
+        (b"version: 2.5.0\n", "2.5.0"),
+        (b"version: '2.5.0'\n", "2.5.0"),
+        (b'version: "2.5.0"\n', "2.5.0"),
+        (b"version: 2.5.0-grey.7\n", "2.5.0-grey.7"),
+        (b"version: '2.5.0-grey.7'\n", "2.5.0-grey.7"),
+        (b'version: "2.5.0-grey.7"\n', "2.5.0-grey.7"),
+    ],
+)
+def test_read_metadata_version_accepts_exact_release_scalars(
+    raw_metadata: bytes,
+    expected: str,
+) -> None:
+    assert package_plugin._read_metadata_version(raw_metadata) == expected
+
+
+@pytest.mark.parametrize(
+    "raw_metadata",
+    [
+        b"""version: "'2.5.0'"\n""",
+        b"""version: '"2.5.0"'\n""",
+        b'version: "2.5.0\n',
+        b"version: '2.5.0\n",
+        b'version: 2.5.0"\n',
+        b"version: 2.5.0'\n",
+        b'version: ""2.5.0""\n',
+        b"version: ''2.5.0''\n",
+        b'version: "2.5.0" trailing\n',
+        b"version: 2.5.0 trailing\n",
+        b'version: "2.5.0" # comment\n',
+    ],
+)
+def test_read_metadata_version_rejects_ambiguous_or_trailing_syntax(
+    raw_metadata: bytes,
+) -> None:
+    with pytest.raises(RuntimeError, match="version|quote|syntax"):
+        package_plugin._read_metadata_version(raw_metadata)
+
+
 def test_metadata_override_rejects_hardlink_alias_of_tracked_metadata(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -849,6 +890,110 @@ def test_pair_commit_rolls_back_on_non_oserror_failure(
     assert not list(dist.glob(".*.tmp"))
 
 
+@pytest.mark.parametrize("interrupt_type", [KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize(
+    "interrupt_after_replace",
+    [1, 2, 3, 4],
+    ids=[
+        "output-backup",
+        "checksum-backup",
+        "output-install",
+        "checksum-install",
+    ],
+)
+def test_pair_commit_recovers_when_interrupt_follows_successful_replace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    interrupt_type: type[BaseException],
+    interrupt_after_replace: int,
+) -> None:
+    output = tmp_path / "probe.zip"
+    checksum = tmp_path / "probe.zip.sha256"
+    new_output = tmp_path / "new-probe.zip"
+    new_checksum = tmp_path / "new-probe.zip.sha256"
+    old_output = b"old zip survives every instruction boundary\n"
+    old_checksum = b"old checksum survives every instruction boundary\n"
+    output.write_bytes(old_output)
+    checksum.write_bytes(old_checksum)
+    new_output.write_bytes(b"new zip\n")
+    new_checksum.write_bytes(b"new checksum\n")
+
+    real_replace = os.replace
+    replace_count = 0
+
+    def replace_then_interrupt(src: object, dst: object) -> None:
+        nonlocal replace_count
+        replace_count += 1
+        real_replace(src, dst)
+        if replace_count == interrupt_after_replace:
+            raise interrupt_type()
+
+    monkeypatch.setattr(package_plugin.os, "replace", replace_then_interrupt)
+
+    with pytest.raises(interrupt_type):
+        package_plugin._commit_output_pair(
+            new_output,
+            new_checksum,
+            output,
+            checksum,
+        )
+
+    assert output.read_bytes() == old_output
+    assert checksum.read_bytes() == old_checksum
+    assert not list(tmp_path.glob(".*backup.tmp"))
+
+
+def test_interrupt_after_backup_move_preserves_backup_if_rollback_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "probe.zip"
+    checksum = tmp_path / "probe.zip.sha256"
+    new_output = tmp_path / "new-probe.zip"
+    new_checksum = tmp_path / "new-probe.zip.sha256"
+    old_output = b"only surviving old zip bytes\n"
+    output.write_bytes(old_output)
+    checksum.write_bytes(b"old checksum\n")
+    new_output.write_bytes(b"new zip\n")
+    new_checksum.write_bytes(b"new checksum\n")
+
+    real_replace = os.replace
+    output_backup_moved = False
+
+    def interrupt_then_fail_restore(src: object, dst: object) -> None:
+        nonlocal output_backup_moved
+        source = Path(src)
+        destination = Path(dst)
+        if not output_backup_moved:
+            real_replace(src, dst)
+            output_backup_moved = True
+            raise KeyboardInterrupt()
+        if (
+            destination == output
+            and source.name.endswith(".zip-backup.tmp")
+        ):
+            raise OSError("injected rollback failure")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(
+        package_plugin.os,
+        "replace",
+        interrupt_then_fail_restore,
+    )
+
+    with pytest.raises(RuntimeError, match="incomplete.*preserv|preserv.*backup"):
+        package_plugin._commit_output_pair(
+            new_output,
+            new_checksum,
+            output,
+            checksum,
+        )
+
+    backups = list(tmp_path.glob(".probe.zip.*.zip-backup.tmp"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == old_output
+
+
 def test_output_alias_is_rechecked_after_temp_archive_is_written(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -879,6 +1024,73 @@ def test_output_alias_is_rechecked_after_temp_archive_is_written(
     assert os.path.samefile(readme, output)
     assert readme.read_bytes() == original
     assert not list(dist.glob(".*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "late_change",
+    ["tracked-output", "tracked-hardlink"],
+)
+def test_tracked_source_set_is_refreshed_before_pair_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    late_change: str,
+) -> None:
+    plugin_root = tmp_path / "plugin"
+    dist = plugin_root / "dist"
+    dist.mkdir(parents=True)
+    output = dist / "probe.zip"
+    checksum = dist / "probe.zip.sha256"
+    initial_sources = {"README.md"}
+    changed_sources = set(initial_sources)
+    if late_change == "tracked-output":
+        changed_sources.add("dist/probe.zip")
+    else:
+        changed_sources.add("late-source.bin")
+    _stub_minimal_package_build(
+        monkeypatch,
+        plugin_root,
+        tracked_sources=initial_sources,
+    )
+
+    tracked_calls = 0
+
+    def changing_tracked_sources() -> set[str]:
+        nonlocal tracked_calls
+        tracked_calls += 1
+        return initial_sources if tracked_calls == 1 else changed_sources
+
+    monkeypatch.setattr(
+        package_plugin,
+        "_tracked_source_paths",
+        changing_tracked_sources,
+    )
+
+    if late_change == "tracked-hardlink":
+        real_write_archive = package_plugin._write_archive
+
+        def write_then_add_hardlink(
+            target: Path,
+            entries: list[tuple[str, bytes]],
+        ) -> None:
+            real_write_archive(target, entries)
+            source = plugin_root / "late-source.bin"
+            source.write_bytes(b"newly tracked source bytes\n")
+            os.link(source, output)
+
+        monkeypatch.setattr(package_plugin, "_write_archive", write_then_add_hardlink)
+
+    with pytest.raises(RuntimeError, match="tracked.*changed|changed.*tracked"):
+        package_plugin.build_package(output, channel="stable")
+
+    assert tracked_calls >= 2
+    assert not checksum.exists()
+    assert not list(dist.glob(".*.tmp"))
+    if late_change == "tracked-output":
+        assert not output.exists()
+    else:
+        source = plugin_root / "late-source.bin"
+        assert source.read_bytes() == b"newly tracked source bytes\n"
+        assert os.path.samefile(source, output)
 
 
 def test_dirty_path_query_uses_the_captured_commit_and_lexical_nul_paths(
