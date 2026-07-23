@@ -525,7 +525,7 @@ sylanne_alpha/
 完整的计算架构、共振场、认知三拍编排、三层自我进化、工作流图与性能数据都在介绍网站 **[sylanne.app](https://sylanne.app)**。此外：
 
 - [SylannEngine](https://github.com/Ayleovelle/SylannEngine) — 计算层 SDK。详细的计算理论、公理系统和 benchmark 在这个仓库。
-- [`theory/` 目录](theory/) — 三套理论的形式化推导。
+- [`theory/` 目录](https://github.com/Ayleovelle/astrbot_plugin_sylanne/tree/main/theory) — 三套理论的形式化推导。
 - 论文（PDF）：[中文版](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/download/v1.2.0/scar_void_arxiv_paper_zh_v3.pdf) · [English](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/download/v1.2.0/scar_void_arxiv_paper_v2.pdf) — 三套理论 + 人格闭环 + 11 组实验。
 - [Releases](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases) — 各版本完整更新日志。
 
@@ -553,7 +553,7 @@ sylanne_alpha/
 
 ## 贡献
 
-欢迎提交 [Issue](https://github.com/Ayleovelle/astrbot_plugin_sylanne/issues) 和 [Pull Request](https://github.com/Ayleovelle/astrbot_plugin_sylanne/pulls)。提 PR 前请阅读 [贡献指南](CONTRIBUTING.md)，参与互动请遵守[行为准则](CODE_OF_CONDUCT.md)。
+欢迎提交 [Issue](https://github.com/Ayleovelle/astrbot_plugin_sylanne/issues) 和 [Pull Request](https://github.com/Ayleovelle/astrbot_plugin_sylanne/pulls)。提 PR 前请阅读 [贡献指南](https://github.com/Ayleovelle/astrbot_plugin_sylanne/blob/main/CONTRIBUTING.md)，参与互动请遵守[行为准则](https://github.com/Ayleovelle/astrbot_plugin_sylanne/blob/main/CODE_OF_CONDUCT.md)。
 
 项目交流与反馈：QQ群 **176427647**。
 
