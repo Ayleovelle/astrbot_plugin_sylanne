@@ -137,7 +137,12 @@ class _Runner:
 
 @contextmanager
 def _active_internal_runner(umo: str) -> Iterator[None]:
-    from astrbot.core.pipeline.process_stage.follow_up import _ACTIVE_AGENT_RUNNERS
+    try:
+        from astrbot.core.pipeline.process_stage.follow_up import _ACTIVE_AGENT_RUNNERS
+    except ModuleNotFoundError as exc:
+        if exc.name != "astrbot":
+            raise
+        pytest.skip("requires AstrBot active-runner registry")
 
     sentinel = object()
     previous = _ACTIVE_AGENT_RUNNERS.get(umo, sentinel)
