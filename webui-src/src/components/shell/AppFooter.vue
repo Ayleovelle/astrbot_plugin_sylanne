@@ -4,18 +4,27 @@ import { useLiveStore } from '../../stores/live'
 
 const live = useLiveStore()
 
-const runtime = computed(() => (live.state?.runtime as string) || '—')
-const schema = computed(() =>
-  live.state?.schema_version !== undefined ? 'v' + live.state.schema_version : '',
-)
+const runtime = computed(() => {
+  const value = live.state?.runtime
+  if (typeof value === 'string') return value || '—'
+  if (value && typeof value === 'object') {
+    const info = value as Record<string, unknown>
+    return String(info.runtime_id || info.instance_id || info.plugin_name || '—')
+  }
+  return '—'
+})
+const schema = computed(() => {
+  const value = live.state?.schema_version
+  return value === undefined ? '' : String(value).replace(/^sylanne\.webui\./, '')
+})
 const sessionCount = computed(() => live.state?.sessions?.length ?? 0)
 </script>
 
 <template>
   <footer class="foot mono">
-    <span>runtime: {{ runtime }}</span>
-    <span v-if="schema">schema {{ schema }}</span>
-    <span>sessions: {{ sessionCount }}</span>
+    <span class="runtime">runtime: {{ runtime }}</span>
+    <span v-if="schema" class="meta">schema {{ schema }}</span>
+    <span class="meta">sessions: {{ sessionCount }}</span>
     <span v-if="live.error" class="err">· {{ live.error }}</span>
   </footer>
 </template>
@@ -30,8 +39,28 @@ const sessionCount = computed(() => live.state?.sessions?.length ?? 0)
   font-size: var(--font-xs);
   color: var(--text-muted);
   letter-spacing: 0.5px;
+  min-width: 0;
+  overflow: hidden;
+}
+.runtime {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.meta {
+  flex: none;
+  white-space: nowrap;
 }
 .err {
   color: var(--red);
+}
+
+@media (max-width: 620px) {
+  .foot {
+    gap: var(--space-4);
+    padding: 0 var(--space-3);
+  }
 }
 </style>

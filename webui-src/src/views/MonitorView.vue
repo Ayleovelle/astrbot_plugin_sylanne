@@ -74,14 +74,13 @@ const routeDist = computed<RouteDistribution>(() => {
   const s = live.state
   if (s?.route_distribution) return s.route_distribution
   if (s?.route_stats) {
-    return {
-      FAST: num(s.route_stats, ['fast'], 0),
-      NORMAL: num(s.route_stats, ['normal'], 0),
-      FULL: num(s.route_stats, ['full'], 0),
-      SKIP: num(s.route_stats, ['skip'], 0),
+    const distribution: RouteDistribution = {}
+    for (const [route, count] of Object.entries(s.route_stats)) {
+      distribution[route.toUpperCase()] = Number(count) || 0
     }
+    return distribution
   }
-  return { FAST: 0, NORMAL: 0, FULL: 0, SKIP: 0 }
+  return { RESONANCE: 0, SKIP: 0 }
 })
 
 const gateItems = computed(() => {

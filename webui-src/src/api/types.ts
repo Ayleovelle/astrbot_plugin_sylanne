@@ -24,9 +24,7 @@ export interface EmotionState {
 }
 
 export interface RouteDistribution {
-  FAST?: number
-  NORMAL?: number
-  FULL?: number
+  RESONANCE?: number
   SKIP?: number
   [k: string]: number | undefined
 }
@@ -58,7 +56,7 @@ export interface GateState {
   threshold?: number
   route?: string
   history_len?: number
-  history?: number[]
+  history?: unknown[]
   [k: string]: unknown
 }
 
@@ -99,8 +97,8 @@ export interface PersonalityState {
 }
 
 export interface StateResponse {
-  schema_version?: number
-  runtime?: string
+  schema_version?: string
+  runtime?: unknown
   current_session?: string
   session_id?: string
   emotion?: EmotionState

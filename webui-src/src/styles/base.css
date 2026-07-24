@@ -143,9 +143,11 @@ body::after {
   display: grid;
   grid-template-columns: 1fr 40px 1fr;
   height: 100%;
+  min-width: 0;
 }
 .pane-left,
 .pane-right {
+  min-width: 0;
   overflow-y: auto;
   scrollbar-width: none;
   padding-top: var(--space-8);
@@ -185,6 +187,13 @@ body::after {
     padding: var(--space-7) var(--space-8) var(--space-3);
     mask-image: none;
     -webkit-mask-image: none;
+  }
+}
+
+@media (max-width: 620px) {
+  .pane-left,
+  .pane-right {
+    padding: var(--space-7) var(--space-7) var(--space-3);
   }
 }
 

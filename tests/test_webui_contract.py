@@ -165,6 +165,37 @@ def test_standalone_aiohttp_and_stdlib_settings_use_the_same_payload_builder() -
     assert "await _settings_payload(current_plugin)" in async_source
     assert "asyncio.run(_settings_payload(current_plugin))" in stdlib_source
 
+
+def test_standalone_state_supports_resonance_spine_without_empty_fallback() -> None:
+    from sylanne_alpha._engine.sylanne_core.compute.kernel import AlphaKernel
+    from sylanne_alpha.webui_server import _build_state
+
+    kernel = AlphaKernel.boot("session-1")
+    kernel.computation._route_counts = {"resonance": 3, "skip": 1}
+    plugin = SimpleNamespace(
+        _config={},
+        _hosts={"session-1": SimpleNamespace(kernel=kernel)},
+        _last_user_texts={},
+        _last_bot_texts={},
+        _webui_runtime_id="test-runtime",
+    )
+
+    state = _build_state(plugin, session="session-1")
+
+    assert state["current_session"] == "session-1"
+    assert state["tick_count"] == kernel.computation._tick_count
+    assert state["layers"]["L5_HGT"]["source"] == "moe_hgt"
+    assert state["emotion"]["coherence"] == 1.0
+    assert state["schema_version"] == "sylanne.webui.state.v2"
+    assert state["route_stats"] == {"resonance": 3, "skip": 1}
+    assert state["route_distribution"] == {"RESONANCE": 3, "SKIP": 1}
+    assert all(isinstance(item, dict) for item in state["sessions"])
+    assert next(item for item in state["sessions"] if item["id"] == "session-1") == {
+        "id": "session-1",
+        "name": "session-1",
+        "tick_count": 0,
+    }
+
 if __name__ == "__main__":
     test_glossary_data()
     test_config_presets()

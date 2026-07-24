@@ -183,6 +183,56 @@ def _comp_boundary_dict(comp: object) -> dict:
     return {}
 
 
+def _comp_route_stats(comp: object, history: object = None) -> tuple[dict[str, int], dict[str, int]]:
+    """Return the active computation backend's route counters in API/UI forms."""
+    counts: dict[str, Any] = {}
+    diagnostics = getattr(comp, "diagnostics", None)
+    if callable(diagnostics):
+        try:
+            raw = diagnostics()
+            if isinstance(raw, dict) and isinstance(raw.get("route_counts"), dict):
+                counts = raw["route_counts"]
+        except Exception:
+            counts = {}
+
+    if not counts and isinstance(history, list):
+        for entry in history:
+            if not isinstance(entry, dict):
+                continue
+            route = str(entry.get("route") or "").strip().lower()
+            if route:
+                counts[route] = int(counts.get(route, 0)) + 1
+
+    route_stats: dict[str, int] = {}
+    for name, value in counts.items():
+        route = str(name).strip().lower()
+        if not route:
+            continue
+        try:
+            route_stats[route] = int(value)
+        except (TypeError, ValueError):
+            route_stats[route] = 0
+    if not route_stats:
+        route_stats = {"resonance": 0, "skip": 0}
+    route_distribution = {name.upper(): count for name, count in route_stats.items()}
+    return route_stats, route_distribution
+
+
+def _webui_session_items(plugin: object, session_keys: list[str]) -> list[dict[str, Any]]:
+    """Normalize session identifiers into the object contract consumed by the SPA."""
+    hosts = getattr(plugin, "_hosts", {}) or {}
+    items: list[dict[str, Any]] = []
+    for session_key in session_keys:
+        ticks = 0
+        host = hosts.get(session_key) if isinstance(hosts, dict) else None
+        if host is not None:
+            kernel = getattr(host, "kernel", None)
+            comp = getattr(kernel, "computation", None)
+            ticks = int(getattr(comp, "_tick_count", 0) or 0)
+        items.append({"id": session_key, "name": session_key, "tick_count": ticks})
+    return items
+
+
 class WebUIRoutes:
     """封装所有 WebUI HTTP 路由处理器。
 
@@ -290,17 +340,13 @@ class WebUIRoutes:
         gate_info = {
             "precision": round(gate_dict.get("precision", 0.0), 4),
             "mean_surprise": round(gate_dict.get("mean_surprise", 0.0), 4),
+            "threshold": round(gate_dict.get("threshold", 0.5), 4),
+            "route": str(getattr(comp, "_last_route", "") or "resonance").upper(),
             "history_len": gate_dict.get("history_len", 0),
             "history": history[-60:] if isinstance(history, list) else [],
         }
 
-        # Route stats
-        route_stats = {"fast": 0, "normal": 0, "full": 0, "skip": 0}
-        if isinstance(history, list):
-            for entry in history:
-                r = entry.get("route", "fast") if isinstance(entry, dict) else "fast"
-                if r in route_stats:
-                    route_stats[r] += 1
+        route_stats, route_distribution = _comp_route_stats(comp, history)
 
         # Void-Scar state as memory equivalent
         engine_diag = comp.engine.diagnostics()
@@ -413,19 +459,14 @@ class WebUIRoutes:
         }
 
         return {
-            "schema_version": "sylanne.webui.state.v1",
+            "schema_version": "sylanne.webui.state.v2",
             "runtime": self._p._webui_runtime_info(),
             "current_session": session_key,
             "session_id": session_key,
             "emotion": {k: round(v, 4) for k, v in emotion.items()},
             "gate": gate_info,
             "route_stats": route_stats,
-            "route_distribution": {
-                "FAST": route_stats.get("fast", 0),
-                "NORMAL": route_stats.get("normal", 0),
-                "FULL": route_stats.get("full", 0),
-                "SKIP": route_stats.get("skip", 0),
-            },
+            "route_distribution": route_distribution,
             "boundary": boundary_info,
             "expression": expr_info,
             "timing": timing,
@@ -436,7 +477,7 @@ class WebUIRoutes:
             "spine_layers": self._frontend_spine_layers(comp),
             "theme": {"base": "#F3A7C8", "source": "emotion", "mode": "soft"},
             "feedback": feedback,
-            "sessions": all_sessions,
+            "sessions": _webui_session_items(self._p, all_sessions),
             "life_simulation": self._p._life_simulator.to_dict(),
         }
 

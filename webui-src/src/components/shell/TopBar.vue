@@ -6,6 +6,7 @@ import { useTheme, useLang } from '../../composables/useTheme'
 import { useAuthStore } from '../../stores/auth'
 import { useSessionStore, sessionId, sessionLabel } from '../../stores/session'
 import { useLiveStore } from '../../stores/live'
+import { usesHostAuthentication } from '../../api/client'
 
 const router = useRouter()
 const route = useRoute()
@@ -22,6 +23,7 @@ const session = useSessionStore()
 const live = useLiveStore()
 
 const online = computed(() => !!live.state && !live.error)
+const canLogout = !usesHostAuthentication()
 
 function onSessionChange(e: Event): void {
   const id = (e.target as HTMLSelectElement).value
@@ -73,7 +75,7 @@ function logout(): void {
       <button class="chip mono" :title="t('chrome.lang')" @click="toggleLang">
         {{ lang === 'zh' ? '中' : 'EN' }}
       </button>
-      <button class="chip" :title="t('chrome.logout')" @click="logout">⏻</button>
+      <button v-if="canLogout" class="chip" :title="t('chrome.logout')" @click="logout">⏻</button>
     </div>
   </header>
 </template>
@@ -167,5 +169,40 @@ function logout(): void {
 }
 .chip:hover {
   border-color: var(--accent);
+}
+
+@media (max-width: 620px) {
+  .top {
+    gap: var(--space-2);
+    padding: 0 var(--space-3);
+  }
+  .left,
+  .controls {
+    min-width: 0;
+  }
+  .brand-sub,
+  .page-sep,
+  .page-name,
+  .status {
+    display: none;
+  }
+  .brand-name {
+    font-size: var(--font-sm);
+    letter-spacing: 2px;
+  }
+  .controls {
+    flex: 1;
+    justify-content: flex-end;
+    gap: var(--space-2);
+  }
+  .session-pill {
+    width: clamp(72px, 24vw, 100px);
+    min-width: 0;
+    padding: var(--space-2) var(--space-3);
+  }
+  .chip {
+    width: 26px;
+    flex: none;
+  }
 }
 </style>

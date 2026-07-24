@@ -33,7 +33,13 @@ from urllib.parse import parse_qs, urlparse
 
 from pathlib import Path
 
-from sylanne_alpha.webui_routes import build_model_routing_payload
+from sylanne_alpha.webui_routes import (
+    _comp_boundary_dict,
+    _comp_gate_dict,
+    _comp_route_stats,
+    _webui_session_items,
+    build_model_routing_payload,
+)
 
 
 def _get_plugin_version() -> str:
@@ -3218,12 +3224,13 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
     all_sessions = _known_sessions(plugin, requested=session)
     if not all_sessions:
         return {
-            "schema_version": "sylanne.webui.state.v1",
+            "schema_version": "sylanne.webui.state.v2",
             "runtime": _runtime_info(plugin),
             "current_session": "default",
             "emotion": {},
             "gate": {},
-            "route_stats": {"fast": 0, "normal": 0, "full": 0, "skip": 0},
+            "route_stats": {"resonance": 0, "skip": 0},
+            "route_distribution": {"RESONANCE": 0, "SKIP": 0},
             "boundary": {},
             "expression": {},
             "timing": {},
@@ -3262,28 +3269,16 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
         if host is None:
             raise KeyError(session_key)
         comp = host.kernel.computation
-        gate = (lambda g: g.to_dict() if g is not None and hasattr(g, "to_dict") else {})(
-            getattr(comp, "gate", None) or getattr(comp, "_gate", None)
-        )
+        gate = _comp_gate_dict(comp)
         # Route stats from computation spine counters
         comp_diag = comp.diagnostics() if hasattr(comp, "diagnostics") else {}
-        route_counts = (
-            comp_diag.get("route_counts", {}) if isinstance(comp_diag, dict) else {}
-        )
-        route_stats = {
-            "fast": int(route_counts.get("fast", 0)),
-            "normal": int(route_counts.get("normal", 0)),
-            "full": int(route_counts.get("full", 0)),
-            "skip": int(route_counts.get("skip", 0)),
-        }
+        route_stats, route_distribution = _comp_route_stats(comp)
         comp_result = getattr(host.kernel, "_last_computation_result", None) or {}
         layers = dict(comp_result.get("layers", {}))
         if not isinstance(layers, dict):
             layers = {}
         # Boundary: map internal field names to frontend-expected names
-        boundary_raw = (lambda b: b.to_dict() if b is not None and hasattr(b, "to_dict") else {})(
-            getattr(comp, "boundary", None) or getattr(comp, "_boundary", None)
-        )
+        boundary_raw = _comp_boundary_dict(comp)
         boundary = {
             "integrity": boundary_raw.get("boundary_integrity", 1.0),
             "entropy": boundary_raw.get("internal_entropy", 0.0),
@@ -3328,7 +3323,10 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
                 }
             )
         # Ensure L1_HDC layer has all fields from computation result + sample_bits
-        sample_bits = comp.last_hdc_sample if hasattr(comp, "last_hdc_sample") else []
+        sample_bits = list(
+            (comp.last_hdc_sample if hasattr(comp, "last_hdc_sample") else None)
+            or []
+        )
         comp_l1 = comp_result.get("layers", {}).get("L1_HDC", {})
         if comp_l1:
             layers["L1_HDC"] = {**layers.get("L1_HDC", {}), **comp_l1}
@@ -3340,7 +3338,9 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
             sum(sample_bits) / max(len(sample_bits), 1) if sample_bits else 0.0,
         )
         # L5 MoE-HGT rich diagnostics
-        hgt = comp.hgt
+        hgt = getattr(comp, "hgt", None) or getattr(comp, "_hgt", None)
+        if hgt is None:
+            raise AttributeError("computation spine exposes no HGT component")
         _hgt_attn = getattr(hgt, "_last_attention_weights", [])
         _hgt_experts = getattr(hgt, "_last_active_experts", [])
         _hgt_gates = getattr(hgt, "_last_gate_values", [])
@@ -3392,19 +3392,19 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
         except Exception:
             pass
         return {
-            "schema_version": "sylanne.webui.state.v1",
+            "schema_version": "sylanne.webui.state.v2",
             "tick_count": comp._tick_count,
             "runtime": _runtime_info(plugin),
             "current_session": session_key,
             "emotion": {
                 **_EMOTION_DEFAULTS,
                 **comp.engine.observe(),
-                **_assessment_overlay(comp._last_assessment),
+                **_assessment_overlay(getattr(comp, "_last_assessment", None)),
             },
             "gate": {
                 **gate,
                 "history": gate.get("surprise_history", [])[-60:],
-                "route": comp_result.get("route", "NORMAL"),
+                "route": comp_result.get("route", "RESONANCE"),
             },
             "route_stats": route_stats,
             "boundary": boundary,
@@ -3436,30 +3436,27 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
             },
             "theme": {"base": "#F3A7C8", "source": "emotion", "mode": "soft"},
             "feedback": feedback,
-            "sessions": all_sessions,
+            "sessions": _webui_session_items(plugin, all_sessions),
             "social_field": social_field_state,
             "life_simulation": getattr(plugin, "_life_simulator", None)
             and plugin._life_simulator.to_dict()
             or {},
             # --- 新前端兼容字段 ---
             "session_id": session_key,
-            "route_distribution": {
-                "FAST": route_stats["fast"],
-                "NORMAL": route_stats["normal"],
-                "FULL": route_stats["full"],
-                "SKIP": route_stats["skip"],
-            },
+            "route_distribution": route_distribution,
             "personality": _frontend_personality(personality),
             "spine_layers": _frontend_spine_layers(timing_raw, comp_diag),
         }
     except Exception:
+        logger.exception("Sylanne WebUI state build failed: session=%s", session_key)
         return {
-            "schema_version": "sylanne.webui.state.v1",
+            "schema_version": "sylanne.webui.state.v2",
             "runtime": _runtime_info(plugin),
             "current_session": session_key,
             "emotion": {},
             "gate": {},
-            "route_stats": {"fast": 0, "normal": 0, "full": 0, "skip": 0},
+            "route_stats": {"resonance": 0, "skip": 0},
+            "route_distribution": {"RESONANCE": 0, "SKIP": 0},
             "boundary": {},
             "expression": {},
             "timing": {},
@@ -3468,7 +3465,7 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
             "persona": {},
             "theme": {"base": "#F3A7C8", "source": "emotion", "mode": "soft"},
             "feedback": {"accepted": 0, "ignored": 0, "rejected": 0},
-            "sessions": all_sessions,
+            "sessions": _webui_session_items(plugin, all_sessions),
             "life_simulation": {},
         }
 

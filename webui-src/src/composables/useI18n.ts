@@ -78,7 +78,7 @@ const zh: Dict = {
   'cog.usermodel': '对Ta的后验',
   'cog.narrative': '叙事自我',
   'cog.distill': '自蒸馏',
-  'cog.disabled': 'v2core 未启用，或该会话尚未对话',
+  'cog.disabled': '该会话尚未产生认知循环数据',
   // config
   'config.identity': '身份',
   'config.webui': 'WebUI',
@@ -247,7 +247,7 @@ const en: Dict = {
   'cog.usermodel': 'MODEL OF YOU',
   'cog.narrative': 'NARRATIVE SELF',
   'cog.distill': 'SELF-DISTILLATION',
-  'cog.disabled': 'v2core disabled or session has no turns yet',
+  'cog.disabled': 'No cognitive-cycle data exists for this session yet',
   // config
   'config.identity': 'Identity',
   'config.webui': 'WebUI',

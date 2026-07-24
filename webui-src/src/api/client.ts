@@ -7,13 +7,20 @@
 //   and AstrBot-native (served under '/astrbot_plugin_sylanne/...').
 
 import { devMock } from './devMock'
+import { bridgeFetch, getAstrBotBridge } from './astrBotBridge'
 
 const TOKEN_KEY = 'sylanne_token'
 let csrfToken = ''
 
 export function apiBase(): string {
   const p = typeof location !== 'undefined' ? location.pathname : ''
-  return p.indexOf('/astrbot_plugin_sylanne') >= 0 ? '/astrbot_plugin_sylanne' : ''
+  const pluginPath = '/astrbot_plugin_sylanne'
+  const pluginIndex = p.indexOf(pluginPath)
+  return pluginIndex >= 0 ? p.slice(0, pluginIndex + pluginPath.length) : ''
+}
+
+export function usesHostAuthentication(): boolean {
+  return getAstrBotBridge() !== null || apiBase() !== ''
 }
 
 export function getToken(): string {
@@ -65,10 +72,23 @@ export interface ApiOptions {
 }
 
 export async function apiFetch<T = unknown>(path: string, opts: ApiOptions = {}): Promise<T> {
-  const method = opts.method || 'GET'
+  const bridge = getAstrBotBridge()
+  if (bridge) {
+    try {
+      return await bridgeFetch<T>(bridge, path, opts)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error || 'bridge failed')
+      throw new ApiError(0, message)
+    }
+  }
+
+  const method = (opts.method || 'GET').toUpperCase()
+  const standaloneAuth = !usesHostAuthentication()
   const headers: Record<string, string> = {}
   const token = getToken()
-  if (opts.auth !== false && token) headers['Authorization'] = 'Bearer ' + token
+  if (standaloneAuth && opts.auth !== false && token) {
+    headers['Authorization'] = 'Bearer ' + token
+  }
 
   let body: BodyInit | undefined
   if (opts.body !== undefined) {
@@ -79,8 +99,10 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiOptions = {})
   // hard-load straight into a page that immediately POSTs (e.g. #/config)
   // can race /api/state's csrf_token capture, so a 403 in that specific
   // case is worth one recovery retry (below), not just a hard failure.
-  const hadNoCsrfAtSend = method !== 'GET' && !csrfToken
-  if (method !== 'GET' && csrfToken) headers['X-CSRF-Token'] = csrfToken
+  const hadNoCsrfAtSend = standaloneAuth && method !== 'GET' && !csrfToken
+  if (standaloneAuth && method !== 'GET' && csrfToken) {
+    headers['X-CSRF-Token'] = csrfToken
+  }
 
   // DEV-only mock (dead-code-stripped from production: import.meta.env.DEV is a
   // build-time constant). Used ONLY as a fallback when a mockable path yields no
@@ -103,8 +125,10 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiOptions = {})
   }
 
   if (res.status === 401) {
-    clearToken()
-    if (onUnauthorized) onUnauthorized()
+    if (standaloneAuth) {
+      clearToken()
+      if (onUnauthorized) onUnauthorized()
+    }
     throw new ApiError(401, 'unauthorized')
   }
 

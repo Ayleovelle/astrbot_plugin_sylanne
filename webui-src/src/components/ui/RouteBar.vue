@@ -4,25 +4,27 @@ import type { RouteDistribution } from '../../api/types'
 
 const props = defineProps<{ dist: RouteDistribution }>()
 
-const ORDER = ['FAST', 'NORMAL', 'FULL', 'SKIP'] as const
+const ORDER = ['RESONANCE', 'SKIP'] as const
 const COLORS: Record<string, string> = {
-  FAST: 'var(--accent)',
-  NORMAL: 'var(--cyan)',
-  FULL: 'var(--amber)',
+  RESONANCE: 'var(--accent)',
   SKIP: 'rgba(255,255,255,0.2)',
 }
 
-const total = computed(() =>
-  ORDER.reduce((s, k) => s + (props.dist[k] || 0), 0),
-)
+const keys = computed(() => {
+  const extras = Object.keys(props.dist)
+    .map((key) => key.toUpperCase())
+    .filter((key) => !ORDER.includes(key as (typeof ORDER)[number]))
+  return [...ORDER, ...extras]
+})
+const total = computed(() => keys.value.reduce((sum, key) => sum + (props.dist[key] || 0), 0))
 const segs = computed(() =>
-  ORDER.map((k) => {
+  keys.value.map((k, index) => {
     const count = props.dist[k] || 0
     return {
       key: k,
       count,
       pct: total.value ? (count / total.value) * 100 : 0,
-      color: COLORS[k],
+      color: COLORS[k] || ['var(--cyan)', 'var(--amber)', 'var(--green)'][index % 3],
     }
   }),
 )

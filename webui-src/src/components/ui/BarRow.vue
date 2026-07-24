@@ -56,6 +56,7 @@ const shown = computed(() => {
 .bar-track {
   position: relative;
   flex: 1;
+  min-width: 0;
   height: 10px;
   background: var(--track);
   /* faint calibration ticks at 25/50/75% — reads as a gauge, not dead space */
@@ -76,5 +77,17 @@ const shown = computed(() => {
   width: 44px;
   flex: none;
   text-align: right;
+}
+
+@media (max-width: 620px) {
+  .bar-row {
+    gap: var(--space-3);
+  }
+  .bar-label {
+    width: 78px;
+  }
+  .bar-value {
+    width: 36px;
+  }
 }
 </style>

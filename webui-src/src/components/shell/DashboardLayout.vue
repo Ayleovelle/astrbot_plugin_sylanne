@@ -97,7 +97,7 @@ watch(
 .layout {
   display: grid;
   grid-template-columns: 1fr;
-  grid-template-rows: var(--header-h) 1fr var(--footer-h);
+  grid-template-rows: var(--header-h) minmax(0, 1fr) var(--footer-h);
   height: 100vh;
 }
 /* SpineNav itself is position:fixed (see SpineNav.vue) so it never actually
@@ -106,6 +106,11 @@ watch(
 .area-top {
   grid-column: 1;
   grid-row: 1;
+}
+.area-top,
+.area-content,
+.area-foot {
+  min-width: 0;
 }
 .area-content {
   grid-column: 1;
@@ -123,7 +128,7 @@ watch(
 
 @media (max-width: 899px) {
   .layout {
-    grid-template-columns: 56px 1fr;
+    grid-template-columns: 56px minmax(0, 1fr);
   }
   .area-top,
   .area-content,
@@ -135,6 +140,12 @@ watch(
   .area-content {
     overflow-y: auto;
     padding: var(--space-8);
+  }
+}
+
+@media (max-width: 620px) {
+  .area-content {
+    padding: var(--space-3);
   }
 }
 
