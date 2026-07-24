@@ -217,7 +217,11 @@ class TestH2PresenceAntiTask:
 
         class _Tools:
             def __init__(self) -> None:
-                self._n = ["astrbot_execute_python", "clone_tts"]
+                self._n = [
+                    "astrbot_execute_python",
+                    "anysearch_batch_search",
+                    "clone_tts",
+                ]
 
             def names(self):
                 return list(self._n)
@@ -233,6 +237,8 @@ class TestH2PresenceAntiTask:
         out = dm.apply(_Ev(), req, _Buf())
         assert out["should_contract"] is True
         assert "astrbot_execute_python" in out["gated_tools"]
+        assert "anysearch_batch_search" in out["gated_tools"]
+        assert "anysearch_batch_search" not in req.func_tool.names()
         assert "clone_tts" in req.func_tool.names()  # 合法工具保留
         assert "[本轮提示]" in req.system_prompt  # 契约注入
         assert "去人设" not in req.system_prompt  # B1：绝不要求去人设（保住苏思澜）
@@ -260,7 +266,11 @@ class TestH2PresenceAntiTask:
 
         class _Tools:
             def __init__(self):
-                self._n = ["astrbot_execute_python", "clone_tts"]
+                self._n = [
+                    "astrbot_execute_python",
+                    "anysearch_batch_search",
+                    "clone_tts",
+                ]
 
             def names(self):
                 return list(self._n)
@@ -276,6 +286,7 @@ class TestH2PresenceAntiTask:
         out = dm.apply(_Ev(), req, _Buf())
         assert out["should_gate"] is True
         assert "astrbot_execute_python" not in req.func_tool.names()
+        assert "anysearch_batch_search" not in req.func_tool.names()
         assert "clone_tts" in req.func_tool.names()
         assert out["contract_injected"] is False  # 闲聊不注契约
         assert "[本轮任务模式]" not in req.system_prompt
@@ -295,7 +306,7 @@ class TestH2PresenceAntiTask:
 
         class _Tools:
             def __init__(self):
-                self._n = ["astrbot_execute_python"]
+                self._n = ["astrbot_execute_python", "anysearch_batch_search"]
 
             def names(self):
                 return list(self._n)
@@ -311,6 +322,7 @@ class TestH2PresenceAntiTask:
         out = dm.apply(_Ev(), req, None)
         assert out["should_gate"] is False
         assert "astrbot_execute_python" in req.func_tool.names()
+        assert "anysearch_batch_search" in req.func_tool.names()
 
 
 class TestH1ImageTranscribeSkip:
