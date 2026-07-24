@@ -1,47 +1,31 @@
 """v1 逐轮认知全面退役测试（2026-06-12 拍板：推翻重构，单脑运行）。
 
 退役语义：
-- sylanne_enable_v2core 默认【开】（缺省键=开）——v2core 是唯一认知内核。
+- v2core 是无条件运行的唯一认知内核，不再暴露运行时关闭开关。
 - v1 逐轮认知已退役并删除：旧 9-agent SelfCore 的 PRE/POST（请求管线）与
   RESPONSE_POST（回复管线）调用点已从源码移除；AssessorAgent 逐轮 LLM 评估随之消失；
   assessment 唯一来源是 v2core 评价（不含 intent 键 → SDK intent=="撒娇"
   硬编码路径断粮）。
 - 保留范围：自主生命基础设施（AutonomyScheduler 作息演化/深睡巩固/反思/
   进化档案）不属逐轮认知，照常运行。
-- flag 显式置 false = 部署级紧急回退（绞杀式安全口，非缝补）。
 """
 
 from __future__ import annotations
 
 import inspect
+import json
+from pathlib import Path
 
-from sylanne_alpha.v2core.integration import v2core_enabled
-
-
-class _P:
-    def __init__(self, cfg: dict | None = None) -> None:
-        self._config = cfg if cfg is not None else {}
-
-
-# ---- 默认语义 ----
-
-def test_v2core_default_on() -> None:
-    """缺省键 = 开（v2core 是唯一认知内核，不再是灰度旁路）。"""
-    assert v2core_enabled(_P({})) is True
-    assert v2core_enabled(_P(None)) is True
-
-
-def test_explicit_false_is_emergency_rollback() -> None:
-    assert v2core_enabled(_P({"sylanne_enable_v2core": False})) is False
-
-
-def test_schema_default_flipped() -> None:
-    """部署 schema 的默认值同步为 true（真退役，不是只改代码缺省）。"""
-    import json
-    from pathlib import Path
-
+def test_v2core_switch_is_absent_from_schema() -> None:
     schema = json.loads(Path("_conf_schema.json").read_text(encoding="utf-8"))
-    assert schema["sylanne_enable_v2core"]["default"] is True
+    assert "sylanne_enable_v2core" not in schema
+
+
+def test_v2core_integration_has_no_runtime_disable_helper() -> None:
+    import sylanne_alpha.v2core.integration as integration
+
+    assert not hasattr(integration, "v2core_enabled")
+    assert "sylanne_enable_v2core" not in inspect.getsource(integration)
 
 
 # ---- 两条管线的 v1 逐轮认知调用点已彻底删除（源级证明，仿 repo 既有手法）----

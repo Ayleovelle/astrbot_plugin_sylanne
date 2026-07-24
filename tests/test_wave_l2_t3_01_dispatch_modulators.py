@@ -212,12 +212,17 @@ class TestApplyV2coreResponseResetsStaleModulators:
 
 
 class TestConsumeDispatchModulators:
-    def test_v2core_disabled_returns_none(self) -> None:
+    def test_legacy_disable_key_is_ignored(self) -> None:
         p = _ConsumePlugin(v2core=False)
         p._v2core_runtimes["s"] = {"turn_dispatch_modulators": {
             "cps_mult": 1.2, "max_part_chars_mult": 1.0, "extra_predelay_s": 0.0, "ts": time.time(),
         }}
-        assert ig.consume_dispatch_modulators(p, "s") is None
+        assert ig.consume_dispatch_modulators(p, "s") == {
+            "cps_mult": 1.2,
+            "max_part_chars_mult": 1.0,
+            "extra_predelay_s": 0.0,
+        }
+        assert p._v2core_runtimes["s"]["turn_dispatch_modulators"] is None
 
     def test_no_runtime_returns_none(self) -> None:
         p = _ConsumePlugin()

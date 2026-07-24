@@ -5,12 +5,6 @@
     "default": "Sylanne",
     "hint": "填写当前会话中使用的人格/角色名字。"
   },
-  "sylanne_enable_v2core": {
-    "description": "v2core 认知内核（唯一认知核；关闭=紧急回退 v1 旧认知）",
-    "type": "bool",
-    "default": true,
-    "hint": "默认开。v2core 双层 agent（PERCEPT@请求注入心象/评价 + DELIBERATE/EVOLVE@回复裁决学习）是唯一认知内核；启用即退役 v1 逐轮认知（旧 9-agent SelfCore PRE/POST/RESPONSE_POST 与逐轮 LLM 评估不再运行，省每轮评估开销）。存档无损复用同一引擎；任何异常单轮回落旧管线不阻断回复。置 false 仅作部署级紧急回退。"
-  },
   "sylanne_no_ghost_reply": {
     "description": "空回复兜底（按成因分治）",
     "type": "bool",

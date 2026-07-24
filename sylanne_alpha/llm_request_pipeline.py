@@ -1870,11 +1870,10 @@ class LLMRequestPipeline:
         # 叠加导致过度空召回。embedding 模式仍用较高阈值（余弦普遍 0.3-0.8）。
         _MEMORY_RELEVANCE_THRESHOLD_KEYWORD = 0.15
         _MEMORY_RELEVANCE_THRESHOLD_EMBEDDING = 0.45
-        v2core_on = bool((p.config or {}).get("sylanne_enable_v2core"))
-        _MEMORY_GAP_SKIP = 120 if v2core_on else 900
+        _MEMORY_GAP_SKIP = 120
         _MEMORY_GAP_LIGHT = 7200
         recall_allowed = message_text and gap_seconds >= _MEMORY_GAP_SKIP
-        if recall_allowed and (realtime_enabled or v2core_on):
+        if recall_allowed:
             host = p._host(session_key)
             memory_system = p._memory_system_for_session(session_key)
             current_warmth = host.kernel.computation.engine.observe().get("warmth", 0.0)
@@ -1916,12 +1915,11 @@ class LLMRequestPipeline:
                     or r.recall_reason == "temporal_proximity"
                 ]
             _percept_texts: set[str] = set()
-            if results and v2core_on:
-                # 同轮跨路径去重：v2core_on 时 PERCEPT（apply_v2core_request，Step 0，
-                # 已跑在先）与本方法都会各自召回一次，同一条记忆可能被两边命中，
-                # 若不去重会在同一个 prompt 里重复出现两次。只窥视 PERCEPT 本轮已
-                # 召回的原文集合做精确文本去重（不改 PERCEPT 侧，legacy 不用 v2core
-                # 时该集合恒空，行为不变）。
+            if results:
+                # 同轮跨路径去重：PERCEPT（apply_v2core_request，Step 0，已跑在先）
+                # 与本方法都会各自召回一次，同一条记忆可能被两边命中；若不去重会在
+                # 同一个 prompt 里重复出现两次。只窥视 PERCEPT 本轮已召回的原文集合
+                # 做精确文本去重。
                 try:
                     from sylanne_alpha.v2core.integration import (
                         peek_percept_recalled_texts,
@@ -1967,7 +1965,7 @@ class LLMRequestPipeline:
         # 已经算好的主 memory_fragment。default（cross_session_mode=off）时
         # cross_session_settings(p).enabled 为 False，本支路第一行判断后整体
         # 短路，不构造任何货架变量、不查 KV，保证与改前字节级一致。
-        # 与主召回复用同一 recall_allowed/realtime_enabled/v2core_on 节流条件
+        # 与主召回复用同一 recall_allowed 节流条件
         # （design 未强制独立节流，复用更省资源、且偏保守方向不会多召回）。
         # MINOR#2 修复（slice-1b）：叠加 `_history_anchored` 同主召回一个门
         # （leg-2a，见上方 :1690 `history_present=_history_anchored`）——历史
@@ -1977,7 +1975,7 @@ class LLMRequestPipeline:
         # 场合跨度比主召回更大，无锚时更不该注入，故与主召回同门 gate，不
         # 单独放宽。
         # -----------------------------------------------------------------
-        if recall_allowed and (realtime_enabled or v2core_on) and _history_anchored:
+        if recall_allowed and _history_anchored:
             try:
                 from sylanne_alpha.cross_session_config import cross_session_settings
 
@@ -2213,10 +2211,6 @@ class LLMRequestPipeline:
             state_fragment 字符串，无信号时为空。
         """
         p = self._p
-        v2core_on = bool((p.config or {}).get("sylanne_enable_v2core"))
-        if not realtime_enabled and not v2core_on:
-            return ""
-
         host = p._host(session_key)
         comp = host.kernel.computation
         emotion = comp.engine.observe()

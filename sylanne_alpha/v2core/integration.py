@@ -31,9 +31,8 @@
 死线守护（铁律④）：域状态总键 sylanne_v2core_domains:{safe} 与旧档格式兼容；
 host/body 漂移仍走插件现有文件持久化，不另起炉灶。
 
-开关：sylanne_enable_v2core（**默认开——v2core 是唯一认知内核**）。v2core 即唯一认知
-内核（旧 SelfCore PRE/POST/RESPONSE_POST 与 AssessorAgent 逐轮 LLM 评估已退役、删除，
-intent=="撒娇" 硬编码路径自然断粮）。flag 置 false = 部署级紧急回退到 v1。
+v2core 是无条件运行的唯一认知内核（旧 SelfCore PRE/POST/RESPONSE_POST 与
+AssessorAgent 逐轮 LLM 评估已退役、删除，intent=="撒娇" 硬编码路径自然断粮）。
 任何异常 → 单轮回落旧管线，不阻断回复。
 """
 
@@ -49,7 +48,6 @@ from typing import Any
 
 logger = logging.getLogger("astrbot_plugin_sylanne")
 
-_V2CORE_FLAG = "sylanne_enable_v2core"
 _DOMAIN_STATE_KEY_FMT = "sylanne_v2core_domains:{safe}"
 _DOMAIN_STATE_VERSION = 1
 _PENDING_CTX_TTL = 180.0      # request 阶段暂存 ctx 的有效期（秒）
@@ -66,15 +64,6 @@ _NIGHT_WAKE_CUE_PROB = 0.25   # T1-03③ 命中"首条夜间消息"时，附加"
 
 # 落盘任务的模块级强引用锚（防 fire-and-forget task 被 GC 提前回收）
 _PENDING_SAVES: set[Any] = set()
-
-
-def v2core_enabled(plugin: Any) -> bool:
-    """v2core 是否启用。默认【开】——v2core 是唯一认知内核（v1 已退役）。
-
-    flag 仅作部署级紧急回退口：显式置 false 才回到 v1 旧管线认知。
-    """
-    cfg = getattr(plugin, "_config", None) or getattr(plugin, "config", None) or {}
-    return bool(cfg.get(_V2CORE_FLAG, True))
 
 
 def _safe_session_key(session_key: str) -> str:
@@ -411,7 +400,7 @@ async def _percept_recall(
 def peek_percept_recalled_texts(plugin: Any, session_key: str) -> set[str]:
     """只读窥视本轮 PERCEPT 已召回的记忆原文集合（不新建/不触发 v2core 运行态）。
 
-    供 legacy [记忆参考] 格式化前做同轮跨路径去重：v2core_on 时 PERCEPT
+    供 legacy [记忆参考] 格式化前做同轮跨路径去重：PERCEPT
     （_percept_recall，本模块）与 legacy（llm_request_pipeline._prepare_memory_context）
     两条召回路径在同一轮都会跑，同一条记忆可能被两边都命中，重复注入进同一个 prompt。
 
@@ -683,7 +672,7 @@ def _user_text(plugin: Any, event: Any) -> str:
 
 async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
     """LLM 请求前的认知阶段。只读（不 tick 不写域），任何异常吞掉不阻断请求。"""
-    if not v2core_enabled(plugin) or request is None or _is_cron_event(event):
+    if request is None or _is_cron_event(event):
         return
     try:
         session_key = plugin._session_key(event)
@@ -699,7 +688,7 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
         )
         _apply_v2core_feature_flags(ctx, plugin)
         # leg-2a：历史缺失/病态轮压制 PERCEPT 侧零相关近期召回（幽灵）——与 legacy 侧同门，
-        # 覆盖 v2core_on（业主实盘配置）这条主注入路径。
+        # 覆盖无条件运行的 v2core 主注入路径。
         await _percept_recall(
             plugin, ctx, rt["domains"], text,
             history_present=_history_present(request),
@@ -873,10 +862,8 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
 def consume_pending_assessment(plugin: Any, session_key: str) -> dict[str, Any] | None:
     """legacy 请求管线在 host.on_request 前调用：取走本轮 v2core 评价（合并进 assessment）。
 
-    一次性语义（取走即清），同步零 IO。开关关/无暂存 → None（legacy 行为不变）。
+    一次性语义（取走即清），同步零 IO。无暂存 → None（legacy 行为不变）。
     """
-    if not v2core_enabled(plugin):
-        return None
     cache = getattr(plugin, "_v2core_runtimes", None)
     rt = cache.get(session_key) if isinstance(cache, dict) else None
     if not isinstance(rt, dict):
@@ -889,7 +876,7 @@ def consume_pending_assessment(plugin: Any, session_key: str) -> dict[str, Any] 
 def consume_pending_quality(plugin: Any, session_key: str) -> float | None:
     """legacy 请求管线在构造 request tick event 前调用：取走上一轮自评的对话质量分。
 
-    一次性语义（取走即清），同步零 IO。开关关/无暂存/陈旧 → None。注入进 event.values
+    一次性语义（取走即清），同步零 IO。无暂存/陈旧 → None。注入进 event.values
     ["dialogue_quality"] → kernel.tick 透传 process → _drift_embodiment 自动漂移
     （canonical 滞后反馈：第 N 轮评分第 N+1 轮 request 拍生效）。
 
@@ -898,8 +885,6 @@ def consume_pending_quality(plugin: Any, session_key: str) -> float | None:
     新话题），陈旧分丢弃返 None——否则陈旧高质量分注入不相关新话题，且 _drift_embodiment 的
     dt 巨大会放大这次错漂移。裸 float（旧格式/测试直塞）向后兼容，视为不过期。
     """
-    if not v2core_enabled(plugin):
-        return None
     cache = getattr(plugin, "_v2core_runtimes", None)
     rt = cache.get(session_key) if isinstance(cache, dict) else None
     if not isinstance(rt, dict):
@@ -969,12 +954,10 @@ def _compose_dispatch_modulators(ctx: Any) -> dict[str, float]:
 def consume_dispatch_modulators(plugin: Any, session_key: str) -> dict[str, float] | None:
     """legacy 派发管线（llm_response_pipeline，没有 ctx）取走本轮 T3-01 派发调制器。
 
-    一次性语义（取走即清，同 consume_pending_quality）。开关关/无暂存/陈旧
+    一次性语义（取走即清，同 consume_pending_quality）。无暂存/陈旧
     （> _DISPATCH_MOD_TTL，防跨轮串味——rt 是跨轮持久字典）→ None，调用方按中性
     默认（1.0/1.0/0.0）处理，零力学变化。
     """
-    if not v2core_enabled(plugin):
-        return None
     cache = getattr(plugin, "_v2core_runtimes", None)
     rt = cache.get(session_key) if isinstance(cache, dict) else None
     if not isinstance(rt, dict):
@@ -1027,10 +1010,8 @@ async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
 
     返回 True  = 本层已终结本轮（仅 SILENT；跳过 legacy 防 no-ghost 复活装死）。
     返回 False = 回落 legacy 管线（SPEAK/FALLBACK 故意回落——sanitize/分段/观测
-                 都在那边；以及开关关/异常的绞杀式回退）。
+                 都在那边；异常时仍回落既有管线）。
     """
-    if not v2core_enabled(plugin):
-        return False
     if response is None or _is_cron_event(event):
         return False
     try:
@@ -1244,11 +1225,9 @@ async def consult_idle_reach(plugin: Any, session_key: str) -> dict[str, Any]:
     """空闲轮咨询：reach 想不想赢？零写、零 tick、零 LLM——纯读决策。
 
     消费者：ProactiveScheduler.get_speech_decision（外部主动桥轮询它）。
-    返回 {"reach": bool, "g_reach": float, "action": str}；未启用/异常 → reach=False。
+    返回 {"reach": bool, "g_reach": float, "action": str}；异常 → reach=False。
     """
     out = {"reach": False, "g_reach": 0.0, "action": "hold"}
-    if not v2core_enabled(plugin):
-        return out
     try:
         rt = _runtime_for(plugin, session_key)
         await _ensure_loaded(plugin, session_key, rt)
@@ -1292,7 +1271,6 @@ async def consult_idle_reach(plugin: Any, session_key: str) -> dict[str, Any]:
 
 
 __all__ = [
-    "v2core_enabled",
     "apply_v2core_request",
     "apply_v2core_response",
     "consume_pending_assessment",

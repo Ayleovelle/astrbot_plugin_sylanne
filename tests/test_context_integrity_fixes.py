@@ -2,7 +2,7 @@
 
 - (c-i) _STOPWORDS 扩展多字虚词：jieba 整词命中的常见虚词/代词短语不应再
   漏网挤占召回索引槽位（旧实现只覆盖单字，"可以"/"这样"这类整词穿透）。
-- (c-ii) v2core PERCEPT 召回与 legacy [记忆参考] 同轮跨路径去重：v2core_on 时
+- (c-ii) v2core PERCEPT 召回与 legacy [记忆参考] 同轮跨路径去重：v2core
   两条路径都会各自召回一次，同一条记忆命中两边会在同一个 prompt 里重复注入。
 """
 
@@ -84,8 +84,8 @@ def test_peek_percept_recalled_texts_reads_pending_ctx_scratch():
 
 
 def test_prepare_memory_context_dedups_against_percept_recall():
-    """端到端：v2core_on 时，legacy _prepare_memory_context 应跳过已被本轮 PERCEPT
-    召回过的原文，不重复注入同一条记忆；不启用 v2core 时行为不变（旁路恒空集）。
+    """端到端：legacy _prepare_memory_context 应跳过已被本轮 PERCEPT
+    召回过的原文，不重复注入同一条记忆；已退役的 false 配置值不会关闭去重。
     """
     from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline
     from sylanne_alpha.memory_system import MemorySystem
@@ -145,7 +145,7 @@ def test_prepare_memory_context_dedups_against_percept_recall():
     )
     assert shared_text not in memory_fragment
 
-    # 关掉 v2core：旁路恒空集，legacy 正常注入（行为不变）。
+    # 已退役的 false 配置值必须被忽略，同轮去重仍然生效。
     pipe._p.config = {"sylanne_enable_v2core": False}
     pipe._p._v2core_runtimes = {"s1": {"pending": {"ctx": ctx}}}
     _, _, memory_fragment2 = asyncio.run(
@@ -153,4 +153,4 @@ def test_prepare_memory_context_dedups_against_percept_recall():
             "s1", "日本旅行", gap_seconds=99999.0, realtime_enabled=True,
         )
     )
-    assert shared_text in memory_fragment2
+    assert shared_text not in memory_fragment2

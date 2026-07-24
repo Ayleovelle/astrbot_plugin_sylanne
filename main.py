@@ -724,10 +724,8 @@ class _V3ShadowFacade:
 
     async def _migrate_session(self, plugin: Any, session_key: str, session_ref: Any) -> bool:
         try:
-            from sylanne_alpha.v2core.integration import v2core_enabled
             from sylanne_alpha.v2core.shadow_snapshot import (
                 SeedSnapshotUnavailable,
-                V2SeedSnapshotV1,
                 freeze_seed_snapshot_fallback,
             )
             from sylanne_alpha.v3bridge.effect_committer import CommitStatus
@@ -752,9 +750,7 @@ class _V3ShadowFacade:
                 try:
                     seed = await freeze_seed_snapshot_fallback(plugin, session_key)
                 except SeedSnapshotUnavailable:
-                    if v2core_enabled(plugin):
-                        return False
-                    seed = V2SeedSnapshotV1()
+                    return False
                 outcome = await asyncio.to_thread(
                     runtime.migrate,
                     session_ref,
@@ -4014,14 +4010,12 @@ class EmotionalStatePlugin(Star):
         # emotion_spirit 适配桥：仅在配置开启且探测到 emotion_spirit 时激活（关它的 persona
         # 注入，让 Sylanne 当 system_prompt 唯一主）。未装 / 未开 → 完全 no-op，零影响。
         try:
-            from sylanne_alpha.v2core.integration import v2core_enabled as _v2core_enabled
             es_bridge = getattr(self, "_emotion_spirit_bridge", None)
             es_on = bool(
                 (self.config or {}).get("sylanne_alpha_emotion_spirit_bridge_enabled", False)
             )
-            # 额外门控 v2core：消费侧只在 v2core 请求阶段跑；v2core 关时若仍激活，会把 emotion_spirit
-            # 静音却无替代注入（红队 zero-behavior MINOR 不对称耦合）。故 v2core 关则不激活本桥。
-            if es_bridge is not None and es_on and _v2core_enabled(self) and es_bridge.available():
+            # v2core 请求阶段无条件运行；本桥只保留自身配置、存在性和可用性门控。
+            if es_bridge is not None and es_on and es_bridge.available():
                 res = es_bridge.activate()
                 if res.get("active"):
                     logger.info(

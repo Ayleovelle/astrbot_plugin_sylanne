@@ -261,21 +261,22 @@ async def test_assistant_role_default_unaffected_by_role_check() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ⑤：两引擎覆盖——v2core 关时 legacy 空 completion 静默走收口，仍恰好补写一次
+# ⑤：v2core 回落既有管线时，空 completion 静默走收口，仍恰好补写一次
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_5_v2core_off_legacy_silent_still_backfills(monkeypatch: pytest.MonkeyPatch) -> None:
-    """v2core 关（v2core_enabled=False，legacy empty_completion 静默）走收口
-    -> 仍恰好一条 user（证明补写覆盖两引擎，不依赖 v2core 是否开启）。"""
+async def test_5_v2core_fallthrough_legacy_silent_still_backfills(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v2core 返回 handled=False 后，legacy empty_completion 静默仍补写一条 user。"""
     import sylanne_alpha.v2core.integration as integration_mod
 
-    async def _v2core_disabled(*_a, **_k):
-        # 模拟 v2core 关闭：不接管，直接 handled=False，落 legacy。
+    async def _v2core_falls_through(*_a, **_k):
+        # SPEAK/FALLBACK/异常都可能 handled=False，随后进入既有管线。
         return False
 
-    monkeypatch.setattr(integration_mod, "apply_v2core_response", _v2core_disabled)
+    monkeypatch.setattr(integration_mod, "apply_v2core_response", _v2core_falls_through)
 
     p = _AbortablePlugin(text="在干嘛呢", aborted=False, legacy_raises=False)
     event = _Event(is_stopped=False, req=_ReqStub(has_conversation=True))
@@ -284,7 +285,7 @@ async def test_5_v2core_off_legacy_silent_still_backfills(monkeypatch: pytest.Mo
     await p._on_llm_response_inner(event, resp)
 
     assert p.user_sync_calls == [("sk1", "user", "在干嘛呢")], (
-        f"v2core 关时 legacy SILENT 也应经收口恰好补写一次，实际：{p.user_sync_calls!r}"
+        f"v2core 回落后 legacy SILENT 也应经收口恰好补写一次，实际：{p.user_sync_calls!r}"
     )
 
 
@@ -391,10 +392,10 @@ async def test_7_legacy_raises_finally_still_backfills(monkeypatch: pytest.Monke
     """⑦ legacy 分支抛异常（H1）-> finally 仍补写恰好一次（异常上抛不吞 user）。"""
     import sylanne_alpha.v2core.integration as integration_mod
 
-    async def _v2core_disabled(*_a, **_k):
+    async def _v2core_falls_through(*_a, **_k):
         return False
 
-    monkeypatch.setattr(integration_mod, "apply_v2core_response", _v2core_disabled)
+    monkeypatch.setattr(integration_mod, "apply_v2core_response", _v2core_falls_through)
 
     p = _AbortablePlugin(text="在干嘛呢", aborted=False, legacy_raises=True)
     event = _Event(is_stopped=False, req=_ReqStub(has_conversation=True))

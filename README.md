@@ -414,7 +414,6 @@ flowchart TD
 
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
-| `sylanne_enable_v2core` | `true` | 启用 v2core 认知内核；关闭时紧急回退到 v1。 |
 | `sylanne_webui_enabled` | `false` | 启用 WebUI 管理与诊断入口。 |
 | `sylanne_alpha_aux_provider_id` | 空字符串 | 共享辅助文本模型 Provider；未配置时不启用独立覆盖。 |
 | `sylanne_alpha_embedding_memory_enabled` | `false` | 启用 Embedding 记忆辅助召回。 |
