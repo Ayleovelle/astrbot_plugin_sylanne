@@ -148,9 +148,7 @@ class RitualRegistry:
 # T2-06④：早安/晚安兜底关键词识别
 #
 # 设计原打算读 sylanne_core 后台 assessor（_engine/sylanne_core/assessor.py）的
-# greeting/farewell 分类 flag，但审计确认：插件的 EngineFacade
-# （engine_adapter.py::EngineFacade.__init__）构造 SDK 引擎时 assessor_enabled
-# 默认为 False，且全仓没有任何调用点把它覆盖为 True；插件运行时实际驱动
+# greeting/farewell 分类 flag，但当前运行时没有启用这条 SDK assessor 分类路径；实际驱动
 # valence/arousal 的是完全独立的 sylanne_alpha/assessor_async.py（自有 v/a/i/w
 # 极简 prompt，不含 flags/greeting/farewell）。也就是说 sylanne_core.assessor 的
 # flags 分类在插件当前运行时路径下不可达——因此这里按卡片指示退化为关键词兜底

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import inspect
 import json
 from pathlib import Path
@@ -46,6 +47,25 @@ def test_main_routes_unsuppressed_reply_to_delivery_once() -> None:
     assert source.count(
         "await self._llm_response_pipeline._on_llm_response_inner(event, response)"
     ) == 1
+
+
+def test_dead_v1_migration_modules_are_absent() -> None:
+    assert importlib.util.find_spec("sylanne_alpha.v2core.migration") is None
+    assert importlib.util.find_spec("sylanne_alpha.v2core.session_store") is None
+
+
+def test_v2core_package_does_not_export_deleted_scaffolding() -> None:
+    import sylanne_alpha.v2core as v2core
+
+    assert "migration" not in v2core.__all__
+    assert "session_store" not in v2core.__all__
+
+
+def test_engine_adapter_has_no_unused_facade() -> None:
+    import sylanne_alpha.engine_adapter as adapter
+
+    assert not hasattr(adapter, "EngineFacade")
+    assert adapter.derive_should_send({"action": "reach_out"}, {"allowed": True})
 
 
 # ---- 两条管线的 v1 逐轮认知调用点已彻底删除（源级证明，仿 repo 既有手法）----

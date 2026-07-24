@@ -312,6 +312,8 @@ def test_old_code_reads_v3_with_version_ignored_degrades_gracefully() -> None:
 def test_migration_spine_manifest_matches_state_persistence_key_generators() -> None:
     assert ROLLBACK_FLOOR_BUILD
     assert FIELD_BACKFILL_DOCTRINE == "lazy_per_field_backfill_never_one_shot_migration"
+    assert "v2core_migration_target" not in MEMORY_KV_KEYS_MANIFEST
+    assert "v2core_migration_marker" not in MEMORY_KV_KEYS_MANIFEST
 
     class _FakePlugin:
         pass

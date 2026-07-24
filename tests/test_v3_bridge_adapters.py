@@ -44,7 +44,6 @@ _FORBIDDEN_IMPORT_PREFIXES = (
     "httpx",
     "urllib",
     "sylanne_alpha._engine",
-    "sylanne_alpha.v2core.session_store",
     "sylanne_alpha.llm_request_pipeline",
     "sylanne_alpha.llm_response_pipeline",
 )

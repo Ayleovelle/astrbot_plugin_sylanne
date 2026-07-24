@@ -1,4 +1,4 @@
-"""MEM-01：记忆持久化「金档往返基座」的迁移脊柱文档 + 权威清单（可导入、可断言）。
+"""MEM-01：记忆持久化「金档往返基座」的当前契约 + 权威清单（可导入、可断言）。
 
 这不是一份装饰性说明文档——`MEMORY_KV_KEYS_MANIFEST` / `ROLLBACK_FLOOR_BUILD` /
 `FIELD_BACKFILL_DOCTRINE` 都是真实常量，测试（tests/test_memory_golden_roundtrip.py）
@@ -70,33 +70,7 @@ privacy_level/life_event_id/actr_acc 全部是这么加进来的，MEM-01 只是
      （MEM-01 修复的正是这一类问题，别在新字段上重蹈覆辙）。
 
 ═══════════════════════════════════════════════════════════════════════════
-3. 为什么不用 v2core/migration.py 的 StateMigrator 机制
-═══════════════════════════════════════════════════════════════════════════
-
-`sylanne_alpha/v2core/migration.py` 已经提供了一套完整的迁移基础设施：
-`SessionRegistryStore`（持久 session 注册表）+ `StateMigrator`（幂等、按
-session 隔离、支持 dry_run、写迁移完成 marker）。这套机制正确、好用，但它解决
-的是**另一个粒度的问题**——把整段 KV 数据从旧架构（散落的 `sylanne_memory_state_*`
-等键）**搬运**到新架构的 `sylanne_v2_store_{safe}` 单键存储，是"存储位置/组织
-方式"的迁移，天然需要 marker（"这个 session 搬过了吗"）和 dry_run（"搬之前先
-看看会搬出什么"）。
-
-MEM-01 面对的是另一件事：**同一个 KV 键内部，MemorySystem 自身序列化形状的版本
-演进**（v2 -> v3，以及未来的 v3 -> v4...）。这里没有"搬运"这个动作——数据始终
-待在同一个 `sylanne_memory_state:{safe}` 键里，只是这个键里的 dict 形状在增加
-可选字段。给这种场景套用 StateMigrator 的 marker/registry 机制是错配的重型
-工具：不需要"哪些 session 迁移过"的注册表（每次 from_dict 调用本身就是幂等的
-探测+回填），也不需要 dry_run（.get() 回填不会产生副作用，没有"预演"的必要）。
-
-因此 MEM-01 选择的是"惰性逐字段回填"（见上一节），而不是复用/扩展
-StateMigrator。两者并不冲突——如果未来记忆系统真的需要**搬运存储位置**（比如
-把 `sylanne_memory_state:{safe}` 整体挪到 v2core 的 SessionStore 里），那才是
-`StateMigrator` 该出场的时候，届时 `OLD_MEMORY_KEY_FMT` 常量已经预留了
-`sylanne_memory_state:{safe}` 这个键名（`v2core/migration.py:30`），可以直接
-复用其 registry/marker/dry-run 骨架，不需要重新发明。
-
-═══════════════════════════════════════════════════════════════════════════
-4. 迁移键清单（记忆子系统拥有的全部 KV 键）
+3. 当前记忆键清单
 ═══════════════════════════════════════════════════════════════════════════
 
 见下方 `MEMORY_KV_KEYS_MANIFEST`——枚举记忆子系统在 AstrBot KV 存储里拥有的
@@ -113,7 +87,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 ROLLBACK_FLOOR_BUILD: Final[str] = (
-    "Phase-0（MEM-01 金档往返基座 + MEM-02 恢复接线/fail-closed 守卫 + 迁移主脊）"
+    "Phase-0（MEM-01 金档往返基座 + MEM-02 恢复接线/fail-closed 守卫）"
 )
 ROLLBACK_FLOOR_NOTE: Final[str] = (
     "回滚不得早于本次 Phase-0 构建——这是【数据安全】硬地板，不是软降级。"
@@ -130,7 +104,7 @@ ROLLBACK_FLOOR_NOTE: Final[str] = (
 FIELD_BACKFILL_DOCTRINE: Final[str] = "lazy_per_field_backfill_never_one_shot_migration"
 
 # ---------------------------------------------------------------------------
-# §4 迁移键清单：记忆子系统拥有的全部 KV 键模板
+# §3 当前键清单：记忆子系统拥有的全部 KV 键模板
 #
 # {safe} = StatePersistence._safe_session_key(session_key) 的输出
 #          （session_key.replace("/", "_").replace("\\", "_")）。
@@ -148,10 +122,6 @@ MEMORY_KV_KEYS_MANIFEST: Final[dict[str, str]] = {
     # 两种既有变体并存，历史遗留，未统一）。若未来复活，payload 形状与 primary
     # 键完全一致（见 tests/fixtures/memory_golden/synthetic_dormant_shard_memory_blob.json）。
     "dormant_shard": "sylanne_shard_{safe:.50}_memory",
-    # v2core 迁移器（sylanne_alpha/v2core/migration.py）为"记忆搬运到新架构"预留
-    # 的键名——与本清单里其余"记忆自身格式版本演进"用途不同，见 §3。
-    "v2core_migration_target": "sylanne_v2_store_{safe}",
-    "v2core_migration_marker": "sylanne_v2_migrated_{safe}",
     # MEM-03 PR-4 新增：单键全局跨重启 pending-delete 索引（design §4/§9 红队
     # must-fix）——**不属于任何单一 session**，模板不含 {safe} 占位符（对不含该
     # 占位符的字符串调用 `.format(safe=...)` 是 no-op，调用方无需特判）。value
