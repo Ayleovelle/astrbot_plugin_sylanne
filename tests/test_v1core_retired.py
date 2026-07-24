@@ -28,6 +28,26 @@ def test_v2core_integration_has_no_runtime_disable_helper() -> None:
     assert "sylanne_enable_v2core" not in inspect.getsource(integration)
 
 
+def test_v2_speak_continues_to_delivery_without_v1_fallback_language() -> None:
+    import sylanne_alpha.v2core.integration as integration
+
+    source = inspect.getsource(integration)
+    assert "回退到 v1" not in source
+    assert "legacy 的嘴" not in source
+    assert "delivery continuation" in source
+
+
+def test_main_routes_unsuppressed_reply_to_delivery_once() -> None:
+    from main import EmotionalStatePlugin
+
+    source = inspect.getsource(EmotionalStatePlugin._on_llm_response_inner)
+    assert "suppress_delivery = await apply_v2core_response" in source
+    assert "if not suppress_delivery:" in source
+    assert source.count(
+        "await self._llm_response_pipeline._on_llm_response_inner(event, response)"
+    ) == 1
+
+
 # ---- 两条管线的 v1 逐轮认知调用点已彻底删除（源级证明，仿 repo 既有手法）----
 
 def test_request_pipeline_has_no_v1_run_cycle() -> None:

@@ -1489,7 +1489,7 @@ class LLMResponsePipeline:
     def _v3_settle_empty(self, session_key: str, *, silent: bool) -> None:
         """空草稿分治的 v3 终端证据（默认关时是空操作）。
 
-        - silent=True：legacy 判定这轮不说话 → SILENT 路由 → HOLD。
+        - silent=True：投递管线判定这轮不说话 → SILENT 路由 → HOLD。
         - silent=False：兜底一句 → FALLBACK 路由 → 恒 UNKNOWN（兜底文案不是她的决定）。
           它先于下方分段发送结算，故这轮不会再被结算成 SPEAK——这正是"FALLBACK 在有效
           候选之后仍是 UNKNOWN"的语义。

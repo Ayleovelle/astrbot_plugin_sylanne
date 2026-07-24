@@ -2785,7 +2785,7 @@ class EmotionalStatePlugin(Star):
 
     async def _on_llm_response_inner(self, event: Any, response: Any) -> None:
         # 2.4.1 err 轮兜底（三态标记，第二态）：本钩子跑过即置 True。必须在【入口】置位，
-        # 这样即便下面 v2core/legacy 抛异常，finally 里的补写也已经执行过，
+        # 这样即便下面 v2 裁决/投递续接抛异常，finally 里的补写也已经执行过，
         # after_message_sent 侧就会早退，不会对同一轮重复补写 user。
         set_extra = getattr(event, "set_extra", None)
         if callable(set_extra):
@@ -2793,23 +2793,23 @@ class EmotionalStatePlugin(Star):
                 set_extra("_syl_resp_handled", True)
             except Exception:  # 标记失败绝不阻断回复
                 pass
-        # v2core 认知阶段二（默认开）：裁决草稿 + 学习。handled=True 仅 SILENT（终结本轮）；
-        # SPEAK/FALLBACK/异常 -> handled=False 落 legacy（sanitize/分段/观测是 legacy 的嘴）。
+        # v2core 认知阶段二：裁决草稿 + 学习。suppress_delivery=True 仅 SILENT；
+        # SPEAK/FALLBACK/异常均续接唯一投递管线，完成 sanitize、分段与观测。
         try:
-            handled = False
+            suppress_delivery = False
             try:
                 from sylanne_alpha.v2core.integration import apply_v2core_response
-                handled = await apply_v2core_response(self, event, response)
+                suppress_delivery = await apply_v2core_response(self, event, response)
             except Exception as exc:  # 桥接自身异常绝不阻断回复
                 logger.error(
-                    f"Sylanne v2core bridge error, fallback to legacy: {exc}",
+                    f"Sylanne v2core decision error; continuing delivery pipeline: {exc}",
                     exc_info=True,
                 )
-                handled = False
-            if not handled:
+                suppress_delivery = False
+            if not suppress_delivery:
                 await self._llm_response_pipeline._on_llm_response_inner(event, response)
         finally:
-            # 2.4.1 leg-3 双写根治：无论上面 v2core/legacy 走哪条、是否抛异常，都在此
+            # 2.4.1 leg-3 双写根治：无论上面抑制投递、续接投递或抛异常，都在此
             # 判定"框架本轮是否落库"，仅框架不落库时补写 user（放 finally 保证异常路径
             # 也不吞补写——这是 SILENT 不丢历史的红线）。
             try:
