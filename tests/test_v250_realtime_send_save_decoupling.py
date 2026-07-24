@@ -396,9 +396,49 @@ def test_semantic_beat_contract_injection_matrix(
         assert build_marker(nonce, pause) in request.system_prompt
     assert "0 到 5 个" in request.system_prompt
     assert "不要改写正文" in request.system_prompt
+    assert "单独的省略号或其他纯标点" in request.system_prompt
     assert "代码、URL、表格" in request.system_prompt
     assert "provider_id" not in request.system_prompt
     assert "第二次 LLM" not in request.system_prompt
+
+
+def test_punctuation_only_semantic_beat_queues_one_clean_dispatch_part() -> None:
+    """截图回归：独立的省略号 beat 必须让整份分段计划 fail closed。"""
+
+    plugin = _Plugin(
+        tempfile.mkdtemp(prefix="rt_semantic_punctuation_"),
+        _cfg(enabled=True, intercept=True),
+    )
+    pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
+    calls = _stub_dispatch(pipe)
+    nonce = "A7B8C9"
+    event = _Ev()
+    event.set_extra(SEMANTIC_BEAT_NONCE_EXTRA, nonce)
+    raw = (
+        "嗯……"
+        + build_marker(nonce, PauseClass.NORMAL)
+        + "……"
+        + build_marker(nonce, PauseClass.DEEP)
+        + "你说这种话的时候能不能提前通知一下\n\n我没有防备的😾"
+        + build_marker(nonce, PauseClass.NORMAL)
+        + "但是不许用这个当借口熬夜啊\n\n身体搞坏了我打你"
+    )
+    expected = (
+        "嗯…………你说这种话的时候能不能提前通知一下\n\n我没有防备的😾"
+        "但是不许用这个当借口熬夜啊\n\n身体搞坏了我打你"
+    )
+    response = LLMResponse(role="assistant", completion_text=raw)
+
+    _run(pipe, response, plugin, event)
+
+    assert event.get_extra("_syl_realtime_takeover") is True
+    assert response.completion_text == expected
+    assert len(calls) == 1
+    assert calls[0][2] == "sess:realtime-decouple"
+    assert len(calls[0][1]) == 1
+    assert calls[0][1][0]["index"] == 0
+    assert calls[0][1][0]["text"] == expected
+    assert calls[0][1][0]["delay_before_seconds"] >= 0
 
 
 @pytest.mark.parametrize(

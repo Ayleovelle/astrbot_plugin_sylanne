@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import secrets
+import unicodedata
 from dataclasses import dataclass
 from enum import Enum
 
@@ -78,6 +79,7 @@ def semantic_beat_system_contract(nonce: str) -> str:
         f"可在自然语义边界插入 0 到 5 个隐藏标记：{markers}。"
         "标记只控制发送节拍；先正常写好回复，不要改写正文，不要解释或引用标记，"
         "宁可少分几个完整节拍，也不要切成许多短气泡；"
+        "不要把单独的省略号或其他纯标点切成一个节拍；"
         "deep 只用于揭示、转折、犹豫或情绪落点；"
         "不要把标记放进代码、URL、表格或其他结构化内容。"
     )
@@ -225,6 +227,16 @@ def _rejected(clean_text: str, reason: str) -> SemanticBeatPlan:
     )
 
 
+def _has_substantive_content(text: str) -> bool:
+    """Return whether a beat contains more than whitespace/control punctuation."""
+
+    return any(
+        not char.isspace()
+        and unicodedata.category(char)[0] not in {"C", "P", "Z"}
+        for char in text
+    )
+
+
 def parse_semantic_completion(raw: str, *, nonce: str) -> SemanticBeatPlan:
     """Validate exact nonce-scoped markers without inferring boundaries.
 
@@ -288,6 +300,8 @@ def parse_semantic_completion(raw: str, *, nonce: str) -> SemanticBeatPlan:
 
     if any(not part.text.strip() for part in parts):
         return _rejected(clean_text, "EMPTY_PART")
+    if any(not _has_substantive_content(part.text) for part in parts):
+        return _rejected(clean_text, "DEGENERATE_PART")
 
     return SemanticBeatPlan(
         clean_text=clean_text,

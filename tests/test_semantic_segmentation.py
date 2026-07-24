@@ -143,6 +143,28 @@ def test_five_markers_create_the_maximum_six_nonempty_parts() -> None:
     assert "".join(part.text for part in plan.parts) == plan.clean_text
 
 
+def test_punctuation_only_model_beat_is_rejected_as_one_clean_reply() -> None:
+    raw = (
+        "嗯……"
+        + build_marker(NONCE, PauseClass.NORMAL)
+        + "……"
+        + build_marker(NONCE, PauseClass.DEEP)
+        + "你说这种话的时候能不能提前通知一下\n\n我没有防备的😾"
+        + build_marker(NONCE, PauseClass.NORMAL)
+        + "但是不许用这个当借口熬夜啊\n\n身体搞坏了我打你"
+    )
+
+    plan = parse_semantic_completion(raw, nonce=NONCE)
+
+    assert plan.accepted is False
+    assert plan.parts == ()
+    assert plan.rejection_reason == "DEGENERATE_PART"
+    assert plan.clean_text == (
+        "嗯…………你说这种话的时候能不能提前通知一下\n\n我没有防备的😾"
+        "但是不许用这个当借口熬夜啊\n\n身体搞坏了我打你"
+    )
+
+
 def test_six_markers_are_rejected_and_all_owned_markers_are_scrubbed() -> None:
     marker = build_marker(NONCE, PauseClass.SOFT)
     raw = marker.join("甲乙丙丁戊己庚")
