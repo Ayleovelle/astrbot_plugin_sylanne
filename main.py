@@ -2260,9 +2260,44 @@ class EmotionalStatePlugin(Star):
         except Exception as e:
             logger.warning(f"Sylanne on_agent_done scrub failed: {e}", exc_info=True)
 
+        try:
+            stopped = bool(event.is_stopped()) if hasattr(event, "is_stopped") else False
+            role = getattr(response, "role", "assistant") or "assistant"
+            completion = getattr(response, "completion_text", "") or ""
+            get_extra = getattr(event, "get_extra", None)
+            spoken_text = (
+                get_extra(self._SPEECH_TEXT_EXTRA, "") if callable(get_extra) else ""
+            )
+            has_visible_completion = isinstance(completion, str) and any(
+                char.isprintable() and not char.isspace() for char in completion
+            )
+            has_visible_speech = isinstance(spoken_text, str) and any(
+                char.isprintable() and not char.isspace() for char in spoken_text
+            )
+            if (
+                stopped
+                and response is not None
+                and role == "assistant"
+                and isinstance(completion, str)
+                and bool(completion)
+                and not has_visible_completion
+                and has_visible_speech
+            ):
+                await self._backfill_turn_if_framework_skips(
+                    event,
+                    response,
+                    assistant_override=spoken_text,
+                )
+        except Exception as e:
+            logger.warning(
+                f"Sylanne on_agent_done spoken-turn backfill failed: {e}",
+                exc_info=True,
+            )
+
     # 只对"把文本念出来/发出去"类工具清理 text 参数（白名单）。绝不碰 FileWrite/
     # FileEdit 的 content、execute_python 的 code 等——那些 strip/截断会静默写坏文件/代码。
     _SPEECH_TOOL_NAMES = ("clone_tts", "tts", "send_message_to_user", "send_message")
+    _SPEECH_TEXT_EXTRA = "_syl_spoken_tool_text"
 
     @_optional_tool_use_filter(desc="语音/发言类工具调用前清理 text（防 thinking 进 TTS）")
     async def on_using_llm_tool(self, event: Any, tool: Any, tool_args: Any) -> None:
@@ -2284,6 +2319,7 @@ class EmotionalStatePlugin(Star):
             from sylanne_alpha.message_dispatch import strip_draft_blocks, truncate_at_sentence
 
             _HARD_MAX = 1200  # 极端兜底；正常语音远不到
+            spoken_text = ""
             for key in ("text", "content", "message", "msg"):
                 val = tool_args.get(key)
                 if not isinstance(val, str) or not val.strip():
@@ -2303,6 +2339,10 @@ class EmotionalStatePlugin(Star):
                         "Sylanne tool-arg cleaned: tool=%s key=%s %d→%d chars",
                         tool_name, key, len(val), len(cleaned),
                     )
+                spoken_text = cleaned
+            set_extra = getattr(event, "set_extra", None)
+            if spoken_text and callable(set_extra):
+                set_extra(self._SPEECH_TEXT_EXTRA, spoken_text)
         except Exception as e:
             # 安全闸降级必须可见（m1）：不静默吞到 debug
             logger.warning(f"Sylanne on_using_llm_tool clean failed: {e}", exc_info=True)
@@ -3195,7 +3235,11 @@ class EmotionalStatePlugin(Star):
         return None
 
     async def _backfill_turn_if_framework_skips(
-        self, event: Any, response: Any
+        self,
+        event: Any,
+        response: Any,
+        *,
+        assistant_override: str | None = None,
     ) -> None:
         """Atomically persist the turn when AstrBot will not do so itself."""
         if not self._has_conversation_manager():
@@ -3214,8 +3258,8 @@ class EmotionalStatePlugin(Star):
             return
 
         stopped = bool(event.is_stopped()) if hasattr(event, "is_stopped") else False
-        assistant_text = ""
-        if response is not None and not stopped:
+        assistant_text = assistant_override if assistant_override is not None else ""
+        if assistant_override is None and response is not None and not stopped:
             role = getattr(response, "role", "assistant") or "assistant"
             completion = getattr(response, "completion_text", "") or ""
             if role == "assistant" and completion:

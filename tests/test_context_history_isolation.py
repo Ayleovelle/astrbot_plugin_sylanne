@@ -209,6 +209,63 @@ def test_main_agent_done_hook_has_restore_priority() -> None:
     )
 
 
+def test_clone_tts_zero_width_stop_backfills_actual_spoken_turn_after_restore() -> None:
+    from main import EmotionalStatePlugin
+
+    class CloneTTSEvent(_Event):
+        def __init__(self, request: Any) -> None:
+            super().__init__(request)
+            self._stopped = False
+
+        def stop_event(self) -> None:
+            self._stopped = True
+
+        def is_stopped(self) -> bool:
+            return self._stopped
+
+    calls: list[str] = []
+    persisted: list[tuple[str, str, str]] = []
+    request = _request(contexts=[])
+    event = CloneTTSEvent(request)
+    response = SimpleNamespace(role="assistant", completion_text="framework-visible reply")
+    run_context = SimpleNamespace(messages=[])
+    plugin = object.__new__(EmotionalStatePlugin)
+    plugin._llm_response_pipeline = SimpleNamespace(
+        on_agent_done=lambda *_args: calls.append("restore")
+    )
+    plugin._has_conversation_manager = lambda: True
+    plugin._agent_was_aborted = lambda _event: False
+    plugin._agent_run_done = lambda _event: True
+    plugin._text = lambda _event: "完整用户问题"
+    plugin._session_key = lambda _event: "session"
+
+    async def sync_turn(
+        session_key: str, user_text: str, assistant_text: str
+    ) -> bool:
+        calls.append("persist")
+        persisted.append((session_key, user_text, assistant_text))
+        return True
+
+    plugin._sync_turn_to_conv_mgr = sync_turn
+    tool_args = {
+        "text": "<thinking>不要念出这一段</thinking>\n这是实际合成并发送的语音。"
+    }
+
+    asyncio.run(plugin.on_using_llm_tool(event, "clone_tts", tool_args))
+    assert tool_args["text"] == "这是实际合成并发送的语音。"
+
+    asyncio.run(plugin._backfill_turn_if_framework_skips(event, response))
+    assert persisted == []
+
+    response.completion_text = "\u200b"
+    event.stop_event()
+    asyncio.run(plugin.on_agent_done(event, run_context, response))
+
+    assert calls == ["restore", "persist"]
+    assert persisted == [("session", "完整用户问题", "这是实际合成并发送的语音。")]
+    assert all("\u200b" not in item for turn in persisted for item in turn)
+
+
 def test_astrbot_runs_restore_before_a_priority_zero_handler_stops(
     monkeypatch: Any,
 ) -> None:
