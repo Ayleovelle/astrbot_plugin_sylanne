@@ -17,7 +17,6 @@ export const MODEL_STRATEGY_KEYS = new Set<string>([
 
 export const ADVANCED_PROVIDER_KEYS = [
   'sylanne_alpha_main_assessor_provider_id',
-  'sylanne_alpha_fast_assessor_provider_id',
   'sylanne_alpha_life_simulation_provider_id',
   'sylanne_alpha_rel_register_provider_id',
   'sylanne_alpha_qzone_provider_id',

@@ -38,11 +38,8 @@ def test_model_routing_schema_is_canonical_and_backward_compatible() -> None:
         schema["sylanne_alpha_life_simulation_provider_id"]["ui_tier"]
         == "advanced_provider"
     )
-    assert (
-        schema["sylanne_alpha_fast_assessor_provider_id"]["ui_tier"]
-        == "advanced_provider"
-    )
-    assert schema["sylanne_alpha_fast_assessor_enabled"]["invisible"] is True
+    assert "sylanne_alpha_fast_assessor_provider_id" not in schema
+    assert "sylanne_alpha_fast_assessor_enabled" not in schema
     assert schema["sylanne_alpha_main_assessor_enabled"]["invisible"] is True
     for key, entry in schema.items():
         assert {"description", "type", "default"} <= entry.keys(), key

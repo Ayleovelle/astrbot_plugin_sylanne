@@ -62,10 +62,8 @@ _FEATURE_PROVIDER_KEYS: Mapping[
 ] = MappingProxyType(
     {
         ProviderFeature.ASSESSOR: (
-            ("sylanne_alpha_fast_assessor_provider_id", "explicit"),
             ("sylanne_alpha_assessor_provider_id", "legacy"),
             ("emotion_provider_id", "legacy"),
-            ("fast_assessor_provider_id", "legacy"),
         ),
         ProviderFeature.MAIN_ASSESSOR: (
             ("sylanne_alpha_main_assessor_provider_id", "explicit"),

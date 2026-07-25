@@ -2924,8 +2924,6 @@ class StatePersistence:
         p._cfg_bool("enabled", True)
         p._cfg_bool("use_llm_assessor", True)
         p._cfg("emotion_provider_id", "")
-        p._cfg_bool("fast_assessor_enabled", False)
-        p._cfg("fast_assessor_provider_id", "")
         p._cfg_int("fast_assessor_max_context_chars", 600)
         p._cfg_float("fast_assessor_timeout_seconds", 2.0)
         p._cfg_float("fast_assessor_temperature", 0.0)

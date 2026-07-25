@@ -1959,16 +1959,6 @@ class PublicAPI:
                     or ""
                 ),
             },
-            "fast_assessor": {
-                "enabled": bool(cfg.get("sylanne_alpha_fast_assessor_enabled"))
-                if "sylanne_alpha_fast_assessor_enabled" in cfg
-                else bool(cfg.get("fast_assessor_enabled", True)),
-                "provider_id": str(
-                    cfg.get("sylanne_alpha_fast_assessor_provider_id")
-                    or cfg.get("fast_assessor_provider_id")
-                    or ""
-                ),
-            },
             "background_workers": {
                 "enabled": bool(
                     cfg.get("sylanne_alpha_background_workers_enabled")

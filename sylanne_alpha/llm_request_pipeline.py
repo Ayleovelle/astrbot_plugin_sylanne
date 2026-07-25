@@ -1354,15 +1354,9 @@ class LLMRequestPipeline:
         )
 
         # Step 4: 情感/关系状态信号
-        assessment_umo = str(
-            getattr(event, "unified_msg_origin", "") or ""
-        ).strip() or None
         state_fragment = await self._dispatch_assessment(
             session_key,
-            message_text,
             gap_seconds,
-            realtime_enabled,
-            umo=assessment_umo,
         )
 
         # Step 4.5: v3 shadow 请求边界（design 14.1；plan Task 13）
@@ -2124,13 +2118,9 @@ class LLMRequestPipeline:
     async def _dispatch_assessment(
         self,
         session_key: str,
-        message_text: str,
         gap_seconds: float,
-        realtime_enabled: bool,
-        *,
-        umo: str | None = None,
     ) -> str:
-        """从计算栈构建情感/关系状态信号片段。
+        """从 v2core/计算栈构建本地情感与关系状态信号片段。
 
         Returns:
             state_fragment 字符串，无信号时为空。
@@ -2145,33 +2135,14 @@ class LLMRequestPipeline:
         sheaf_obs = _sheaf.observe() if _sheaf is not None and hasattr(_sheaf, "observe") else {}
         expr_state = comp.expression.state() if hasattr(comp, "expression") else {}
 
-        # 前台快速评估器（独立用途：结果立即生成 prompt 状态信号片段，见下方 signals）。
-        # 注：这与后台 AssessorAgent（结果进计算栈影响 kernel）是不同消费路径——
-        # 前台服务实时 prompt 文案、后台服务计算注入，各需一次 fast 评估，非重复执行。
-        fast_assessment: dict = {}
-        fast_enabled = p._cfg_bool("sylanne_alpha_assessor_llm_enabled")
-        if fast_enabled and message_text and realtime_enabled:
-            try:
-                async def _current_assessor_call(prompt: str) -> str:
-                    return await self._assessor_llm_call(prompt, umo=umo)
-
-                fast_assessment = await p._async_assessor.assess_fast(
-                    message_text, _current_assessor_call
-                )
-            except Exception as e:
-                logger.warning(f"Sylanne fast assessment: {e}", exc_info=True)
-
-        # 合并评估结果（共振场可能无 _last_assessment，getattr 守卫）
+        # 共振场可能无 _last_assessment，getattr 守卫。前台不再同步调用 LLM；
+        # 本轮 v2core PERCEPT 已在 Step 0 写入心象，本层只读取计算栈本地状态。
         last_assessment = getattr(comp, "_last_assessment", None) or {}
         _short_gap = gap_seconds < 900
-        # T1-11：短间隔且无本轮 fast 评估时，不用上轮 _last_assessment 的情绪/意图（防漂移）
-        if _short_gap and not fast_assessment:
+        # T1-11：短间隔不复用上一轮 assessment 的情绪/意图（防漂移）。
+        if _short_gap:
             last_assessment = {}
-        current_assessment = (
-            {**last_assessment, **fast_assessment}
-            if fast_assessment
-            else last_assessment
-        )
+        current_assessment = last_assessment
 
         # 提取信号值
         warmth = emotion.get("warmth", 0.0)
@@ -3303,7 +3274,7 @@ class LLMRequestPipeline:
         *,
         umo: str | None = None,
     ) -> str:
-        """调用配置的 LLM provider 执行快速语义评估（max_tokens 可配置，默认 1024）。"""
+        """调用共享辅助文本模型，供后台轻量语义任务复用。"""
         return await self._generic_llm_call(
             prompt,
             max_tokens=self._assessor_max_tokens(),

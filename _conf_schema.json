@@ -170,28 +170,13 @@
     "description": "启用辅助语义评估",
     "type": "bool",
     "default": false,
-    "hint": "默认关闭。开启后，即时判断及未单独指定模型的记忆/关系评估可跟随辅助模型或当前聊天模型，并可能产生额外 LLM 调用。"
-  },
-  "sylanne_alpha_fast_assessor_enabled": {
-    "description": "启用即时判断 LLM",
-    "type": "bool",
-    "default": true,
-    "invisible": true,
-    "hint": "旧版未接入生产路径的兼容键；保留读取但不再作为启用依据。请使用“启用辅助语义评估”。"
-  },
-  "sylanne_alpha_fast_assessor_provider_id": {
-    "description": "即时判断 LLM Provider（前台同步）",
-    "type": "string",
-    "default": "",
-    "_special": "select_provider",
-    "ui_tier": "advanced_provider",
-    "hint": "高级覆盖：留空时使用共享辅助模型，再跟随当前聊天模型；仅在确实需要更快的小模型时单独选择。"
+    "hint": "默认关闭。开启后，未单独指定模型的后台记忆与关系语义任务可跟随共享辅助模型或当前聊天模型，并可能产生额外 LLM 调用。前台即时判断始终由 v2core 本地完成。"
   },
   "sylanne_alpha_assessor_max_tokens": {
     "description": "语义评估 LLM 最大输出 token",
     "type": "int",
     "default": 1024,
-    "hint": "快速/主语义评估的输出上限。推理模型（如 deepseek-v4 等带隐藏思考的模型）会先把 token 花在推理上，过低（旧版写死 50/100）会让正文为空、情感读数恒落中性，越情绪化的消息越严重；故默认 1024 留足余量。非推理模型解完即停、不会多花。"
+    "hint": "后台辅助/主语义评估的输出上限。推理模型（如 deepseek-v4 等带隐藏思考的模型）会先把 token 花在推理上，过低会让正文为空、情感读数恒落中性；默认 1024 留足余量。非推理模型解完即停、不会多花。"
   },
   "sylanne_alpha_background_workers_enabled": {
     "description": "启用后台工作队列",

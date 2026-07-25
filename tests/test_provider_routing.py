@@ -321,19 +321,19 @@ def test_assessor_is_disabled_unless_real_fail_closed_gate_is_true() -> None:
     assert context.lookup_calls == []
 
 
-def test_enabled_assessor_honours_advanced_fast_provider_page_key() -> None:
-    context = _FakeContext(("fast-page", "legacy"))
+def test_removed_fast_provider_key_is_ignored_in_favor_of_auxiliary() -> None:
+    context = _FakeContext(("fast-page", "aux"))
     config = {
         "sylanne_alpha_assessor_llm_enabled": True,
         "sylanne_alpha_fast_assessor_provider_id": "fast-page",
-        "emotion_provider_id": "legacy",
+        "sylanne_alpha_aux_provider_id": "aux",
     }
 
     resolved = _resolve_text(feature=ProviderFeature.ASSESSOR, config=config, context=context)
 
-    assert resolved.provider is context.providers["fast-page"]
-    assert resolved.provider_id == "fast-page"
-    assert resolved.mode == "explicit"
+    assert resolved.provider is context.providers["aux"]
+    assert resolved.provider_id == "aux"
+    assert resolved.mode == "auxiliary"
 
 
 @pytest.mark.parametrize(

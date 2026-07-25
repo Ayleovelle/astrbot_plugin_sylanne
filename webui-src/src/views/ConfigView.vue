@@ -50,7 +50,6 @@ const CONFIG_GROUP_PREFIXES: GroupRule[] = [
   { prefix: 'sylanne_alpha_intercept_', groupKey: 'config.realtime' },
   { prefix: 'sylanne_alpha_embedding_', groupKey: 'config.memory' },
   { prefix: 'sylanne_alpha_main_assessor_', groupKey: 'config.memory' },
-  { prefix: 'sylanne_alpha_fast_assessor_', groupKey: 'config.memory' },
   { prefix: 'sylanne_alpha_background_', groupKey: 'config.memory' },
   { prefix: 'sylanne_alpha_life_simulation_', groupKey: 'config.life' },
   { prefix: 'sylanne_alpha_transcription_', groupKey: 'config.advanced' },

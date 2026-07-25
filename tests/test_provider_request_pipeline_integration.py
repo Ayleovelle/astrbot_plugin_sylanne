@@ -105,24 +105,27 @@ def test_fast_assessor_ignores_dead_enable_boolean() -> None:
     assert legacy.text_calls == []
 
 
-def test_fast_assessor_real_gate_routes_new_override() -> None:
+def test_auxiliary_assessor_ignores_removed_fast_override() -> None:
     fast = _Provider("fast", text="fast assessment")
-    context = _Context([fast])
+    aux = _Provider("aux", text="auxiliary assessment")
+    context = _Context([fast, aux])
     pipe = _pipeline(
         {
             "sylanne_alpha_assessor_llm_enabled": True,
             "sylanne_alpha_fast_assessor_provider_id": "fast",
+            "sylanne_alpha_aux_provider_id": "aux",
         },
         context,
     )
 
     result = asyncio.run(pipe._assessor_llm_call("assess"))
 
-    assert result == "fast assessment"
-    assert len(fast.text_calls) == 1
+    assert result == "auxiliary assessment"
+    assert fast.text_calls == []
+    assert len(aux.text_calls) == 1
 
 
-def test_fast_assessor_can_follow_the_real_current_conversation_umo() -> None:
+def test_auxiliary_assessor_can_follow_the_real_current_conversation_umo() -> None:
     current = _Provider("current", text="current assessment")
     default = _Provider("default", text="wrong assessment")
     context = _Context(
@@ -139,10 +142,60 @@ def test_fast_assessor_can_follow_the_real_current_conversation_umo() -> None:
     assert default.text_calls == []
 
 
-def test_assessment_dispatch_binds_the_real_umo_into_callback() -> None:
-    source = inspect.getsource(LLMRequestPipeline._dispatch_assessment)
+def test_assessment_dispatch_uses_local_state_without_calling_fast_llm() -> None:
+    class _ValueMap:
+        def __init__(self) -> None:
+            self.values: dict[str, Any] = {}
 
-    assert "self._assessor_llm_call(prompt, umo=umo)" in source
+        def get(self, key: str, default: Any = None) -> Any:
+            return self.values.get(key, default)
+
+        def set(self, key: str, value: Any) -> None:
+            self.values[key] = value
+
+    class _UnexpectedFastAssessor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def assess_fast(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            self.calls += 1
+            return {"valence": 1.0, "intent": "覆盖本地状态"}
+
+    context = _Context()
+    plugin = _Plugin({"sylanne_alpha_assessor_llm_enabled": True}, context)
+    plugin._cfg_bool = lambda _key: True  # type: ignore[attr-defined]
+    plugin._async_assessor = _UnexpectedFastAssessor()  # type: ignore[attr-defined]
+    plugin._store = SimpleNamespace(  # type: ignore[attr-defined]
+        last_injected_states=_ValueMap()
+    )
+    computation = SimpleNamespace(
+        engine=SimpleNamespace(
+            observe=lambda: {
+                "warmth": 0.4,
+                "tension": 0.0,
+                "coherence": 1.0,
+                "void_pressure": 0.0,
+            }
+        ),
+        expression=SimpleNamespace(state=lambda: {"intensity": 0.0}),
+        _sheaf=None,
+        _last_assessment=None,
+    )
+    plugin._host = lambda _session_key: SimpleNamespace(  # type: ignore[attr-defined]
+        kernel=SimpleNamespace(computation=computation)
+    )
+    pipe = LLMRequestPipeline(plugin)  # type: ignore[arg-type]
+
+    fragment = asyncio.run(
+        pipe._dispatch_assessment(
+            "session",
+            1.0,
+        )
+    )
+
+    assert plugin._async_assessor.calls == 0  # type: ignore[attr-defined]
+    assert "亲近感中" in fragment
+    assert "覆盖本地状态" not in fragment
 
 
 def test_generic_llm_call_keeps_legacy_provider_key_api() -> None:

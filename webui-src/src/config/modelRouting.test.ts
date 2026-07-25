@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { SettingsResponse } from '../api/types'
 import configViewSource from '../views/ConfigView.vue?raw'
 import {
+  ADVANCED_PROVIDER_KEYS,
   MANUAL_PROVIDER_VALUE,
   buildDirtySettingsPayload,
   buildModelRoutingViewModel,
@@ -229,7 +230,7 @@ describe('buildModelRoutingViewModel', () => {
       response({
         values: {
           sylanne_alpha_life_simulation_provider_id: 'life-model',
-          sylanne_alpha_fast_assessor_provider_id: '',
+          sylanne_alpha_main_assessor_provider_id: '',
         },
         model_routing: {
           advanced_override_count: 0,
@@ -267,16 +268,18 @@ describe('provider option helpers', () => {
 })
 
 describe('Task 6 pure integration helpers', () => {
+  it('does not expose the removed synchronous fast-assessor provider', () => {
+    expect(ADVANCED_PROVIDER_KEYS).not.toContain(
+      'sylanne_alpha_fast_assessor_provider_id',
+    )
+    expect(configViewSource).not.toContain('sylanne_alpha_fast_assessor_')
+  })
+
   it('partitions visible schema without duplicating advanced provider rows', () => {
     const schema = {
       sylanne_persona_name: { type: 'string', default: '' },
       sylanne_alpha_aux_provider_id: { type: 'string', default: '', ui_tier: 'primary' },
       sylanne_alpha_life_simulation_provider_id: {
-        type: 'string',
-        default: '',
-        ui_tier: 'advanced_provider',
-      },
-      sylanne_alpha_fast_assessor_provider_id: {
         type: 'string',
         default: '',
         ui_tier: 'advanced_provider',
@@ -299,7 +302,6 @@ describe('Task 6 pure integration helpers', () => {
     ])
     expect(Object.keys(partition.advancedProviders)).toEqual([
       'sylanne_alpha_life_simulation_provider_id',
-      'sylanne_alpha_fast_assessor_provider_id',
     ])
   })
 
