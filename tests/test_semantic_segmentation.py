@@ -108,9 +108,30 @@ def test_crlf_newlines_and_spaces_are_conserved_byte_for_byte() -> None:
     assert "".join(part.text for part in plan.parts) == plan.clean_text
 
 
-def test_zero_markers_returns_one_exact_part_without_local_inference() -> None:
+def test_zero_markers_uses_model_authored_line_breaks_as_beats() -> None:
     raw = "第一句。\n第二句！\n\n第三段？"
 
+    plan = parse_semantic_completion(raw, nonce=NONCE)
+
+    assert plan.accepted is True
+    assert plan.clean_text == raw
+    assert plan.parts == (
+        SemanticBeatPart(text="第一句。\n", pause_before=None),
+        SemanticBeatPart(text="第二句！\n\n", pause_before=PauseClass.SOFT),
+        SemanticBeatPart(text="第三段？", pause_before=PauseClass.NORMAL),
+    )
+    assert "".join(part.text for part in plan.parts) == raw
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "```python\nprint('a')\nprint('b')\n```",
+        "| name | value |\n| --- | --- |\n| a | 1 |",
+        "- 第一项\n- 第二项\n- 第三项",
+    ],
+)
+def test_zero_marker_structured_content_is_not_split_per_line(raw: str) -> None:
     plan = parse_semantic_completion(raw, nonce=NONCE)
 
     assert plan.accepted is True
@@ -143,7 +164,7 @@ def test_five_markers_create_the_maximum_six_nonempty_parts() -> None:
     assert "".join(part.text for part in plan.parts) == plan.clean_text
 
 
-def test_punctuation_only_model_beat_is_rejected_as_one_clean_reply() -> None:
+def test_punctuation_only_model_beat_is_folded_without_losing_boundaries() -> None:
     raw = (
         "嗯……"
         + build_marker(NONCE, PauseClass.NORMAL)
@@ -156,12 +177,40 @@ def test_punctuation_only_model_beat_is_rejected_as_one_clean_reply() -> None:
 
     plan = parse_semantic_completion(raw, nonce=NONCE)
 
-    assert plan.accepted is False
-    assert plan.parts == ()
-    assert plan.rejection_reason == "DEGENERATE_PART"
+    assert plan.accepted is True
+    assert plan.parts == (
+        SemanticBeatPart(text="嗯…………", pause_before=None),
+        SemanticBeatPart(
+            text="你说这种话的时候能不能提前通知一下\n\n我没有防备的😾",
+            pause_before=PauseClass.DEEP,
+        ),
+        SemanticBeatPart(
+            text="但是不许用这个当借口熬夜啊\n\n身体搞坏了我打你",
+            pause_before=PauseClass.NORMAL,
+        ),
+    )
+    assert plan.rejection_reason is None
     assert plan.clean_text == (
         "嗯…………你说这种话的时候能不能提前通知一下\n\n我没有防备的😾"
         "但是不许用这个当借口熬夜啊\n\n身体搞坏了我打你"
+    )
+
+
+def test_folded_punctuation_beat_preserves_the_stronger_pause() -> None:
+    raw = (
+        "前"
+        + build_marker(NONCE, PauseClass.DEEP)
+        + "……"
+        + build_marker(NONCE, PauseClass.SOFT)
+        + "后"
+    )
+
+    plan = parse_semantic_completion(raw, nonce=NONCE)
+
+    assert plan.accepted is True
+    assert plan.parts == (
+        SemanticBeatPart(text="前……", pause_before=None),
+        SemanticBeatPart(text="后", pause_before=PauseClass.DEEP),
     )
 
 

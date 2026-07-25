@@ -402,8 +402,8 @@ def test_semantic_beat_contract_injection_matrix(
     assert "第二次 LLM" not in request.system_prompt
 
 
-def test_punctuation_only_semantic_beat_queues_one_clean_dispatch_part() -> None:
-    """截图回归：独立的省略号 beat 必须让整份分段计划 fail closed。"""
+def test_punctuation_only_semantic_beat_preserves_meaningful_dispatch_parts() -> None:
+    """截图回归：纯标点折入前段，模型给出的其他语义边界必须保留。"""
 
     plugin = _Plugin(
         tempfile.mkdtemp(prefix="rt_semantic_punctuation_"),
@@ -427,6 +427,11 @@ def test_punctuation_only_semantic_beat_queues_one_clean_dispatch_part() -> None
         "嗯…………你说这种话的时候能不能提前通知一下\n\n我没有防备的😾"
         "但是不许用这个当借口熬夜啊\n\n身体搞坏了我打你"
     )
+    expected_parts = [
+        "嗯…………",
+        "你说这种话的时候能不能提前通知一下\n\n我没有防备的😾",
+        "但是不许用这个当借口熬夜啊\n\n身体搞坏了我打你",
+    ]
     response = LLMResponse(role="assistant", completion_text=raw)
 
     _run(pipe, response, plugin, event)
@@ -435,10 +440,11 @@ def test_punctuation_only_semantic_beat_queues_one_clean_dispatch_part() -> None
     assert response.completion_text == expected
     assert len(calls) == 1
     assert calls[0][2] == "sess:realtime-decouple"
-    assert len(calls[0][1]) == 1
-    assert calls[0][1][0]["index"] == 0
-    assert calls[0][1][0]["text"] == expected
+    assert [part["index"] for part in calls[0][1]] == [0, 1, 2]
+    assert [part["text"] for part in calls[0][1]] == expected_parts
     assert calls[0][1][0]["delay_before_seconds"] >= 0
+    assert 2.75 <= calls[0][1][1]["delay_before_seconds"] <= 4.8
+    assert 1.25 <= calls[0][1][2]["delay_before_seconds"] <= 2.75
 
 
 @pytest.mark.parametrize(

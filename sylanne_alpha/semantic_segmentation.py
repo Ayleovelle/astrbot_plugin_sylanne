@@ -1,8 +1,4 @@
-"""Parse turn-scoped, model-authored semantic beat markers.
-
-This module validates boundaries that the response model already authored.  It
-does not infer, add, move, or rewrite any conversational boundary.
-"""
+"""Parse model-authored semantic beats from markers or visible line breaks."""
 
 from __future__ import annotations
 
@@ -30,6 +26,8 @@ _ANY_MARKER_PATTERN = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+_LINE_BREAK_PATTERN = re.compile(r"(?:\r\n|\n|\r)(?:[ \t]*(?:\r\n|\n|\r))*")
+_LIST_LINE_PATTERN = re.compile(r"^[ \t]{0,3}(?:[-+*]\s+|\d+[.)]\s+|>\s+)")
 
 
 class PauseClass(str, Enum):
@@ -214,6 +212,19 @@ def _protected_ranges(text: str) -> tuple[tuple[int, int], ...]:
     return tuple(ranges)
 
 
+def _has_multiline_structure(text: str) -> bool:
+    """Keep code, tables, and list blocks intact instead of making one bubble per row."""
+
+    if _fenced_code_ranges(text):
+        return True
+    lines = [line.rstrip("\r\n") for _, _, line in _line_ranges(text)]
+    if any(line.count("|") >= 2 for line in lines):
+        return True
+    if sum(1 for line in lines if _LIST_LINE_PATTERN.match(line)) >= 2:
+        return True
+    return sum(1 for line in lines if line.startswith(("    ", "\t"))) >= 2
+
+
 def _overlaps(left: tuple[int, int], right: tuple[int, int]) -> bool:
     return left[0] < right[1] and right[0] < left[1]
 
@@ -237,8 +248,105 @@ def _has_substantive_content(text: str) -> bool:
     )
 
 
+_PAUSE_STRENGTH = {
+    None: -1,
+    PauseClass.SOFT: 0,
+    PauseClass.NORMAL: 1,
+    PauseClass.DEEP: 2,
+}
+
+
+def _stronger_pause(
+    left: PauseClass | None,
+    right: PauseClass | None,
+) -> PauseClass | None:
+    return left if _PAUSE_STRENGTH[left] >= _PAUSE_STRENGTH[right] else right
+
+
+def _fold_punctuation_only_parts(
+    parts: list[SemanticBeatPart],
+    *,
+    clean_text: str,
+) -> tuple[SemanticBeatPart, ...]:
+    """Keep authored boundaries while preventing punctuation-only chat bubbles."""
+
+    folded: list[SemanticBeatPart] = []
+    leading_text: list[str] = []
+    pending_pause: PauseClass | None = None
+
+    for part in parts:
+        if _has_substantive_content(part.text):
+            if not folded:
+                folded.append(
+                    SemanticBeatPart(
+                        text="".join(leading_text) + part.text,
+                        pause_before=None,
+                    )
+                )
+            else:
+                folded.append(
+                    SemanticBeatPart(
+                        text=part.text,
+                        pause_before=_stronger_pause(
+                            pending_pause,
+                            part.pause_before,
+                        ),
+                    )
+                )
+            leading_text.clear()
+            pending_pause = None
+            continue
+
+        if folded:
+            previous = folded[-1]
+            folded[-1] = SemanticBeatPart(
+                text=previous.text + part.text,
+                pause_before=previous.pause_before,
+            )
+        else:
+            leading_text.append(part.text)
+        pending_pause = _stronger_pause(pending_pause, part.pause_before)
+
+    if not folded:
+        return (SemanticBeatPart(text=clean_text, pause_before=None),)
+    return tuple(folded)
+
+
+def _parts_from_authored_line_breaks(text: str) -> tuple[SemanticBeatPart, ...]:
+    """Use visible line breaks as bounded beats without guessing sentence boundaries."""
+
+    if _has_multiline_structure(text):
+        return (SemanticBeatPart(text=text, pause_before=None),)
+
+    boundaries = [
+        match
+        for match in _LINE_BREAK_PATTERN.finditer(text)
+        if text[: match.start()].strip() and text[match.end() :].strip()
+    ][:MAX_SEMANTIC_MARKERS]
+    if not boundaries:
+        return (SemanticBeatPart(text=text, pause_before=None),)
+
+    parts: list[SemanticBeatPart] = []
+    cursor = 0
+    pause_before: PauseClass | None = None
+    for boundary in boundaries:
+        parts.append(
+            SemanticBeatPart(
+                text=text[cursor : boundary.end()],
+                pause_before=pause_before,
+            )
+        )
+        line_break_count = len(re.findall(r"\r\n|\n|\r", boundary.group(0)))
+        pause_before = (
+            PauseClass.NORMAL if line_break_count >= 2 else PauseClass.SOFT
+        )
+        cursor = boundary.end()
+    parts.append(SemanticBeatPart(text=text[cursor:], pause_before=pause_before))
+    return _fold_punctuation_only_parts(parts, clean_text=text)
+
+
 def parse_semantic_completion(raw: str, *, nonce: str) -> SemanticBeatPlan:
-    """Validate exact nonce-scoped markers without inferring boundaries.
+    """Validate nonce-scoped markers, then honor visible authored line breaks.
 
     Any candidate marker owned by this turn is removed before a rejected plan
     is returned, so malformed control text cannot leak into history or output.
@@ -285,7 +393,7 @@ def parse_semantic_completion(raw: str, *, nonce: str) -> SemanticBeatPlan:
             return _rejected(raw, "EMPTY_PART")
         return SemanticBeatPlan(
             clean_text=raw,
-            parts=(SemanticBeatPart(text=raw, pause_before=None),),
+            parts=_parts_from_authored_line_breaks(raw),
             accepted=True,
         )
 
@@ -300,12 +408,12 @@ def parse_semantic_completion(raw: str, *, nonce: str) -> SemanticBeatPlan:
 
     if any(not part.text.strip() for part in parts):
         return _rejected(clean_text, "EMPTY_PART")
-    if any(not _has_substantive_content(part.text) for part in parts):
-        return _rejected(clean_text, "DEGENERATE_PART")
+
+    normalized_parts = _fold_punctuation_only_parts(parts, clean_text=clean_text)
 
     return SemanticBeatPlan(
         clean_text=clean_text,
-        parts=tuple(parts),
+        parts=normalized_parts,
         accepted=True,
     )
 
