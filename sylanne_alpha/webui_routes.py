@@ -155,32 +155,26 @@ CONFIG_PRESETS: dict[str, dict[str, Any]] = {
 
 
 def _comp_gate_dict(comp: object) -> dict:
-    """取计算层 gate.to_dict()，兼容旧 .gate(公有) 与共振场 _gate(私有)。"""
-    g = getattr(comp, "gate", None) or getattr(comp, "_gate", None)
-    if g is not None and hasattr(g, "to_dict"):
-        try:
-            return g.to_dict()
-        except Exception:
-            return {}
-    return {}
+    """取 ResonanceSpine gate 的可观测状态。"""
+    try:
+        return comp.gate.to_dict()  # type: ignore[attr-defined]
+    except Exception:
+        return {}
 
 
 def _comp_boundary_dict(comp: object) -> dict:
-    """取计算层 boundary.to_dict()，兼容旧 .boundary 与共振场 _boundary。
+    """取 ResonanceSpine boundary 的可观测状态。
 
     共振场字段名为 boundary_integrity/internal_entropy，补 integrity/entropy
     别名以兼容下游(state_handler 读 integrity/entropy)。
     """
-    b = getattr(comp, "boundary", None) or getattr(comp, "_boundary", None)
-    if b is not None and hasattr(b, "to_dict"):
-        try:
-            d = dict(b.to_dict())
-            d.setdefault("integrity", d.get("boundary_integrity", 1.0))
-            d.setdefault("entropy", d.get("internal_entropy", 0.0))
-            return d
-        except Exception:
-            return {}
-    return {}
+    try:
+        d = dict(comp.boundary.to_dict())  # type: ignore[attr-defined]
+        d.setdefault("integrity", d.get("boundary_integrity", 1.0))
+        d.setdefault("entropy", d.get("internal_entropy", 0.0))
+        return d
+    except Exception:
+        return {}
 
 
 def _comp_route_stats(comp: object, history: object = None) -> tuple[dict[str, int], dict[str, int]]:

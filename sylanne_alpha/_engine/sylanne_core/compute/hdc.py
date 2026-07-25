@@ -99,7 +99,7 @@ class HDCEncoder:
       - bundle(): 多数投票捆绑（表示"集合"）
 
     与其他组件的关系：
-      - 被 ComputationSpine 在 L1 层调用，输出传递给 L2 PredictiveCodingGate
+      - 被 ResonanceSpine 的感知阶段调用，输出传递给 PredictiveCodingGate
       - 输出的 bytearray 同时作为 VoidSpace 的边界向量使用
     """
 

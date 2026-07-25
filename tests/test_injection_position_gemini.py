@@ -118,18 +118,16 @@ def test_default_mode_no_injected_assistant_in_contexts() -> None:
 # B. Gemini adapter 端到端：末尾 user turn 转换后仍是 UserContent
 # --------------------------------------------------------------------------
 
-def test_gemini_adapter_tail_is_user_content() -> None:
+def test_gemini_adapter_tail_is_user_content(monkeypatch) -> None:
     """跨进 AstrBot Gemini adapter：注入修复后，转换出的 contents 末尾是 UserContent。
 
     若 AstrBot 源码不可用则跳过（仅 G:/bugfinders 开发机有）。
     """
     import importlib.util
-    import sys
 
     spec = importlib.util.find_spec  # noqa: F841
     gemini_path = "G:/bugfinders/AstrBot"
-    if gemini_path not in sys.path:
-        sys.path.insert(0, gemini_path)
+    monkeypatch.syspath_prepend(gemini_path)
     try:
         from astrbot.core.provider.sources.gemini_source import (  # type: ignore
             ProviderGoogleGenAI,

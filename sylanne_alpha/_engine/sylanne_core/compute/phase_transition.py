@@ -42,10 +42,10 @@ class PhaseTransitionExpression:
         - Channel 5: cascade_drive（来自 hot pool 级联）
 
     与其他组件的关系：
-      - 被 ComputationSpine 在 L7 层调用
+      - 被 ResonanceSpine 的表达阶段调用
       - 接收 VoidScarEngine.expression_drive() 作为驱动力
       - 接收 SocialSignals 调制群聊中的有效阈值
-      - should_express() 输出给 ComputationSpine 决定是否表达
+      - should_express() 输出给 ResonanceSpine 决定是否表达
     """
 
     __slots__ = (
@@ -150,7 +150,7 @@ class PhaseTransitionExpression:
         self.silence_duration += dt
 
     def set_social_params(self, params: dict[str, Any]) -> None:
-        """设置人格派生的社交场参数（由 ComputationSpine.apply_personality 调用）。"""
+        """设置人格派生的社交场参数（由 ResonanceSpine.apply_personality 调用）。"""
         self._social_context = params
 
     def apply_social_signals(self, signals: SocialSignals | None) -> None:

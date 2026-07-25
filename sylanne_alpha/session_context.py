@@ -1171,16 +1171,13 @@ class SessionContext:
             # boot()`。
             _is_true_birth = not host.kernel.personality
             self._schedule_person_profile_seed(session_key, host, is_true_birth=_is_true_birth)
-            # 编码器共享：避免每个 host 各持有一份 encoder 浪费内存。
-            # 仅旧 ComputationSpine 暴露 encoder/replace_encoder；SDK 共振场
-            # （ResonanceSpine）架构不同、无此属性，跳过共享（其编码自管）。
-            comp = getattr(host.kernel, "computation", None)
-            if comp is not None and hasattr(comp, "encoder") and hasattr(comp, "replace_encoder"):
-                plugin_cls = type(self._p)
-                if plugin_cls._shared_encoder is None:
-                    plugin_cls._shared_encoder = comp.encoder
-                else:
-                    comp.replace_encoder(plugin_cls._shared_encoder)
+            # 编码器共享：避免每个 host 各持有一份无状态 HDC encoder。
+            comp = host.kernel.computation
+            plugin_cls = type(self._p)
+            if plugin_cls._shared_encoder is None:
+                plugin_cls._shared_encoder = comp.encoder
+            else:
+                comp.replace_encoder(plugin_cls._shared_encoder)
             # 从人格状态派生记忆系统参数（人格驱动全参数）
             personality = (
                 host.kernel._personality()

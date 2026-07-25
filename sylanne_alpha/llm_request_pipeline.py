@@ -115,28 +115,17 @@ _RELATIONSHIP_PHASE_WORDS = {
 
 
 def _comp_boundary_stability(comp: Any) -> float:
-    """取计算层边界稳定度，兼容旧 ComputationSpine(.boundary) 与共振场(_boundary)。"""
-    b = getattr(comp, "boundary", None) or getattr(comp, "_boundary", None)
-    if b is not None and hasattr(b, "stability"):
-        try:
-            return float(b.stability())
-        except Exception:
-            return 1.0
-    return 1.0
+    """取 ResonanceSpine 的边界稳定度。"""
+    try:
+        return float(comp.boundary.stability())
+    except Exception:
+        return 1.0
 
 
 def _comp_timing_ns(comp: Any) -> dict[str, int]:
-    """取计算层分层耗时(ns)，兼容旧 dict[layer→deque] 与共振场单 deque。
-
-    共振场 _timings 是整个 spine 的单一 deque[int]，无 per-layer 拆分，
-    映射为 {"spine": 最近一次耗时}。
-    """
-    t = getattr(comp, "_timings", None)
-    if isinstance(t, dict):
-        return {k: (v[-1] if v else 0) for k, v in t.items()}
-    # 共振场：单 deque
+    """取 ResonanceSpine 最近一次端到端耗时(ns)。"""
     try:
-        return {"spine": int(t[-1]) if t else 0}
+        return {"spine": int(comp.latest_timing_ns)}
     except Exception:
         return {}
 
@@ -2129,10 +2118,7 @@ class LLMRequestPipeline:
         host = p._host(session_key)
         comp = host.kernel.computation
         emotion = comp.engine.observe()
-        # 共振场(ResonanceSpine)无公有 sheaf 属性(私有 _sheaf)，旧 ComputationSpine 有。
-        # CP3 切换计算芯后此处加固防崩；CP5 将整体改读 Surface。
-        _sheaf = getattr(comp, "sheaf", None) or getattr(comp, "_sheaf", None)
-        sheaf_obs = _sheaf.observe() if _sheaf is not None and hasattr(_sheaf, "observe") else {}
+        sheaf_obs = comp.sheaf.observe()
         expr_state = comp.expression.state() if hasattr(comp, "expression") else {}
 
         # 共振场可能无 _last_assessment，getattr 守卫。前台不再同步调用 LLM；

@@ -1,12 +1,12 @@
 """Resonance Integration — the default serving spine (kernel.py:48-53).
 
-ResonanceSpine exposes the ComputationSpine interface (process/feedback/express/
-to_dict/from_dict/apply_personality). The name is historical: the iterate-to-
-convergence "resonance field" it once wrapped is RETIRED (v2.5). The field is now
-``DeterministicFusion`` (a single deterministic coherence pass), and the emotion
-core is the predictive-coding ``PEL-Core`` (behind ``pel_core_enabled``). The 7
-modules each compute once and contribute to a single-pass result; nothing iterates
-to a fixed point. The result-dict contract is preserved for API compatibility.
+ResonanceSpine is the serving computation backend and exposes
+process/feedback/express/to_dict/from_dict/apply_personality. The name is
+historical: the iterate-to-convergence "resonance field" it once wrapped is
+retired in v2.5. The field is now ``DeterministicFusion`` (a single deterministic
+coherence pass), and the emotion core is the predictive-coding ``PEL-Core``
+(behind ``pel_core_enabled``). The seven modules each compute once and contribute
+to a single-pass result; nothing iterates to a fixed point.
 
 Module mapping (injection index → computation unit):
   0: HDCEncoder (perception)
@@ -57,16 +57,15 @@ _TIMING_WINDOW = 50
 
 
 class ResonanceSpine:
-    """Drop-in replacement for ComputationSpine using resonance field dynamics.
+    """Serving computation spine using deterministic resonance dynamics.
 
     Same external interface: process(), feedback(), express(), to_dict(), from_dict().
     Internal mechanism: each real module computes its output, injects into the
     resonance field, field iterates until convergence, expression emerges from
     the converged state rather than being computed sequentially.
 
-    The key difference from ComputationSpine: modules don't feed forward into
-    each other — they all feed into the shared resonance field and influence
-    each other through simplicial coupling dynamics.
+    Modules contribute to a shared deterministic fusion field instead of a
+    sequential feed-forward chain.
     """
 
     __slots__ = (
@@ -99,7 +98,7 @@ class ResonanceSpine:
         "_last_surprise",
         # Expression policy (contextual bandit)
         "_expression_policy",
-        # Embodiment drift system (ported from ComputationSpine)
+        # Embodiment drift system
         "_drift_min_interval",
         "_embodiment_traits",
         "_signal_extractor",
@@ -136,7 +135,7 @@ class ResonanceSpine:
         self._field = create_deterministic_fusion(n_modules=7, tier=self._tier)
         self._emergence = EmergenceTracker(window=50)
 
-        # Real computation modules (same as ComputationSpine)
+        # Serving computation modules
         from .hdc import HDCEncoder
 
         self._encoder = HDCEncoder(dim=profile.hdc_dim)
@@ -198,7 +197,7 @@ class ResonanceSpine:
             personality_openness=0.5,
         )
 
-        # Embodiment personality drift system (ported from ComputationSpine)
+        # Embodiment personality drift system
         self._signal_extractor = DriftSignalExtractor()
         self._embodiment_traits: dict[str, TraitMemory] = {
             name: TraitMemory(0.5) for name in EMBODIMENT_TRAITS
@@ -254,7 +253,7 @@ class ResonanceSpine:
         # Openness → weaker residual decay (more receptive to new input)
         self._field._residual_decay = 0.6 + (1.0 - openness) * 0.2
 
-        # === Module-level personality (same as ComputationSpine) ===
+        # === Module-level personality ===
         self._expression.threshold = 0.9 - extraversion * 0.6
         self._engine.scar_state.wound_threshold = 0.3 + extraversion * 0.6
         # PEL-Core: derive the latent attractor prior pi / W_gen / precisions from
@@ -856,11 +855,11 @@ class ResonanceSpine:
         """
         if outcome in self._feedback_counts:
             self._feedback_counts[outcome] += 1
-        # Inject feedback into embodiment drift (parity with ComputationSpine.feedback).
+        # Inject feedback into embodiment drift.
         # 'ignored' is the real "expression got no response" signal (feedback_ignored ->
         # expression_drive_trait -0.2). ResonanceSpine previously omitted this, so being
         # persistently ignored could never drift expression drive on the resonance
-        # channel (SDK backlog gap-1). Mirrors ComputationSpine exactly (no dt = full step).
+        # channel (SDK backlog gap-1; no dt means a full step).
         signal_key = f"feedback_{outcome}"
         if signal_key in ("feedback_accepted", "feedback_ignored", "feedback_rejected"):
             compute_embodiment_drift(
@@ -1111,8 +1110,38 @@ class ResonanceSpine:
         """Public accessor for the expression module (used by prompt_surface)."""
         return self._expression
 
+    @property
+    def encoder(self) -> Any:
+        """Public accessor for the shared HDC encoder."""
+        return self._encoder
+
+    @property
+    def gate(self) -> PredictiveCodingGate:
+        """Public accessor for predictive-coding telemetry."""
+        return self._gate
+
+    @property
+    def sheaf(self) -> ScarSheaf:
+        """Public accessor for relational-sheaf telemetry."""
+        return self._sheaf
+
+    @property
+    def hgt(self) -> HeterogeneousGraphTransformer:
+        """Public accessor for HGT diagnostics."""
+        return self._hgt
+
+    @property
+    def boundary(self) -> AutopoieticBoundary:
+        """Public accessor for embodiment-boundary telemetry."""
+        return self._boundary
+
+    @property
+    def latest_timing_ns(self) -> int:
+        """Most recent end-to-end computation duration."""
+        return int(self._timings[-1]) if self._timings else 0
+
     # ------------------------------------------------------------------
-    # Methods ported from ComputationSpine for full compatibility
+    # Public embodiment controls
     # ------------------------------------------------------------------
 
     def embodiment_bounds(self) -> dict[str, float] | None:

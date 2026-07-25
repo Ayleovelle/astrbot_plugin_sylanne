@@ -143,6 +143,25 @@ def test_runtime_quarantines_malformed_json(tmp_path: Path) -> None:
     assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == SCHEMA_VERSION
 
 
+def test_resonance_is_the_only_computation_backend() -> None:
+    from sylanne_alpha._engine.sylanne_core.compute.kernel import AlphaKernel
+    from sylanne_alpha._engine.sylanne_core.compute.resonance_integration import (
+        ResonanceSpine,
+    )
+
+    kernel = AlphaKernel.boot("s")
+    source = inspect.getsource(
+        importlib.import_module("sylanne_alpha._engine.sylanne_core.compute.kernel")
+    )
+
+    assert type(kernel.computation) is ResonanceSpine
+    assert importlib.util.find_spec(
+        "sylanne_alpha._engine.sylanne_core.compute.computation_spine"
+    ) is None
+    assert "ComputationSpine" not in source
+    assert "except ImportError" not in source
+
+
 # ---- 两条管线的 v1 逐轮认知调用点已彻底删除（源级证明，仿 repo 既有手法）----
 
 def test_request_pipeline_has_no_v1_run_cycle() -> None:

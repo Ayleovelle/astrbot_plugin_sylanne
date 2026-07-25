@@ -3338,9 +3338,7 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
             sum(sample_bits) / max(len(sample_bits), 1) if sample_bits else 0.0,
         )
         # L5 MoE-HGT rich diagnostics
-        hgt = getattr(comp, "hgt", None) or getattr(comp, "_hgt", None)
-        if hgt is None:
-            raise AttributeError("computation spine exposes no HGT component")
+        hgt = comp.hgt
         _hgt_attn = getattr(hgt, "_last_attention_weights", [])
         _hgt_experts = getattr(hgt, "_last_active_experts", [])
         _hgt_gates = getattr(hgt, "_last_gate_values", [])
