@@ -178,7 +178,7 @@ def test_assessment_dispatch_uses_local_state_without_calling_fast_llm() -> None
             }
         ),
         expression=SimpleNamespace(state=lambda: {"intensity": 0.0}),
-        _sheaf=None,
+        sheaf=SimpleNamespace(observe=lambda: {}),
         _last_assessment=None,
     )
     plugin._host = lambda _session_key: SimpleNamespace(  # type: ignore[attr-defined]
