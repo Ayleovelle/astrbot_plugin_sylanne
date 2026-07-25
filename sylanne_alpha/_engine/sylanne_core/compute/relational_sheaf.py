@@ -1,18 +1,7 @@
-"""关系层析（Relational Sheaf Theory）— 计算模块。
+"""小规模关系图的矩阵传播与一致性计算。
 
-在单纯复形上实现胞腔层（cellular sheaves），用于建模多关系动力学。
-将 Scar Algebra 从单一二元关系扩展到 N 个并发关系：
-  - 通过层拉普拉斯扩散实现跨关系影响传播
-  - 通过层上同调（H^1）度量关系一致性
-  - 人格驱动的表示矩阵（presentation matrices）
-  - 能量有界传播（公理 S5）
-
-数学基础：
-- 层（Sheaf）：在拓扑空间上的"局部→全局"数据结构
-- 上同调 H^1：度量"局部一致但全局矛盾"的维度数
-- 拉普拉斯算子：驱动信息在关系网络中的扩散
-
-参考: theory/relational_sheaf/axioms.md
+该模块为多会话关系状态构建表示矩阵，计算图拉普拉斯传播和一致性指标。
+实现使用纯 Python 小矩阵运算，不依赖外部研究文档或运行时服务。
 """
 
 from __future__ import annotations

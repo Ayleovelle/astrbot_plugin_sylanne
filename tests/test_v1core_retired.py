@@ -2,8 +2,8 @@
 
 退役语义：
 - v2core 是无条件运行的唯一认知内核，不再暴露运行时关闭开关。
-- v1 逐轮认知已退役并删除：旧 9-agent SelfCore 的 PRE/POST（请求管线）与
-  RESPONSE_POST（回复管线）调用点已从源码移除；AssessorAgent 逐轮 LLM 评估随之消失；
+- v1 逐轮认知已退役并删除：旧响应式 SelfCore 请求/回复阶段调用点已从源码移除；
+  AssessorAgent 逐轮 LLM 评估随之消失；
   assessment 唯一来源是 v2core 评价（不含 intent 键 → SDK intent=="撒娇"
   硬编码路径断粮）。
 - 保留范围：自主生命基础设施（AutonomyScheduler 作息演化/深睡巩固/反思/
@@ -174,7 +174,7 @@ def test_request_pipeline_has_no_v1_run_cycle() -> None:
 
 
 def test_response_pipeline_has_no_v1_run_cycle() -> None:
-    """回复管线：SelfCore RESPONSE_POST 的 run_cycle 调用点已删除。"""
+    """回复管线：SelfCore 旧响应阶段的 run_cycle 调用点已删除。"""
     from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline
 
     src = inspect.getsource(LLMResponsePipeline._background_observe_response)

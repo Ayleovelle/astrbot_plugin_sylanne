@@ -1,10 +1,7 @@
-"""formula v2 Slice A: label-free ReactionSignalV1 constants + pure function.
+"""ReactionSignalV1 constants and pure-function contract.
 
-The t+1 user message is the real causal consequence of turn t's *executed*
-interaction, so its tone / engagement / length / latency features score how the
-user reacted without ever knowing which action the core chose.  These tests pin
-the Slice A contract from ``docs/superpowers/specs/
-2026-07-18-v3core-formula-v2-label-free-reaction-learning-spec.md`` §1.2:
+The t+1 user message is treated as feedback for turn t's executed interaction.
+These tests pin the implementation contract directly:
 
 * the reaction constants have their exact declared values and the gap-attenuator
   thresholds truly invert the encoder's ``_log_gap`` normalization;
