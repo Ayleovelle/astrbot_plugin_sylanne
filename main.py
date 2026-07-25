@@ -1314,9 +1314,9 @@ class EmotionalStatePlugin(Star):
         self._llm_response_pipeline = LLMResponsePipeline(self)
         self._llm_request_pipeline = LLMRequestPipeline(self)
         self._public_api = PublicAPI(self)
-        # SelfCore 认知编排器：仅注册 LifeAgent（唯一保留的 AUTONOMOUS 时点 agent）。
-        self._self_core = SelfCore(self, llm_budget=3)
-        self._self_core.register(LifeAgent(self, self._self_core.bus))
+        # SelfCore 自主生命周期：仅注册 LifeAgent。
+        self._self_core = SelfCore(self)
+        self._self_core.register(LifeAgent(self))
         # 全局自驱心跳（CP8-P3b）：让她没人说话也演化。initialize 启动、terminate 回收。
         self._autonomy_scheduler = AutonomyScheduler(self, self._self_core)
         # 主动发言调度器：基于身体需求和节律决定是否主动发言

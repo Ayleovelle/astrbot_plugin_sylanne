@@ -198,10 +198,10 @@ def test_v2_assessment_has_no_intent_key() -> None:
 
 
 def test_autonomy_infrastructure_not_retired() -> None:
-    """自主生命基础设施保留：AutonomyScheduler 仍然驱动 run_cycle(AUTONOMOUS)
-    （作息/巩固/反思不属逐轮认知，退役范围之外）。"""
+    """自主生命基础设施保留：AutonomyScheduler 仍驱动显式自主周期。"""
     from sylanne_alpha.agents.autonomy_scheduler import AutonomyScheduler
 
     src = inspect.getsource(AutonomyScheduler)
-    assert "run_cycle" in src        # 自主演化仍在
-    assert "v1_turn_cognition_retired" not in src   # 不被退役闸误伤
+    assert "run_autonomous_cycle" in src
+    assert "run_cycle" not in src
+    assert "v1_turn_cognition_retired" not in src

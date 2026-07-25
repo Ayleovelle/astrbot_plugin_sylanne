@@ -31,8 +31,8 @@
 死线守护（铁律④）：域状态总键 sylanne_v2core_domains:{safe} 与旧档格式兼容；
 host/body 漂移仍走插件现有文件持久化，不另起炉灶。
 
-v2core 是无条件运行的唯一认知内核（旧 SelfCore PRE/POST/RESPONSE_POST 与
-AssessorAgent 逐轮 LLM 评估已退役、删除，intent=="撒娇" 硬编码路径自然断粮）。
+v2core 是无条件运行的唯一逐轮认知内核；旧响应式 Agent 编排与逐轮 LLM 评价
+已退役、删除，intent=="撒娇" 硬编码路径自然断粮。
 任何异常 → 单轮继续下游投递管线，不阻断回复。
 """
 

@@ -1,15 +1,15 @@
 """AutonomyScheduler：全局自驱心跳（CP8-P3b）。
 
 让 Sylanne「没人说话也活着」——全局单 task 后台循环，定期：
-1. 全局演化一次：驱动 LifeAgent 的 AUTONOMOUS 时点（作息/生活事件，一个 bot 一套）。
+1. 全局演化一次：驱动 LifeAgent（作息/生活事件，一个 bot 一套）。
 2. 三态扫会话：对每个活跃会话按 AWAKE/DROWSY/RETIRED 决定是否自驱演化
-   （空 event 驱动 host 计算 + run_cycle(AUTONOMOUS)）。
+   （空 event 驱动 host 计算 + run_autonomous_cycle）。
 
 防死锁纪律（避免 3.0 回归）：
 - 单 task，while True + sleep + try/except CancelledError（对齐现有循环模式）。
 - 不用全局锁——按会话 session_lock 串行化（与 reactive 后台 observe 同锁），
   对同一会话串行、不同会话并行，无交叉等待。
-- 临界区（持锁期间）只做同步 tick + run_cycle，agent 的 LLM/IO 在 act 内可超时降级。
+- 临界区（持锁期间）只做同步 tick，自主 worker 在锁外运行。
 - RETIRED 会话移出迭代（资源归零）；用户消息经 reactive 路径自动唤醒（last_user_
   message_time 刷新 → autonomy_phase 回 AWAKE）。
 
@@ -29,8 +29,6 @@ import functools
 import logging
 import time
 from typing import TYPE_CHECKING
-
-from sylanne_alpha.agents.base import AUTONOMOUS
 
 if TYPE_CHECKING:
     from sylanne_alpha.agents.self_core import SelfCore
@@ -226,12 +224,12 @@ class AutonomyScheduler:
                 items = self._p._store.hosts.snapshot_items()
                 host = items[0][1] if items else None
             surface = host.kernel.surface() if host is not None else {}
-            await self._sc.run_cycle("default", surface, phase=AUTONOMOUS)
+            await self._sc.run_autonomous_cycle("default", surface)
         except Exception as exc:
             logger.debug("Sylanne global autonomy: %s", exc)
 
     async def _tick_session(self, session_key: str, host, now: float) -> None:
-        """单会话自驱 tick：空 event 驱动演化 + run_cycle。
+        """单会话自驱 tick：空 event 驱动演化 + 自主 worker。
 
         host.on_request(None) 跑在 executor 里防阻塞事件循环（2c2g 适配）。
         锁仍持有保证串行化，但 executor 让出 GIL 使其他协程可调度。
@@ -243,7 +241,7 @@ class AutonomyScheduler:
                 # executor 内跑纯计算，让出事件循环给 reactive 路径
                 await loop.run_in_executor(None, host.on_request, None)
                 surface = host.kernel.surface()
-            # run_cycle 在锁外：AUTONOMOUS 时点 agent 不写本会话 host
-            await self._sc.run_cycle(session_key, surface, phase=AUTONOMOUS)
+            # 自主 worker 在锁外运行，不长占本会话 host 锁。
+            await self._sc.run_autonomous_cycle(session_key, surface)
         except Exception as exc:
             logger.debug("Sylanne autonomy tick [%s]: %s", session_key, exc)

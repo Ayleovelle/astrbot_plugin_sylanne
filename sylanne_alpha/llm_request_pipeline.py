@@ -2336,13 +2336,7 @@ class LLMRequestPipeline:
     # ------------------------------------------------------------------
 
     async def _background_observe_request(self, session_key: str, text: str) -> None:
-        """后台观测用户消息：双层 LLM 评估 + 计算栈更新 + 记忆维护。
-
-        Level 1（快速）：每条消息都运行，小模型，1.5s 超时。
-        Level 2（主评估）：仅在门控路由到 "full" 时运行，强模型，3s 超时。
-
-        结果合并后（主评估覆盖快速评估）传入计算栈，精确调制 Void-Scar 状态。
-        若两者都超时，计算栈使用 HDC 粗粒度判断。
+        """后台观测用户消息：恢复进化档案、推进计算栈并维护记忆。
 
         Args:
             session_key: 会话标识。
@@ -2352,8 +2346,7 @@ class LLMRequestPipeline:
         from sylanne_alpha.host import SylanneAlphaHostEvent
 
         try:
-            # CP8-P3a：fast/main 评估已收编进 AssessorAgent（经 SelfCore PRE 调用），
-            # 此处不再直接调 assess_fast/assess_main，避免双重执行。
+            # 前台评价由 v2core PERCEPT 本地生成并暂存；此处不再同步调用 LLM。
             host = p._host(session_key)
             assessment: dict = {}
 
