@@ -618,6 +618,29 @@ def test_root_artifact_rejects_hardlink_alias_of_other_tracked_source(
     assert readme.read_bytes() == original
 
 
+def test_root_artifact_may_replace_its_tracked_checksum_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin_root = tmp_path / "plugin"
+    plugin_root.mkdir()
+    output = plugin_root / f"{package_plugin.PLUGIN_NAME}.zip"
+    checksum = output.parent / f"{output.name}.sha256"
+    output.write_bytes(b"old package")
+    checksum.write_text("old checksum\n", encoding="utf-8")
+    monkeypatch.setattr(package_plugin, "ROOT", plugin_root)
+
+    package_plugin._validate_output_targets(
+        output,
+        checksum,
+        {
+            f"{package_plugin.PLUGIN_NAME}.zip",
+            f"{package_plugin.PLUGIN_NAME}.zip.sha256",
+        },
+        None,
+    )
+
+
 def test_root_artifact_self_exception_does_not_exempt_metadata_override(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

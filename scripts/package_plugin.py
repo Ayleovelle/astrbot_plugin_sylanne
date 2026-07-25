@@ -460,16 +460,22 @@ def _validate_output_targets(
         )
 
     artifact_key = _filesystem_identity_key(ROOT / f"{PLUGIN_NAME}.zip")
+    artifact_checksum_key = f"{artifact_key}.sha256"
     output_is_root_artifact = _filesystem_identity_key(output) == artifact_key
+    checksum_is_root_sidecar = (
+        _filesystem_identity_key(checksum) == artifact_checksum_key
+    )
     protected = [
         (
             ROOT / Path(relative),
             _filesystem_identity_key(ROOT / Path(relative)) == artifact_key,
+            _filesystem_identity_key(ROOT / Path(relative))
+            == artifact_checksum_key,
         )
         for relative in sorted(tracked_sources)
     ]
     if metadata_override is not None:
-        protected.append((metadata_override, False))
+        protected.append((metadata_override, False, False))
 
     for label, target in (("output", output), ("checksum", checksum)):
         try:
@@ -483,12 +489,19 @@ def _validate_output_targets(
 
         target_key = _filesystem_identity_key(target)
         resolved_target_key = _filesystem_identity_key(_resolved_absolute(target))
-        for source, is_tracked_root_artifact in protected:
+        for source, is_tracked_root_artifact, is_tracked_root_sidecar in protected:
             source_key = _filesystem_identity_key(source)
             if (
-                label == "output"
-                and output_is_root_artifact
-                and is_tracked_root_artifact
+                (
+                    label == "output"
+                    and output_is_root_artifact
+                    and is_tracked_root_artifact
+                )
+                or (
+                    label == "checksum"
+                    and checksum_is_root_sidecar
+                    and is_tracked_root_sidecar
+                )
             ):
                 continue
             resolved_source_key = _filesystem_identity_key(_resolved_absolute(source))
