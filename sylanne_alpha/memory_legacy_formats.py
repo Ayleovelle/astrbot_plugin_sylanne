@@ -265,8 +265,8 @@ def salvage_memory_system_from_alpha_json(path: str | Path) -> dict[str, Any] | 
 
     背景：`AlphaBodyState.from_dict`（sylanne_core/compute/body.py）恢复 `memory`
     字段时只认 `relationship`/`shadow` 两个子键，其余子键（包括 `_memory_system`/
-    `traces`）会被静默丢弃——无论走 `AlphaKernel.restore()`（schema_version 匹配）
-    还是 `AlphaKernel.boot(legacy=...)` 的快路径（`data["body"]` 已存在）都一样。
+    `traces`）会被静默丢弃；当前 schema 的 `AlphaKernel.restore()` 也遵循这条白名单。
+    schema 不匹配的快照不会再导入，原文件保持不动供这条只读救援路径检查。
     这意味着一旦 KV 主路径丢失，唯一还留着的"body 文件里的记忆救援副本"在下一次
     kernel 重建时就会被这个白名单悄悄吃掉——必须绕开 kernel 的反序列化，直接读
     裸 JSON 文件本身。

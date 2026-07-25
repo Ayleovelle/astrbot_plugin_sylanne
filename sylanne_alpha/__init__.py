@@ -5,7 +5,6 @@
 sylanne_alpha 计算模块已删除：
 - AlphaBodyState: 身体状态模型
 - SylanneAlphaHost / SylanneAlphaHostEvent: 会话宿主（host.py 的共振场子类/重导出）
-- import_legacy_body: 旧版数据迁移导入器
 - AlphaKernel / AlphaKernelEvent: 计算核心调度器及其事件
 - AlphaRuntime: 文件系统持久化运行时
 """
@@ -13,7 +12,6 @@ sylanne_alpha 计算模块已删除：
 from __future__ import annotations
 
 from sylanne_alpha._engine.sylanne_core.compute.body import AlphaBodyState
-from sylanne_alpha._engine.sylanne_core.compute.importer import import_legacy_body
 from sylanne_alpha._engine.sylanne_core.compute.kernel import (
     AlphaKernel,
     AlphaKernelEvent,
@@ -26,7 +24,6 @@ __all__ = [
     "AlphaBodyState",
     "SylanneAlphaHost",
     "SylanneAlphaHostEvent",
-    "import_legacy_body",
     "AlphaKernel",
     "AlphaKernelEvent",
     "AlphaRuntime",

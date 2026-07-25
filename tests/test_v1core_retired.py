@@ -15,6 +15,7 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import json
+import logging
 from pathlib import Path
 
 def test_v2core_switch_is_absent_from_schema() -> None:
@@ -66,6 +67,80 @@ def test_engine_adapter_has_no_unused_facade() -> None:
 
     assert not hasattr(adapter, "EngineFacade")
     assert adapter.derive_should_send({"action": "reach_out"}, {"allowed": True})
+
+
+def test_legacy_snapshot_import_api_is_absent() -> None:
+    import sylanne_alpha
+    from main import EmotionalStatePlugin
+
+    assert importlib.util.find_spec(
+        "sylanne_alpha._engine.sylanne_core.compute.importer"
+    ) is None
+    assert not hasattr(sylanne_alpha, "import_legacy_body")
+    assert not hasattr(EmotionalStatePlugin, "import_sylanne_legacy")
+
+
+def test_current_runtime_has_no_legacy_constructor_surface() -> None:
+    from sylanne_alpha._engine.sylanne_core.compute.host import SylanneAlphaHost
+    from sylanne_alpha._engine.sylanne_core.compute.kernel import AlphaKernel
+    from sylanne_alpha._engine.sylanne_core.compute.runtime import AlphaRuntime
+
+    assert "legacy" not in inspect.signature(AlphaKernel.boot).parameters
+    assert "legacy" not in inspect.signature(AlphaRuntime.load).parameters
+    assert "legacy" not in inspect.signature(SylanneAlphaHost).parameters
+
+
+def test_runtime_restores_only_current_schema(tmp_path: Path) -> None:
+    from sylanne_alpha._engine.sylanne_core.compute.body import SCHEMA_VERSION
+    from sylanne_alpha._engine.sylanne_core.compute.kernel import AlphaKernel
+    from sylanne_alpha._engine.sylanne_core.compute.runtime import AlphaRuntime
+
+    runtime = AlphaRuntime(tmp_path)
+    current = AlphaKernel.boot("s")
+    current.turns = 7
+    current.body.temperature.warmth = 0.73
+    runtime.save(current)
+
+    restored = runtime.load("s")
+    assert restored.snapshot()["schema_version"] == SCHEMA_VERSION
+    assert restored.turns == 7
+    assert restored.body.temperature.warmth == 0.73
+
+
+def test_runtime_ignores_schema_mismatch_without_migrating(
+    tmp_path: Path, caplog
+) -> None:
+    from sylanne_alpha._engine.sylanne_core.compute.runtime import AlphaRuntime
+
+    runtime = AlphaRuntime(tmp_path)
+    path = runtime._path("s")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    original = '{"schema_version":"sylanne.legacy.v1","emotion":{"turns":99}}'
+    path.write_text(original, encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="sylanne_core"):
+        kernel = runtime.load("s")
+
+    assert kernel.turns == 0
+    assert path.read_text(encoding="utf-8") == original
+    assert "unsupported snapshot schema" in caplog.text.lower()
+
+
+def test_runtime_quarantines_malformed_json(tmp_path: Path) -> None:
+    from sylanne_alpha._engine.sylanne_core.compute.body import SCHEMA_VERSION
+    from sylanne_alpha._engine.sylanne_core.compute.runtime import AlphaRuntime
+
+    runtime = AlphaRuntime(tmp_path)
+    path = runtime._path("s")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    original = "{broken json"
+    path.write_text(original, encoding="utf-8")
+
+    kernel = runtime.load("s")
+    damaged = path.with_suffix(path.suffix + ".damaged")
+    assert kernel.turns == 0
+    assert damaged.read_text(encoding="utf-8") == original
+    assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == SCHEMA_VERSION
 
 
 # ---- 两条管线的 v1 逐轮认知调用点已彻底删除（源级证明，仿 repo 既有手法）----

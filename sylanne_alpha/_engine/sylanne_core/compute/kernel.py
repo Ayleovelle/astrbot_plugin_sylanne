@@ -34,7 +34,6 @@ from .attention import focus_information_flood
 from .body import SCHEMA_VERSION, AlphaBodyState
 from .computation_spine import ComputationSpine
 from .hot_pool import HotPool
-from .importer import import_legacy_body
 from .personality import drift_sylanne_traits, initial_personality
 from .prompt_surface import (
     render_diagnostics,
@@ -140,17 +139,12 @@ class AlphaKernel:
     def boot(
         cls,
         session_key: str,
-        legacy: dict[str, Any] | None = None,
         profile: DimensionProfile | None = None,
         *,
         pel_enabled: bool = False,
     ) -> AlphaKernel:
-        """从零创建或从旧版数据迁移创建 kernel。"""
-        if legacy is None:
-            kernel = cls(session_key=session_key)
-        else:
-            body, audit, turns = import_legacy_body(legacy)
-            kernel = cls(session_key=session_key, body=body, audit=audit, turns=turns)
+        """从当前配置创建全新 kernel。"""
+        kernel = cls(session_key=session_key)
         if profile is not None:
             kernel.computation = _DEFAULT_SPINE(profile=profile, pel_enabled=pel_enabled)
             kernel.hot_pool = HotPool(n_dims=profile.emotion_dim, mode=profile.mode)

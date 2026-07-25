@@ -1868,7 +1868,7 @@ class EmotionalStatePlugin(Star):
             **kwargs,
         )
 
-    # Diagnostics / Export / Import / Control
+    # Diagnostics / Export / Control
     async def sylanne_diagnostics(self, *, session_key: str) -> dict[str, Any]:
         host = self._host(session_key)
         return host.diagnostics()
@@ -1878,18 +1878,6 @@ class EmotionalStatePlugin(Star):
         snapshot = host.snapshot()
         snapshot["session_key"] = session_key
         return snapshot
-
-    async def import_sylanne_legacy(
-        self, legacy: dict[str, Any], *, session_key: str
-    ) -> dict[str, Any]:
-        root = self._config.get("sylanne_alpha_root") or str(
-            Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_NAME
-        )
-        _host_obj = SylanneAlphaHost(
-            root=root, session_key=session_key, legacy=legacy
-        )
-        self._store.set_host(session_key, _host_obj)
-        return _host_obj.snapshot()
 
     async def pause_sylanne(self, *, session_key: str) -> dict[str, Any]:
         from sylanne_alpha.state_persistence import mark_dirty

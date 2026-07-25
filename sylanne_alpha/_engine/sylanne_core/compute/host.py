@@ -76,13 +76,11 @@ class SylanneAlphaHost:
     Args:
         root: 持久化根目录路径
         session_key: 会话标识符
-        legacy: 可选的旧版 3.x 数据，用于首次迁移
         profile: 计算维度配置（lite/pro/max）
     """
 
     root: Path | str
     session_key: str = "default"
-    legacy: dict[str, Any] | None = None
     profile: DimensionProfile | None = None
     telemetry_sink: DistillationSink | None = None
     pel_enabled: bool = False
@@ -97,7 +95,7 @@ class SylanneAlphaHost:
         self.runtime = AlphaRuntime(
             Path(self.root), profile=self.profile, pel_enabled=self.pel_enabled
         )
-        self.kernel = self.runtime.load(self.session_key, legacy=self.legacy)
+        self.kernel = self.runtime.load(self.session_key)
         self.kernel.set_telemetry(self.telemetry_sink)
         self._last_flush_time = time.time()
 
