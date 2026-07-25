@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import inspect
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -209,15 +210,49 @@ def test_main_agent_done_hook_has_restore_priority() -> None:
     )
 
 
-def test_clone_tts_zero_width_stop_backfills_actual_spoken_turn_after_restore() -> None:
+def test_main_tool_respond_hook_registers_real_astrbot_event_with_priority() -> None:
+    import main
+    from astrbot.core.star.star_handler import EventType, star_handlers_registry
+
+    handler = main.EmotionalStatePlugin.on_llm_tool_respond
+    registrations = [
+        registration
+        for registration in star_handlers_registry
+        if registration.handler is handler
+    ]
+
+    assert len(registrations) == 1
+    registration = registrations[0]
+    assert registration.event_type is EventType.OnLLMToolRespondEvent
+    assert registration.extras_configs.get("priority", 0) >= 100
+
+
+def test_astrbot_direct_delivery_marks_runner_done_before_tool_respond_hook() -> None:
+    from astrbot.core import astr_agent_hooks
+    from astrbot.core.agent.runners import tool_loop_agent_runner
+
+    runner_source = Path(tool_loop_agent_runner.__file__).read_text(encoding="utf-8")
+    direct_delivery = runner_source.index("elif resp is None:")
+    done_transition = runner_source.index(
+        "self._transition_state(AgentState.DONE)",
+        direct_delivery,
+    )
+    tool_end_callback = runner_source.index(
+        "await self.agent_hooks.on_tool_end(",
+        direct_delivery,
+    )
+    hook_source = inspect.getsource(astr_agent_hooks.MainAgentHooks.on_tool_end)
+
+    assert direct_delivery < done_transition < tool_end_callback
+    assert "EventType.OnLLMToolRespondEvent" in hook_source
+
+
+def test_stopped_turn_uses_restored_context_assistant_for_atomic_backfill() -> None:
     from main import EmotionalStatePlugin
 
-    class CloneTTSEvent(_Event):
+    class StoppedEvent(_Event):
         def __init__(self, request: Any) -> None:
             super().__init__(request)
-            self._stopped = False
-
-        def stop_event(self) -> None:
             self._stopped = True
 
         def is_stopped(self) -> bool:
@@ -226,12 +261,30 @@ def test_clone_tts_zero_width_stop_backfills_actual_spoken_turn_after_restore() 
     calls: list[str] = []
     persisted: list[tuple[str, str, str]] = []
     request = _request(contexts=[])
-    event = CloneTTSEvent(request)
-    response = SimpleNamespace(role="assistant", completion_text="framework-visible reply")
-    run_context = SimpleNamespace(messages=[])
+    event = StoppedEvent(request)
+    response = SimpleNamespace(role="assistant", completion_text="\u200b")
+    run_context = SimpleNamespace(
+        messages=[
+            _Message("assistant", "旧回复"),
+            _Message("user", "完整用户问题"),
+        ]
+    )
     plugin = object.__new__(EmotionalStatePlugin)
+
+    def restore_history(*_args: Any) -> None:
+        calls.append("restore")
+        run_context.messages.append(
+            _Message(
+                "assistant",
+                [
+                    SimpleNamespace(thinking="不应进入正文"),
+                    SimpleNamespace(text="恢复后的实际回复"),
+                ],
+            )
+        )
+
     plugin._llm_response_pipeline = SimpleNamespace(
-        on_agent_done=lambda *_args: calls.append("restore")
+        on_agent_done=restore_history
     )
     plugin._has_conversation_manager = lambda: True
     plugin._agent_was_aborted = lambda _event: False
@@ -247,23 +300,79 @@ def test_clone_tts_zero_width_stop_backfills_actual_spoken_turn_after_restore() 
         return True
 
     plugin._sync_turn_to_conv_mgr = sync_turn
-    tool_args = {
-        "text": "<thinking>不要念出这一段</thinking>\n这是实际合成并发送的语音。"
-    }
-
-    asyncio.run(plugin.on_using_llm_tool(event, "clone_tts", tool_args))
-    assert tool_args["text"] == "这是实际合成并发送的语音。"
-
-    asyncio.run(plugin._backfill_turn_if_framework_skips(event, response))
-    assert persisted == []
-
-    response.completion_text = "\u200b"
-    event.stop_event()
     asyncio.run(plugin.on_agent_done(event, run_context, response))
 
     assert calls == ["restore", "persist"]
-    assert persisted == [("session", "完整用户问题", "这是实际合成并发送的语音。")]
+    assert persisted == [("session", "完整用户问题", "恢复后的实际回复")]
     assert all("\u200b" not in item for turn in persisted for item in turn)
+
+
+def test_terminal_direct_delivery_tool_finalizes_without_agent_done() -> None:
+    from main import EmotionalStatePlugin
+
+    persisted: list[tuple[str, str, str]] = []
+    event = _Event(_request(contexts=[]))
+    plugin = object.__new__(EmotionalStatePlugin)
+    plugin._has_conversation_manager = lambda: True
+    plugin._agent_was_aborted = lambda _event: False
+    plugin._agent_run_done = lambda _event: True
+    plugin._text = lambda _event: "完整用户问题"
+    plugin._session_key = lambda _event: "session"
+
+    async def sync_turn(
+        session_key: str, user_text: str, assistant_text: str
+    ) -> bool:
+        persisted.append((session_key, user_text, assistant_text))
+        return True
+
+    plugin._sync_turn_to_conv_mgr = sync_turn
+    tool_args = {
+        "text": "<thinking>不要发送</thinking>\n这是工具直接发送的正文。"
+    }
+
+    asyncio.run(plugin.on_using_llm_tool(event, "clone_tts", tool_args))
+    asyncio.run(plugin.on_llm_tool_respond(event, "clone_tts", tool_args, None))
+    asyncio.run(plugin.on_llm_tool_respond(event, "clone_tts", tool_args, None))
+
+    assert tool_args["text"] == "这是工具直接发送的正文。"
+    assert persisted == [("session", "完整用户问题", "这是工具直接发送的正文。")]
+
+
+def test_tool_respond_does_not_finalize_nonterminal_or_non_delivery_tools() -> None:
+    from main import EmotionalStatePlugin
+
+    persisted: list[tuple[str, str, str]] = []
+    event = _Event(_request(contexts=[]))
+    plugin = object.__new__(EmotionalStatePlugin)
+    plugin._has_conversation_manager = lambda: True
+    plugin._agent_was_aborted = lambda _event: False
+    plugin._agent_run_done = lambda _event: False
+    plugin._text = lambda _event: "完整用户问题"
+    plugin._session_key = lambda _event: "session"
+
+    async def sync_turn(
+        session_key: str, user_text: str, assistant_text: str
+    ) -> bool:
+        persisted.append((session_key, user_text, assistant_text))
+        return True
+
+    plugin._sync_turn_to_conv_mgr = sync_turn
+    tool_args = {"text": "正文"}
+
+    asyncio.run(plugin.on_using_llm_tool(event, "clone_tts", tool_args))
+    asyncio.run(plugin.on_llm_tool_respond(event, "clone_tts", tool_args, None))
+    plugin._agent_run_done = lambda _event: True
+    asyncio.run(
+        plugin.on_llm_tool_respond(
+            event,
+            "clone_tts",
+            tool_args,
+            SimpleNamespace(error="tool failed"),
+        )
+    )
+    asyncio.run(plugin.on_llm_tool_respond(event, "write_file", tool_args, None))
+
+    assert persisted == []
 
 
 def test_astrbot_runs_restore_before_a_priority_zero_handler_stops(

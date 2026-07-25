@@ -136,6 +136,12 @@ except ImportError:
 
             return decorator
 
+        def on_llm_tool_respond(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
         def event_message_type(self, *args, **kwargs):
             def decorator(func):
                 return func
@@ -411,6 +417,14 @@ def _optional_stream_chunk_filter(**kwargs: Any):
 def _optional_tool_use_filter(**kwargs: Any):
     """AstrBot 部分版本 filter 无 on_using_llm_tool → 直通注册（不挂钩子，降级为无操作）。"""
     dec = getattr(filter, "on_using_llm_tool", None)
+    if dec is None:
+        return lambda f: f
+    return dec(**kwargs)
+
+
+def _optional_tool_respond_filter(**kwargs: Any):
+    """AstrBot 旧版本无 on_llm_tool_respond 时安全降级为不注册该钩子。"""
+    dec = getattr(filter, "on_llm_tool_respond", None)
     if dec is None:
         return lambda f: f
     return dec(**kwargs)
@@ -2261,43 +2275,67 @@ class EmotionalStatePlugin(Star):
             logger.warning(f"Sylanne on_agent_done scrub failed: {e}", exc_info=True)
 
         try:
-            stopped = bool(event.is_stopped()) if hasattr(event, "is_stopped") else False
-            role = getattr(response, "role", "assistant") or "assistant"
-            completion = getattr(response, "completion_text", "") or ""
-            get_extra = getattr(event, "get_extra", None)
-            spoken_text = (
-                get_extra(self._SPEECH_TEXT_EXTRA, "") if callable(get_extra) else ""
+            assistant_text = self._canonical_assistant_text(run_context, response)
+            await self._backfill_turn_if_framework_skips(
+                event,
+                response,
+                assistant_override=assistant_text,
             )
-            has_visible_completion = isinstance(completion, str) and any(
-                char.isprintable() and not char.isspace() for char in completion
-            )
-            has_visible_speech = isinstance(spoken_text, str) and any(
-                char.isprintable() and not char.isspace() for char in spoken_text
-            )
-            if (
-                stopped
-                and response is not None
-                and role == "assistant"
-                and isinstance(completion, str)
-                and bool(completion)
-                and not has_visible_completion
-                and has_visible_speech
-            ):
-                await self._backfill_turn_if_framework_skips(
-                    event,
-                    response,
-                    assistant_override=spoken_text,
-                )
         except Exception as e:
             logger.warning(
-                f"Sylanne on_agent_done spoken-turn backfill failed: {e}",
+                f"Sylanne on_agent_done turn finalization failed: {e}",
                 exc_info=True,
             )
 
     # 只对"把文本念出来/发出去"类工具清理 text 参数（白名单）。绝不碰 FileWrite/
     # FileEdit 的 content、execute_python 的 code 等——那些 strip/截断会静默写坏文件/代码。
-    _SPEECH_TOOL_NAMES = ("clone_tts", "tts", "send_message_to_user", "send_message")
-    _SPEECH_TEXT_EXTRA = "_syl_spoken_tool_text"
+    _DIRECT_DELIVERY_TOOL_NAMES = (
+        "clone_tts",
+        "tts",
+        "send_message_to_user",
+        "send_message",
+    )
+    _DIRECT_DELIVERY_EXTRA = "_syl_direct_delivery"
+
+    @staticmethod
+    def _visible_text(value: Any) -> str:
+        if not isinstance(value, str):
+            return ""
+        return value if any(c.isprintable() and not c.isspace() for c in value) else ""
+
+    def _assistant_content_text(self, content: Any) -> str:
+        if isinstance(content, str):
+            return self._visible_text(content)
+        if not isinstance(content, (list, tuple)):
+            return ""
+        parts: list[str] = []
+        for part in content:
+            value = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
+            if isinstance(value, str):
+                parts.append(value)
+        return self._visible_text("".join(parts))
+
+    def _canonical_assistant_text(self, run_context: Any, response: Any) -> str:
+        messages = getattr(run_context, "messages", None)
+        if isinstance(messages, (list, tuple)):
+            for message in reversed(messages):
+                if isinstance(message, dict):
+                    role = message.get("role", "")
+                    content = message.get("content", "")
+                else:
+                    role = getattr(message, "role", "")
+                    content = getattr(message, "content", "")
+                if role == "user":
+                    break
+                if role == "assistant" and (
+                    text := self._assistant_content_text(content)
+                ):
+                    return text
+
+        role = getattr(response, "role", "assistant") or "assistant"
+        if role != "assistant":
+            return ""
+        return self._visible_text(getattr(response, "completion_text", ""))
 
     @_optional_tool_use_filter(desc="语音/发言类工具调用前清理 text（防 thinking 进 TTS）")
     async def on_using_llm_tool(self, event: Any, tool: Any, tool_args: Any) -> None:
@@ -2305,7 +2343,7 @@ class EmotionalStatePlugin(Star):
         text）时，绕过了 on_llm_response 的剥离。这里在工具执行【前】就地清理。tool_args 是
         executor 实际消费的同一 dict（tool_loop_agent_runner:1075/1083 验证），就地改即生效。
 
-        【白名单】只处理 _SPEECH_TOOL_NAMES——别的工具（文件写入/代码执行）的文本参数原样
+        【白名单】只处理 _DIRECT_DELIVERY_TOOL_NAMES——别的工具（文件写入/代码执行）的文本参数原样
         放过，否则 strip/截断会静默写坏文件（M3 审查）。
         - 剥 thinking/draft 块：核心安全项——别让内心独白被念成语音/发出去。
         - 极端超长才句末截断：TTS 只长度有害（数分钟音频）。strip 后为空则不写回（n1）。
@@ -2314,7 +2352,7 @@ class EmotionalStatePlugin(Star):
             if not isinstance(tool_args, dict) or not tool_args:
                 return
             tool_name = tool if isinstance(tool, str) else str(getattr(tool, "name", "") or "")
-            if tool_name not in self._SPEECH_TOOL_NAMES:
+            if tool_name not in self._DIRECT_DELIVERY_TOOL_NAMES:
                 return  # 非语音/发言类工具：一概不碰，避免误伤文件/代码参数
             from sylanne_alpha.message_dispatch import strip_draft_blocks, truncate_at_sentence
 
@@ -2342,10 +2380,59 @@ class EmotionalStatePlugin(Star):
                 spoken_text = cleaned
             set_extra = getattr(event, "set_extra", None)
             if spoken_text and callable(set_extra):
-                set_extra(self._SPEECH_TEXT_EXTRA, spoken_text)
+                set_extra(self._DIRECT_DELIVERY_EXTRA, (tool_name, spoken_text))
         except Exception as e:
             # 安全闸降级必须可见（m1）：不静默吞到 debug
             logger.warning(f"Sylanne on_using_llm_tool clean failed: {e}", exc_info=True)
+
+    @_optional_tool_respond_filter(
+        priority=1000,
+        desc="直接发言工具返回后终结本轮历史",
+    )
+    async def on_llm_tool_respond(
+        self,
+        event: Any,
+        tool: Any = None,
+        tool_args: Any = None,
+        tool_result: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """直接发言工具终结后，补齐框架不会保存的完整回合。"""
+        try:
+            if tool_result is not None:
+                return
+            tool_name = (
+                tool if isinstance(tool, str) else str(getattr(tool, "name", "") or "")
+            )
+            if tool_name not in self._DIRECT_DELIVERY_TOOL_NAMES:
+                return
+            if self._agent_run_done(event) is not True:
+                return
+
+            get_extra = getattr(event, "get_extra", None)
+            delivery = (
+                get_extra(self._DIRECT_DELIVERY_EXTRA) if callable(get_extra) else None
+            )
+            if not (
+                isinstance(delivery, tuple)
+                and len(delivery) == 2
+                and delivery[0] == tool_name
+            ):
+                return
+            assistant_text = self._visible_text(delivery[1])
+            if not assistant_text:
+                return
+            await self._backfill_turn_if_framework_skips(
+                event,
+                None,
+                assistant_override=assistant_text,
+            )
+        except Exception as e:
+            logger.warning(
+                f"Sylanne on_llm_tool_respond turn finalization failed: {e}",
+                exc_info=True,
+            )
 
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: Any, *args: Any, **kwargs: Any) -> None:
