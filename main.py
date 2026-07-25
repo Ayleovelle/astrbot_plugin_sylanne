@@ -94,6 +94,12 @@ except ImportError:
 
             return decorator
 
+        def on_agent_begin(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
         def on_agent_done(self, *args, **kwargs):
             def decorator(func):
                 return func
@@ -370,7 +376,6 @@ class _StateInjectionBudget:
         "compat_mode",
         "injected",
         "skipped",
-        "model_hint",
         "max_added_chars",
         "max_parts",
         "added_chars",
@@ -379,12 +384,11 @@ class _StateInjectionBudget:
         "context_owner",
     )
 
-    def __init__(self, session_key: str = "", model_hint: str = ""):
+    def __init__(self, session_key: str = ""):
         self.session_key = session_key
         self.compat_mode = ""
         self.injected: list[dict[str, Any]] = []
         self.skipped: list[dict[str, Any]] = []
-        self.model_hint = model_hint
         self.max_added_chars: int = 2400
         self.max_parts: int = 8
         self.added_chars: int = 0
@@ -416,6 +420,15 @@ def _optional_agent_done_filter(**kwargs: Any):
     """AstrBot 旧版本无 on_agent_done 时安全降级为不注册该钩子。"""
 
     dec = getattr(filter, "on_agent_done", None)
+    if dec is None:
+        return lambda f: f
+    return dec(**kwargs)
+
+
+def _optional_agent_begin_filter(**kwargs: Any):
+    """AstrBot 旧版本无 on_agent_begin 时安全降级为不注册该钩子。"""
+
+    dec = getattr(filter, "on_agent_begin", None)
     if dec is None:
         return lambda f: f
     return dec(**kwargs)
@@ -2104,7 +2117,6 @@ class EmotionalStatePlugin(Star):
         message_text: str,
         session_key: str,
         realtime_enabled: bool,
-        hajide: bool,
         intercept: bool,
     ) -> None:
         return await self._llm_request_pipeline._process_llm_request_final(
@@ -2113,12 +2125,8 @@ class EmotionalStatePlugin(Star):
             message_text,
             session_key,
             realtime_enabled,
-            hajide,
             intercept,
         )
-
-    async def _get_model_hint(self, event: Any = None) -> str:
-        return await self._llm_request_pipeline._get_model_hint(event)
 
     def _schedule_buffer_persist(self, session_key: str) -> None:
         self._state_persistence.schedule_buffer_persist(session_key)
@@ -2217,7 +2225,26 @@ class EmotionalStatePlugin(Star):
             logger.error(f"Sylanne on_llm_response error: {e}", exc_info=True)
             return
 
-    @_optional_agent_done_filter()
+    @_optional_agent_begin_filter()
+    async def on_agent_begin(
+        self,
+        event: Any,
+        run_context: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """在 provider 调用前建立不写穿透会话 DB 的临时历史视图。"""
+
+        try:
+            self._llm_response_pipeline.on_agent_begin(event, run_context)
+        except Exception as e:
+            logger.warning(
+                f"Sylanne on_agent_begin history projection failed: {e}",
+                exc_info=True,
+            )
+
+    # 必须先于可能 stop 的普通 hook 恢复 provider-only 历史。
+    @_optional_agent_done_filter(priority=1000)
     async def on_agent_done(
         self,
         event: Any,
@@ -2744,34 +2771,13 @@ class EmotionalStatePlugin(Star):
     async def _observatory_route_handler(self) -> dict[str, Any]:
         return await self._public_api._observatory_route_handler()
 
-    # Claude/hajide compat stubs (minimal implementation)
+    # State injection budget
     def _state_injection_budget_for_request(
-        self, session_key: str, request: Any, model_hint: str = ""
+        self, session_key: str, request: Any
     ) -> _StateInjectionBudget:
         return self._llm_response_pipeline._state_injection_budget_for_request(
-            session_key, request, model_hint
+            session_key, request
         )
-
-    def _append_temp_text_part(
-        self,
-        request: Any,
-        text: str,
-        source: str = "",
-        budget: _StateInjectionBudget | None = None,
-    ) -> bool:
-        return self._llm_response_pipeline._append_temp_text_part(
-            request, text, source, budget
-        )
-
-    def _normalize_claude_request_payload(
-        self, request: Any, budget: _StateInjectionBudget | None = None
-    ) -> None:
-        self._llm_response_pipeline._normalize_claude_request_payload(request, budget)
-
-    def _prune_hajide_tools(
-        self, request: Any, budget: _StateInjectionBudget | None = None
-    ) -> None:
-        self._llm_response_pipeline._prune_hajide_tools(request, budget)
 
     # Text extraction from event
     def _text(self, event: Any) -> str:
@@ -3394,14 +3400,6 @@ class EmotionalStatePlugin(Star):
         if cfg.get("benchmark_enable_simulated_time"):
             return time.time() + float(cfg.get("benchmark_time_offset_seconds", 0.0))
         return time.time()
-
-    def _request_model_hint_text(self, event: Any = None) -> str:
-        return ""
-
-    async def _request_model_hint_for_event(
-        self, event: Any = None, request: Any = None
-    ) -> str:
-        return await self._get_model_hint(event)
 
     def _request_to_text(self, request: Any) -> str:
         if request is None:

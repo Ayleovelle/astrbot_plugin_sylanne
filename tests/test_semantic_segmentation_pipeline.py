@@ -148,6 +148,6 @@ def test_main_registers_history_scrub_and_final_plain_leak_guard() -> None:
     source = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
 
     assert "def _optional_agent_done_filter" in source
-    assert "@_optional_agent_done_filter()" in source
+    assert "@_optional_agent_done_filter(priority=1000)" in source
     assert "self._llm_response_pipeline.on_agent_done(event, run_context, response)" in source
     assert "self._llm_response_pipeline.scrub_owned_semantic_markers(" in source

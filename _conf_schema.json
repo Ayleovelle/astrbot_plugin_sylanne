@@ -268,12 +268,6 @@
     "default": true,
     "hint": "默认开启。当 AstrBot 自带的群聊上下文感知功能已启用时，自动跳过 Sylanne 的 shadow buffer 注入以避免重复上下文。社交场计算不受影响。"
   },
-  "sylanne_alpha_hajide_compat_mode": {
-    "description": "哈基德模型兼容（影响 prompt 构建和响应处理）",
-    "type": "bool",
-    "default": false,
-    "hint": "仅在使用 Hajide 前端时开启；会调整 system prompt 格式和响应后处理逻辑。"
-  },
   "sylanne_alpha_main_assessor_enabled": {
     "description": "启用主评估器（深度情感分析，后台异步）",
     "type": "bool",

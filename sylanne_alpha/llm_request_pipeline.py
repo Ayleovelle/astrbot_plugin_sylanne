@@ -401,8 +401,9 @@ def sanitize_tool_call_pairing(contexts: Any) -> Any:
 # conversation_manager 历史（core/chat_flow.py._finalize_and_reschedule →
 # add_message_pair 里的 user_prompt 就是这个模板本身，不是真实用户文本），
 # 此后每一轮对话都会把它当成用户历史发言原样喂回 LLM，逐轮累积、毒化后续
-# 上下文。该插件是外部代码，不可改；只能在我们自己读取 request.contexts 时
-# 把这类条目替换成中性占位。只做精确签名前缀匹配（不做宽松包含匹配）：
+# 上下文。该插件是外部代码，不可改；只能在 on_agent_begin 的临时 provider
+# 历史视图里把这类条目替换成中性占位，禁止改写 request.contexts。只做精确
+# 签名前缀匹配（不做宽松包含匹配）：
 # 真实用户文本几乎不可能恰好以这个字面量开头，误伤概率可忽略。
 _PROACTIVE_TEMPLATE_SIGNATURE = "[系统任务：主动对话]"
 _PROACTIVE_TEMPLATE_PLACEHOLDER = "（她此前主动发来过一条消息）"
@@ -424,6 +425,9 @@ def _ctx_leading_text(content: Any) -> str:
                 # .get("text") or "" ——键存在但值为 None 时 .get("text", "") 会
                 # 返回 None，str(None) == "None" 混进比较字符串，污染签名匹配。
                 return str(block.get("text") or "")
+            block_text = getattr(block, "text", None)
+            if isinstance(block_text, str):
+                return block_text
     return ""
 
 
@@ -799,20 +803,9 @@ class LLMRequestPipeline:
             logger.debug("Sylanne _most_recent_intimate_host_key failed: %s", exc)
             return ""
 
-    def _cache_system_prompt(
-        self, request: Any, session_key: str, raw_system_prompt: str | None = None
-    ) -> None:
-        """按 session 缓存最近一次非空 system prompt，供生命模拟器复用。
-
-        `raw_system_prompt` 用于在请求归一化前捕获原始人格描述，避免
-        hajide 兼容层把用户内容展平进 `request.system_prompt` 后污染缓存。
-        """
-        source = (
-            raw_system_prompt
-            if raw_system_prompt is not None
-            else getattr(request, "system_prompt", "")
-        )
-        system_prompt = str(source or "").strip()
+    def _cache_system_prompt(self, request: Any, session_key: str) -> None:
+        """按 session 缓存最近一次非空 system prompt，供生命模拟器复用。"""
+        system_prompt = str(getattr(request, "system_prompt", "") or "").strip()
         if system_prompt:
             self._p._cached_system_prompts[session_key] = system_prompt
 
@@ -1098,8 +1091,6 @@ class LLMRequestPipeline:
         # 各自维护一份不对称的判定（此前请求侧只认正规键，响应侧额外兼容别名，
         # 若用户只设别名键会导致请求侧误判两开关都关，M4a 强制关流因此漏触发）。
         realtime_enabled, intercept = realtime_flags(p.config)
-        hajide = bool((p.config or {}).get("sylanne_alpha_hajide_compat_mode"))
-
         # ---- 群聊 SFPD（社交场域感知调度）----
         # 收集社交信号 → 传入计算栈 → L7 表达层决定是否响应
         _is_group = p._social_field.is_group_context(event)
@@ -1276,7 +1267,6 @@ class LLMRequestPipeline:
             message_text,
             session_key,
             realtime_enabled,
-            hajide,
             intercept,
         )
 
@@ -1291,14 +1281,13 @@ class LLMRequestPipeline:
         message_text: str,
         session_key: str,
         realtime_enabled: bool,
-        hajide: bool,
         intercept: bool,
     ) -> None:
         """请求处理的最终阶段：注入所有上下文并组装 prompt。
 
         作为编排器调用各子方法完成：
           1. 清理/归一化 → _clean_incoming_message
-          2. 预算/模型检测 → _compute_token_budget
+          2. 预算计算 → _compute_token_budget
           3. 记忆/上下文准备 → _prepare_memory_context
           4. 情感评估 → _dispatch_assessment
           5. Prompt 组装 → _assemble_final_prompt
@@ -1347,9 +1336,9 @@ class LLMRequestPipeline:
         if request is None:
             return
 
-        # Step 2: 模型检测 + 预算计算 + 归一化
+        # Step 2: 预算计算
         budget, gap_seconds, current_prompt, time_fragment = (
-            await self._compute_token_budget(event, request, session_key, hajide)
+            await self._compute_token_budget(request, session_key)
         )
 
         # leg-2(a)：历史锚深度（req.contexts 真实历史轮数）。Step 1 已洗掉泄漏注入，
@@ -1436,7 +1425,6 @@ class LLMRequestPipeline:
             outreach_fragment=outreach_fragment,
             memory_fragment=memory_fragment,
             base_system_prompt_len=_pristine_sys_len,
-            hajide=hajide,
         )
 
         # Step 5.1: 同一次主回复调用内，请模型自行标注自然语义节拍。仅在实时
@@ -1456,21 +1444,9 @@ class LLMRequestPipeline:
         # 延续时别被旧浓文本带跑话题）已由 FocusDomain 经 system_prompt 满足，
         # 且不写回 contexts，不受写穿透影响。
 
-        # Step 6: 兜底——在所有 contexts 改写（含 hajide flatten、注入）之后，
-        # 移除破损的 tool_calls/tool 配对，防止严格 provider（DeepSeek 等）返回 400。
-        # 对所有模型生效，不受 hajide/compat 门控限制（fixes #18）。
-        try:
-            contexts = getattr(request, "contexts", None)
-            if isinstance(contexts, list) and contexts:
-                cleaned = sanitize_tool_call_pairing(contexts)
-                if len(cleaned) != len(contexts):
-                    logger.warning(
-                        f"[Sylanne] sanitized {len(contexts) - len(cleaned)} "
-                        f"orphan tool_calls/tool message(s) from contexts"
-                    )
-                    request.contexts = cleaned
-        except Exception as e:
-            logger.debug(f"Sylanne sanitize_tool_call_pairing failed: {e}")
+        # 历史清理必须等 runner.reset() 把 contexts 转成 run_context.messages 后，
+        # 在 on_agent_begin 中建立可逆的 provider-only 视图。这里禁止改写
+        # request.contexts：AstrBot 会把由它构建出的 messages 全量覆盖回会话 DB。
 
     # ------------------------------------------------------------------
     # _clean_incoming_message
@@ -1537,41 +1513,8 @@ class LLMRequestPipeline:
         realtime_enabled: bool,
         intercept: bool,
     ) -> None:
-        """清理流式状态、移除泄漏的注入消息、启动后台观测任务。"""
+        """清理流式状态并启动后台观测任务；请求历史在此保持只读。"""
         p = self._p
-
-        # 兜底清理：移除上一轮可能泄漏的 _no_save 注入
-        contexts = getattr(request, "contexts", None)
-        if contexts:
-            before_len = len(contexts)
-            request.contexts = [
-                msg for msg in contexts
-                if not (
-                    isinstance(msg, dict)
-                    and msg.get("role") == "assistant"
-                    and "[inner_context]" in str(msg.get("content", ""))
-                )
-            ]
-            leaked = before_len - len(request.contexts)
-            if leaked:
-                logger.warning(
-                    f"[Sylanne] cleaned {leaked} leaked _no_save message(s) from history"
-                )
-
-        # 兜底清理：把外部主动消息插件（astrbot_plugin_proactive_chat）泄漏进
-        # 历史的 system-task 模板"假用户话"替换成中性占位（见
-        # scrub_proactive_template_turns 文档）。converting instruction-templates
-        # to placeholders IMPROVES persisted history；只做精确签名匹配，真实
-        # 用户文本不会被误伤。
-        contexts = getattr(request, "contexts", None)
-        if contexts:
-            scrubbed, scrubbed_n = scrub_proactive_template_turns(contexts)
-            if scrubbed_n:
-                request.contexts = scrubbed
-                logger.info(
-                    f"[Sylanne] scrubbed {scrubbed_n} proactive-template turn(s) "
-                    "from history (astrbot_plugin_proactive_chat leak)"
-                )
 
         # 清理该会话的流式状态
         p._store.stream_buffers.pop(session_key, None)
@@ -1696,39 +1639,21 @@ class LLMRequestPipeline:
 
     async def _compute_token_budget(
         self,
-        event: Any,
         request: Any,
         session_key: str,
-        hajide: bool,
     ) -> tuple[Any, float, str, str]:
-        """检测模型类型、创建注入预算、归一化请求、计算 gap_seconds。
+        """创建注入预算、缓存系统提示并计算 gap_seconds。
 
         Returns:
             (budget, gap_seconds, current_prompt, time_fragment)
         """
         p = self._p
 
-        # 检测模型类型（用于 Claude 兼容性处理）
-        model_hint = ""
-        if hajide:
-            model_hint = await self._get_model_hint(event)
-
-        # 创建注入预算并在需要时规范化请求格式
-        budget = p._state_injection_budget_for_request(
-            session_key, request, model_hint=model_hint
-        )
+        budget = p._state_injection_budget_for_request(session_key, request)
         p._store.last_request_budgets.set(session_key, budget)
 
-        # 先缓存原始 system prompt，再做 Claude/hajide 归一化
-        original_system_prompt = str(getattr(request, "system_prompt", "") or "")
-
-        if hajide or budget.compat_mode:
-            p._normalize_claude_request_payload(request, budget=budget)
-
         # 缓存最近一次可复用的人格 system prompt
-        self._cache_system_prompt(
-            request, session_key, raw_system_prompt=original_system_prompt
-        )
+        self._cache_system_prompt(request, session_key)
 
         # 注入时间上下文
         time_fragment = p._time_context_fragment(session_key)
@@ -2337,7 +2262,6 @@ class LLMRequestPipeline:
         outreach_fragment: str,
         memory_fragment: str,
         base_system_prompt_len: int | None = None,
-        hajide: bool = False,
     ) -> None:
         """组装最终 prompt：系统提示注入 + 优先级预算注入 + 生命模拟器启动。
 
@@ -2345,9 +2269,6 @@ class LLMRequestPipeline:
             base_system_prompt_len: v2core/Layer-1 注入之前的 pristine 人格 system_prompt
                 长度（leg-2c）。None=未提供（单测直调）→ 跳过绝对封顶，happy path 零变化；
                 orchestrator 走真实管线时传入实测值，据以给动态注入总量兜底封顶。
-            hajide: 本轮是否走 Claude/hajide 归一化路径。归一化会把 contexts 摊平进
-                system_prompt，令"已注入量"估算把历史正文也算进去而误收紧 Layer-2（红队裁定）。
-                故绝对封顶仅在非 hajide（=无归一化，估算精确）的默认实时路径生效。
         """
         p = self._p
 
@@ -2403,10 +2324,7 @@ class LLMRequestPipeline:
         # 保证【动态注入总量】不越过 gap 感知上限。base_system_prompt_len 未提供（单测）
         # 时不封顶，happy path 字节不变。以 _LAYER2_MIN_BUDGET 兜底：即便上游片段病态
         # 超注入，也绝不把最高优先级 state/感知 槽饿死（leg-1 教训：不静默清零）。
-        # 仅非 hajide 路径生效：hajide/Claude 归一化会把历史正文摊平进 system_prompt，
-        # 令"已注入量"把历史也算进去而误收紧 Layer-2（红队裁定 MINOR）；非 hajide 无归一化、
-        # 估算精确，且是绝大多数实时流量与超注入真正要防的路径。
-        if base_system_prompt_len is not None and not hajide:
+        if base_system_prompt_len is not None:
             injected_so_far = max(
                 0,
                 len(str(getattr(request, "system_prompt", "") or ""))
@@ -2422,71 +2340,32 @@ class LLMRequestPipeline:
         unfinished_final = trimmed.pop("unfinished", "")
         inner_text = _format_inner_context(trimmed)
 
-        _compat = budget.compat_mode if budget else ""
+        # Provider-neutral injection: system_prompt is transient and leaves the
+        # persisted conversation turn structure untouched.
+        inject_parts: list[str] = []
+        if inner_text:
+            inject_parts.append(inner_text)
+        if unfinished_final:
+            inject_parts.append(f"[{_SLOT_LABELS['unfinished']}] {unfinished_final}")
 
-        if _compat == "claude_agent_owned_context":
+        if inject_parts:
+            inject_text = "\n".join(inject_parts)
+            # 此处 system_prompt 已含 v2core 心象片段；只 append，勿直接赋值覆盖。
+            sys_prompt = str(getattr(request, "system_prompt", "") or "")
+            request.system_prompt = f"{sys_prompt}\n{inject_text}".strip()
             slots_log = list(trimmed.keys())
             if unfinished_final:
                 slots_log.append("unfinished")
-            if inner_text or unfinished_final:
-                logger.debug(
-                    f"[Sylanne] injection skipped (hajide mode), "
-                    f"would-be slots=[{','.join(slots_log)}]"
-                )
-        elif _compat == "claude_advisory":
-            advisory_parts = []
-            if inner_text:
-                advisory_parts.append(inner_text)
-            if unfinished_final:
-                label = _SLOT_LABELS["unfinished"]
-                advisory_parts.append(f"[{label}] {unfinished_final}")
-            advisory_text = "\n".join(advisory_parts)
-            if advisory_text:
-                p._append_temp_text_part(
-                    request, advisory_text.strip(), source="inner_context",
-                    budget=budget,
-                )
-                logger.info(
-                    f"[Sylanne] injection (advisory): budget={total_budget} "
-                    f"slots=[{','.join(list(trimmed.keys()) + (['unfinished'] if unfinished_final else []))}] "
-                    f"chars={len(advisory_text)}"
-                )
+            logger.info(
+                f"[Sylanne] injection(system_prompt): budget={total_budget} "
+                f"slots=[{','.join(slots_log)}] "
+                f"chars={len(inject_text)}"
+            )
         else:
-            # 默认模式（含 Gemini/OpenAI 等所有非 Claude provider）：注入【并入 system_prompt】，
-            # 绝不以 role=assistant append 到 contexts 末尾。
-            #
-            # 根因修复（2026-06-14 Gemini 实测）：旧实现把 inner_context 当假 assistant 消息
-            # append 到 contexts 末尾。Gemini adapter(_prepare_conversation) 把 role=assistant
-            # 转成末尾 ModelContent——破坏"末尾应是 user turn"的生成语义，模型把这条元数据当成
-            # "自己已开口的半句话"续写，于是无视当前 user 消息(如"😋")、回头续上下文里情感最浓的
-            # 旧 assistant 长文 → 跳话题。OpenAI 同理（末尾 assistant 触发续写）。
-            # 并入 system_prompt 后：contexts 末尾保持真实 user turn，turn 结构不破；
-            # system_prompt 本就不持久化（_no_save 语义天然满足）。这与本文件 _append_temp_text_part
-            # 默认分支注释"也注入到 system_prompt 避免历史污染"一致——消除两处注入策略打架。
-            inject_parts: list[str] = []
-            if inner_text:
-                inject_parts.append(inner_text)
-            if unfinished_final:
-                inject_parts.append(f"[{_SLOT_LABELS['unfinished']}] {unfinished_final}")
-
-            if inject_parts:
-                inject_text = "\n".join(inject_parts)
-                # 此处 system_prompt 已含 v2core 心象片段；只 append，勿直接赋值覆盖。
-                sys_prompt = str(getattr(request, "system_prompt", "") or "")
-                request.system_prompt = f"{sys_prompt}\n{inject_text}".strip()
-                slots_log = list(trimmed.keys())
-                if unfinished_final:
-                    slots_log.append("unfinished")
-                logger.info(
-                    f"[Sylanne] injection(system_prompt): budget={total_budget} "
-                    f"slots=[{','.join(slots_log)}] "
-                    f"chars={len(inject_text)}"
-                )
-            else:
-                logger.debug(
-                    f"[Sylanne] no context injected "
-                    f"(prompt={len(current_prompt)} chars)"
-                )
+            logger.debug(
+                f"[Sylanne] no context injected "
+                f"(prompt={len(current_prompt)} chars)"
+            )
 
         # 兜底：若 initialize() 生命周期钩子未启动生命模拟器（幂等，已启动则跳过）
         if not getattr(p, "_life_simulator_started", False):
@@ -2494,35 +2373,6 @@ class LLMRequestPipeline:
             if callable(start_fn):
                 start_fn()
             p._start_webui_if_enabled()
-
-    # ------------------------------------------------------------------
-    # _get_model_hint
-    # ------------------------------------------------------------------
-
-    async def _get_model_hint(self, event: Any = None) -> str:
-        """获取当前聊天使用的模型标识，用于 Claude 兼容性判断。
-
-        Args:
-            event: 可选的事件对象，用于获取 unified_msg_origin。
-
-        Returns:
-            模型标识字符串（如 "claude-3-opus"），获取失败返回空字符串。
-        """
-        p = self._p
-        context = getattr(p, "context", None) or getattr(p, "_context", None)
-        if hasattr(context, "get_current_chat_provider_id"):
-            try:
-                umo = (
-                    str(getattr(event, "unified_msg_origin", "") or "") if event else ""
-                )
-                if umo:
-                    result = await context.get_current_chat_provider_id(umo=umo)
-                else:
-                    result = await context.get_current_chat_provider_id()
-                return str(result or "")
-            except Exception as e:
-                logger.debug(f"Sylanne skip: {e}")
-        return ""
 
     # ------------------------------------------------------------------
     # _background_observe_request

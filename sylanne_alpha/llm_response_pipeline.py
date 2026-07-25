@@ -5,7 +5,7 @@
   2. 实现分段回复：将长回复拆分为多条消息，模拟人类打字节奏
   3. 流式首句快速发送：在流式输出中检测到第一句完成时立即发送
   4. 后台触发记忆写入和状态更新
-  5. Claude/哈基德兼容性处理：规范化请求格式、裁剪工具列表
+  5. 控制请求载荷大小并生成状态注入预算
 
 与其他组件的关系：
   - 与 llm_request_pipeline 配对：request 注入上下文，response 处理输出
@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import random
@@ -27,7 +28,13 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
-
+from sylanne_alpha.llm_request_pipeline import (
+    _PROACTIVE_TEMPLATE_PLACEHOLDER,
+    _PROACTIVE_TEMPLATE_SIGNATURE,
+    _ctx_leading_text,
+    _ctx_role,
+    sanitize_tool_call_pairing,
+)
 from sylanne_alpha.utils import ensure_background_tasks_list, safe_ensure_future
 from sylanne_alpha.message_dispatch import (
     normalize_completion_text,
@@ -156,6 +163,7 @@ class LLMResponsePipeline:
     # 匹配 LLM 伪造的 [sylanne_xxx] 系统标签
     _RE_SYLANNE_TAG = re.compile(r"\[sylanne_[^\]]*\]")
     _SEMANTIC_CORRELATION_EXTRA = "_syl_semantic_beat_correlation"
+    _PROVIDER_HISTORY_TXN_EXTRA = "_syl_provider_history_txn"
 
     def _sanitize_response(self, text: str) -> str:
         """过滤 LLM 返回中伪造的 [sylanne_*] 系统标签。
@@ -189,6 +197,187 @@ class LLMResponsePipeline:
             return default if value is None else value
         except Exception:
             return default
+
+    @staticmethod
+    def _request_has_current_message(request: Any) -> bool:
+        """Mirror AstrBot runner.reset()'s current-message append predicate."""
+
+        return bool(
+            getattr(request, "prompt", None) is not None
+            or getattr(request, "image_urls", None)
+            or getattr(request, "audio_urls", None)
+            or getattr(request, "extra_user_content_parts", None)
+        )
+
+    @staticmethod
+    def _message_content(message: Any) -> Any:
+        if isinstance(message, dict):
+            return message.get("content")
+        return getattr(message, "content", None)
+
+    @staticmethod
+    def _proactive_placeholder_copy(message: Any) -> Any:
+        clone = copy.deepcopy(message)
+        original_content = LLMResponsePipeline._message_content(message)
+        placeholder: Any = _PROACTIVE_TEMPLATE_PLACEHOLDER
+        if isinstance(original_content, list) and isinstance(clone, dict):
+            placeholder = [{"type": "text", "text": _PROACTIVE_TEMPLATE_PLACEHOLDER}]
+        if isinstance(clone, dict):
+            clone["content"] = placeholder
+        else:
+            setattr(clone, "content", placeholder)
+        return clone
+
+    def on_agent_begin(self, event: Any, run_context: Any) -> bool:
+        """Build a reversible provider-only history view before context processing.
+
+        AstrBot persists ``run_context.messages`` after the agent finishes. Request-time
+        edits to ``request.contexts`` therefore write through to the database. This hook
+        runs after ``runner.reset()`` has built Message objects, so the provider can see a
+        cleaned projection while the original objects remain available for restoration.
+        """
+
+        messages = getattr(run_context, "messages", None)
+        request = self._event_extra(event, "provider_request", None)
+        setter = getattr(event, "set_extra", None)
+        if (
+            not isinstance(messages, list)
+            or not messages
+            or request is None
+            or not callable(setter)
+            or isinstance(
+                self._event_extra(event, self._PROVIDER_HISTORY_TXN_EXTRA, None),
+                dict,
+            )
+        ):
+            return False
+
+        original_messages = tuple(messages)
+        history_end = len(messages) - int(self._request_has_current_message(request))
+        history_end = max(0, history_end)
+        history = list(messages[:history_end])
+        current_tail = list(messages[history_end:])
+
+        projected_history: list[Any] = []
+        replacements: list[tuple[Any, Any]] = []
+        inner_hidden = 0
+        proactive_replaced = 0
+        for message in history:
+            role = _ctx_role(message)
+            leading_text = _ctx_leading_text(self._message_content(message))
+            if role == "assistant" and "[inner_context]" in leading_text:
+                inner_hidden += 1
+                continue
+            if role == "user" and leading_text.startswith(
+                _PROACTIVE_TEMPLATE_SIGNATURE
+            ):
+                try:
+                    replacement = self._proactive_placeholder_copy(message)
+                except Exception:
+                    projected_history.append(message)
+                    continue
+                projected_history.append(replacement)
+                replacements.append((replacement, message))
+                proactive_replaced += 1
+                continue
+            projected_history.append(message)
+
+        sanitized = sanitize_tool_call_pairing(projected_history)
+        if not isinstance(sanitized, list):
+            sanitized = projected_history
+        orphan_hidden = len(projected_history) - len(sanitized)
+        if not (inner_hidden or proactive_replaced or orphan_hidden):
+            return False
+
+        replacement_origins = {id(replacement): original for replacement, original in replacements}
+        projected_messages = [*sanitized, *current_tail]
+        visible_originals = tuple(
+            replacement_origins.get(id(message), message)
+            for message in projected_messages
+        )
+        txn = {
+            "request": request,
+            "original_messages": original_messages,
+            "visible_originals": visible_originals,
+            "replacements": tuple(replacements),
+        }
+
+        try:
+            setter(self._PROVIDER_HISTORY_TXN_EXTRA, txn)
+            messages[:] = projected_messages
+            conversation = getattr(request, "conversation", None)
+            if conversation is not None:
+                # AstrBot treats a positive value as authoritative even though the
+                # provider view now contains different bytes. Re-estimate this turn.
+                conversation.token_usage = 0
+        except Exception:
+            messages[:] = list(original_messages)
+            try:
+                setter(self._PROVIDER_HISTORY_TXN_EXTRA, None)
+            except Exception:
+                pass
+            logger.warning("Sylanne provider history projection failed", exc_info=True)
+            return False
+
+        logger.info(
+            "Sylanne provider history projection: proactive=%d inner=%d orphan=%d",
+            proactive_replaced,
+            inner_hidden,
+            orphan_hidden,
+        )
+        return True
+
+    def _restore_provider_history(self, event: Any, run_context: Any) -> bool:
+        """Restore only projection changes that survived AstrBot context processing."""
+
+        txn = self._event_extra(event, self._PROVIDER_HISTORY_TXN_EXTRA, None)
+        if not isinstance(txn, dict):
+            return False
+        setter = getattr(event, "set_extra", None)
+        try:
+            messages = getattr(run_context, "messages", None)
+            request = self._event_extra(event, "provider_request", None)
+            if not isinstance(messages, list) or request is not txn.get("request"):
+                return False
+
+            changed = False
+            replacements = txn.get("replacements", ())
+            replacement_by_id = {
+                id(replacement): (replacement, original)
+                for replacement, original in replacements
+            }
+            for index, message in enumerate(messages):
+                pair = replacement_by_id.get(id(message))
+                if pair is not None and message is pair[0]:
+                    messages[index] = pair[1]
+                    changed = True
+
+            visible_originals = txn.get("visible_originals", ())
+            original_messages = txn.get("original_messages", ())
+            if not isinstance(visible_originals, tuple) or not isinstance(
+                original_messages, tuple
+            ):
+                return changed
+
+            # Hidden entries are restored only when the entire pre-agent visible
+            # prefix survived by identity and in place. If ContextManager really
+            # truncated/compressed anything, fail closed and do not resurrect it.
+            if visible_originals and len(messages) >= len(visible_originals):
+                prefix_intact = all(
+                    messages[index] is original
+                    for index, original in enumerate(visible_originals)
+                )
+                if prefix_intact and len(original_messages) > len(visible_originals):
+                    suffix = list(messages[len(visible_originals):])
+                    messages[:] = [*original_messages, *suffix]
+                    changed = True
+            return changed
+        finally:
+            if callable(setter):
+                try:
+                    setter(self._PROVIDER_HISTORY_TXN_EXTRA, None)
+                except Exception:
+                    pass
 
     def _parse_semantic_response(
         self,
@@ -269,40 +458,41 @@ class LLMResponsePipeline:
         return True
 
     def on_agent_done(self, event: Any, run_context: Any, response: Any) -> bool:
-        """Replace the exact raw final assistant entry before AstrBot persists it."""
+        """Restore provider-only history and scrub the final assistant before save."""
 
+        history_changed = self._restore_provider_history(event, run_context)
         correlation = self._event_extra(event, self._SEMANTIC_CORRELATION_EXTRA, None)
         if not isinstance(correlation, dict):
-            return False
+            return history_changed
         messages = getattr(run_context, "messages", None)
         if not isinstance(messages, list):
-            return False
+            return history_changed
         for message in reversed(messages):
             if str(getattr(message, "role", "") or "") != "assistant":
                 continue
             extracted = self._message_text_slots(message)
             if extracted is None:
-                return False
+                return history_changed
             raw_text, slots = extracted
             if len(raw_text) != correlation.get("raw_chars"):
-                return False
+                return history_changed
             if self._text_digest(raw_text) != correlation.get("raw_sha256"):
-                return False
+                return history_changed
             cleaned = self.scrub_owned_semantic_markers(event, raw_text)
             cleaned = strip_draft_blocks(cleaned)
             cleaned = self._sanitize_response(cleaned)
             if len(cleaned) != correlation.get("clean_chars"):
-                return False
+                return history_changed
             if self._text_digest(cleaned) != correlation.get("clean_sha256"):
-                return False
+                return history_changed
             changed = self._replace_text_slots(slots, cleaned)
             if changed and response is not None:
                 try:
                     response.completion_text = cleaned
                 except Exception:
                     pass
-            return changed
-        return False
+            return history_changed or changed
+        return history_changed
 
     # ------------------------------------------------------------------
     # T1-02③ 身体驱动打字速度
@@ -1603,7 +1793,7 @@ class LLMResponsePipeline:
     def _cap_llm_request_payload(self, request: Any) -> None:
         """裁剪 LLM 请求载荷，确保序列化后不超过最大字符限制。
 
-        多轮渐进裁剪：先裁 extra_user_content_parts，再裁 contexts 和 messages。
+        多轮渐进裁剪：先裁 extra_user_content_parts，再裁 messages。
         """
         locked = self._p._config.get("sylanne_alpha_locked_persona_prompt")
         _locked_system = str(locked) if locked else None
@@ -1631,11 +1821,6 @@ class LLMResponsePipeline:
 
             if pass_num >= 2:
                 keep = max(4, 8 - pass_num * 2)
-                contexts = getattr(request, "contexts", None)
-                if isinstance(contexts, list) and contexts:
-                    request.contexts = self._trim_payload_list(
-                        contexts, keep_items=keep, text_limit=text_limit
-                    )
                 messages = getattr(request, "messages", None)
                 if isinstance(messages, list) and messages:
                     filtered = [m for m in messages if not isinstance(m, str)]
@@ -1718,18 +1903,12 @@ class LLMResponsePipeline:
         return {"role": "user", "content": "[sylanne_payload_context_trimmed]"}
 
     # ------------------------------------------------------------------
-    # Claude/hajide compat stubs (minimal implementation)
+    # State injection budget
     # ------------------------------------------------------------------
     def _state_injection_budget_for_request(
-        self, session_key: str, request: Any, model_hint: str = ""
+        self, session_key: str, request: Any
     ) -> Any:
-        """为请求创建状态注入预算对象。
-
-        根据模型类型决定兼容模式：
-          - claude_agent_owned_context: 哈基德模式，跳过额外注入
-          - claude_advisory: Claude 建议模式，以 advisory 标记注入
-          - 默认：正常注入到 extra_user_content_parts
-        """
+        """为请求创建通用状态注入预算对象。"""
         # Access _StateInjectionBudget from the plugin's module to avoid circular import
         import sys
 
@@ -1738,297 +1917,11 @@ class LLMResponsePipeline:
         if _StateInjectionBudget is None:
             from main import _StateInjectionBudget
 
-        budget = _StateInjectionBudget(session_key=session_key, model_hint=model_hint)
+        budget = _StateInjectionBudget(session_key=session_key)
         cfg = self._p.config or {}
         budget.max_added_chars = int(cfg.get("state_injection_max_added_chars", 2400))
         budget.max_parts = int(cfg.get("state_injection_max_parts", 8))
-        hajide = bool(cfg.get("sylanne_alpha_hajide_compat_mode"))
-        is_claude = (
-            "claude" in model_hint.lower()
-            or "anthropic" in model_hint.lower()
-            or "哈基德" in model_hint
-        )
-        if hajide and is_claude:
-            budget.compat_mode = "claude_agent_owned_context"
-        elif is_claude:
-            budget.compat_mode = "claude_advisory"
         return budget
-
-    def _append_temp_text_part(
-        self,
-        request: Any,
-        text: str,
-        source: str = "",
-        budget: Any | None = None,
-    ) -> bool:
-        if budget and budget.compat_mode == "claude_agent_owned_context":
-            budget.skipped.append(
-                {"source": source, "reason": "claude_agent_owned_context"}
-            )
-            return False
-        if budget and budget.compat_mode == "claude_advisory":
-            # Claude advisory: 注入到 system_prompt（不持久化）
-            # 手册明确：request.prompt 会持久化，system_prompt 不会
-            current_sys = str(getattr(request, "system_prompt", "") or "")
-            if "[claude_advisory_context]" not in current_sys:
-                request.system_prompt = f"{current_sys}\n[claude_advisory_context]\n{text}".strip()
-            else:
-                request.system_prompt = f"{current_sys}\n{text}".strip()
-            if budget:
-                budget.injected.append({"source": source})
-            return True
-        # Normal mode: 也注入到 system_prompt 避免历史污染
-        current_sys = str(getattr(request, "system_prompt", "") or "")
-        request.system_prompt = f"{current_sys}\n{text}".strip()
-        if budget:
-            budget.injected.append({"source": source})
-        return True
-
-    def _normalize_claude_request_payload(
-        self, request: Any, budget: Any | None = None
-    ) -> None:
-        """规范化请求格式以兼容 Claude/哈基德模式。
-
-        处理内容：
-          - 将 extra_user_content_parts 展平到 prompt
-          - 将 system role 的 contexts 合并到 system_prompt
-          - 清理非标准 role 的 messages
-          - 哈基德模式下裁剪 Sylanne 工具
-        """
-        hajide = bool(self._p._config.get("sylanne_alpha_hajide_compat_mode"))
-
-        # extra_user_content_parts: 仅哈基德模式展平到 system_prompt
-        # 普通模式保留原样，尊重其他插件的持久化语义
-        if hajide:
-            extra = getattr(request, "extra_user_content_parts", None)
-            if isinstance(extra, list) and extra:
-                texts = []
-                for part in extra:
-                    if hasattr(part, "text"):
-                        texts.append(str(part.text))
-                    elif isinstance(part, dict) and "text" in part:
-                        texts.append(str(part["text"]))
-                if texts:
-                    current = str(getattr(request, "system_prompt", "") or "")
-                    request.system_prompt = f"{current}\n" + "\n".join(texts) if current else "\n".join(texts)
-                request.extra_user_content_parts = []
-
-            # contents: 仅哈基德模式展平
-            contents = getattr(request, "contents", None)
-            if isinstance(contents, list) and contents:
-                texts = []
-                for item in contents:
-                    if isinstance(item, dict) and "text" in item:
-                        texts.append(str(item["text"]))
-                    elif hasattr(item, "text"):
-                        texts.append(str(item.text))
-                if texts:
-                    current = str(getattr(request, "system_prompt", "") or "")
-                    request.system_prompt = f"{current}\n" + "\n".join(texts) if current else "\n".join(texts)
-                request.contents = []
-
-        # Flatten contexts with system role into system_prompt
-        contexts = getattr(request, "contexts", None)
-        if isinstance(contexts, list) and contexts:
-            system_parts = []
-            remaining = []
-            for ctx in contexts:
-                role = (
-                    ctx.get("role", "")
-                    if isinstance(ctx, dict)
-                    else str(getattr(ctx, "role", ""))
-                )
-                content = (
-                    ctx.get("content", "")
-                    if isinstance(ctx, dict)
-                    else str(getattr(ctx, "content", ""))
-                )
-                if role == "system":
-                    system_parts.append(content)
-                elif hajide and role in ("tool", "function"):
-                    continue
-                elif hajide and role == "assistant" and (
-                    ctx.get("tool_calls")
-                    if isinstance(ctx, dict)
-                    else getattr(ctx, "tool_calls", None)
-                ):
-                    # 对称处理：hajide 下删除 tool 响应消息时，同时移除带 tool_calls
-                    # 的 assistant，否则会留下孤儿 tool_calls 触发严格 provider 400
-                    # （与下方 messages 清洗 :760-761 对齐，fixes #18）
-                    continue
-                else:
-                    remaining.append(ctx)
-            if system_parts:
-                sys_prompt = str(getattr(request, "system_prompt", "") or "")
-                request.system_prompt = (
-                    f"{sys_prompt}\n" + "\n".join(system_parts)
-                    if sys_prompt
-                    else "\n".join(system_parts)
-                )
-            request.contexts = remaining
-
-        # Sanitize messages
-        messages = getattr(request, "messages", None)
-        if isinstance(messages, list) and messages:
-            clean = []
-            for msg in messages:
-                if isinstance(msg, dict):
-                    role = msg.get("role", "")
-                    content = msg.get("content", "")
-                    if hajide:
-                        # In hajide mode, skip tool/function messages and assistant with tool_calls
-                        if role in ("tool", "function"):
-                            continue
-                        if role == "assistant" and "tool_calls" in msg:
-                            continue
-                    # Convert system to system_prompt
-                    if role == "system":
-                        sys_prompt = str(getattr(request, "system_prompt", "") or "")
-                        request.system_prompt = (
-                            f"{sys_prompt}\n{content}" if sys_prompt else content
-                        )
-                        continue
-                    # Normalize content
-                    if isinstance(content, list):
-                        text_parts = [
-                            str(p.get("text", ""))
-                            if isinstance(p, dict)
-                            else str(getattr(p, "text", ""))
-                            for p in content
-                        ]
-                        content = "\n".join(text_parts)
-                    # Map non-standard roles to user
-                    mapped_role = role if role in ("user", "assistant") else "user"
-                    clean.append({"role": mapped_role, "content": content})
-                elif hasattr(msg, "role"):
-                    role = str(getattr(msg, "role", ""))
-                    content = getattr(msg, "content", "")
-                    if hajide and role in ("tool", "function"):
-                        continue
-                    if isinstance(content, list):
-                        text_parts = [
-                            str(p.get("text", ""))
-                            if isinstance(p, dict)
-                            else str(getattr(p, "text", ""))
-                            for p in content
-                        ]
-                        content = "\n".join(text_parts)
-                    mapped_role = role if role in ("user", "assistant") else "user"
-                    clean.append({"role": mapped_role, "content": str(content)})
-            request.messages = clean
-
-        # Hajide mode: prune sylanne tools
-        if hajide:
-            self._prune_hajide_tools(request, budget)
-
-    def _prune_hajide_tools(self, request: Any, budget: Any | None = None) -> None:
-        """哈基德兼容模式：从请求中移除 Sylanne 专用工具。
-
-        防止 Claude 模型尝试调用不存在的 Sylanne 内部工具。
-        """
-        _SYLANNE_TOOL_PREFIXES = (
-            "query_agent_state",
-            "get_bot_emotion",
-            "get_bot_integrated",
-            "get_bot_humanlike",
-            "get_bot_lifelike",
-            "get_bot_personality",
-        )
-
-        def _is_sylanne_tool(name: str) -> bool:
-            return any(name.startswith(prefix) for prefix in _SYLANNE_TOOL_PREFIXES)
-
-        # Prune tools list
-        tools = getattr(request, "tools", None)
-        if isinstance(tools, list):
-            request.tools = [
-                t
-                for t in tools
-                if not (
-                    isinstance(t, dict)
-                    and _is_sylanne_tool(t.get("function", {}).get("name", ""))
-                )
-            ]
-            if budget:
-                budget.skipped.append(
-                    {"source": "sylanne_llm_tools", "reason": "hajide_compat"}
-                )
-
-        # Prune functions list
-        functions = getattr(request, "functions", None)
-        if isinstance(functions, list):
-            request.functions = [
-                f
-                for f in functions
-                if not (isinstance(f, dict) and _is_sylanne_tool(f.get("name", "")))
-            ]
-
-        # Reset tool_choice if it pointed to a pruned tool
-        tool_choice = getattr(request, "tool_choice", None)
-        if isinstance(tool_choice, dict):
-            name = (
-                tool_choice.get("function", {}).get("name", "")
-                if isinstance(tool_choice.get("function"), dict)
-                else ""
-            )
-            if _is_sylanne_tool(name):
-                request.tool_choice = "auto"
-        elif tool_choice == "required":
-            request.tool_choice = "auto"
-
-        # Reset function_call
-        function_call = getattr(request, "function_call", None)
-        if isinstance(function_call, dict):
-            request.function_call = "auto"
-
-        # Handle nested params.extra_body
-        params = getattr(request, "params", None)
-        if isinstance(params, dict) and "extra_body" in params:
-            extra_body = params["extra_body"]
-            if isinstance(extra_body, dict):
-                if "tools" in extra_body and isinstance(extra_body["tools"], list):
-                    extra_body["tools"] = [
-                        t
-                        for t in extra_body["tools"]
-                        if not (
-                            isinstance(t, dict)
-                            and _is_sylanne_tool(t.get("function", {}).get("name", ""))
-                        )
-                    ]
-                if "tool_choice" in extra_body and isinstance(
-                    extra_body["tool_choice"], dict
-                ):
-                    extra_body["tool_choice"] = "auto"
-
-        # Handle metadata.tool_choice
-        metadata = getattr(request, "metadata", None)
-        if isinstance(metadata, dict) and "tool_choice" in metadata:
-            if isinstance(metadata["tool_choice"], dict):
-                metadata["tool_choice"] = "auto"
-
-        # Handle provider_settings.function_call
-        provider_settings = getattr(request, "provider_settings", None)
-        if isinstance(provider_settings, dict) and "function_call" in provider_settings:
-            if isinstance(provider_settings["function_call"], dict):
-                provider_settings["function_call"] = "auto"
-
-        # Disable func_tool
-        func_tool = getattr(request, "func_tool", None)
-        if func_tool is not None:
-            # Check if it has sylanne tools
-            names = []
-            if hasattr(func_tool, "names"):
-                names = func_tool.names()
-            elif hasattr(func_tool, "funcs") and isinstance(func_tool.funcs, dict):
-                names = list(func_tool.funcs.keys())
-            if names and any(_is_sylanne_tool(n) for n in names):
-                request.func_tool = None
-                if hasattr(request, "tool_choice"):
-                    request.tool_choice = "auto"
-                if budget:
-                    budget.skipped.append(
-                        {"source": "sylanne_func_tool", "reason": "hajide_compat"}
-                    )
 
     # ------------------------------------------------------------------
     # Text extraction from event

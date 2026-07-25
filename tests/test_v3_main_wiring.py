@@ -969,7 +969,7 @@ def test_capture_fires_at_the_real_request_boundary(tmp_path: Path) -> None:
         await facade.initialize(root=tmp_path / "v3")
         event, request = FakeEvent(), FakeRequest()
         await plugin._llm_request_pipeline._process_llm_request_final(
-            event, request, "hi there", "qq:GroupMessage:1", False, False, False
+            event, request, "hi there", "qq:GroupMessage:1", False, False
         )
         assert facade.pending_count == 1, "请求边界必须在 final prompt assembly 之前捕获这一轮"
         # 捕获点在 assembly 之前，但 assembly 照常发生（v3 没挡住 v2）。
@@ -991,7 +991,6 @@ def test_request_boundary_projects_v2_lexicon_cues_without_raw_text(tmp_path: Pa
             request,
             "抱抱你吗？",
             SESSION_ORIGIN,
-            False,
             False,
             False,
         )
@@ -1033,7 +1032,6 @@ def test_disabled_v3_never_imports_or_scans_lexicon(
             SESSION_ORIGIN,
             False,
             False,
-            False,
         )
         assert request.system_prompt.startswith("PERSONA")
 
@@ -1069,7 +1067,7 @@ async def _prompt_bytes(
             assert await facade.initialize(root=root) is True
         event, request = FakeEvent(), FakeRequest()
         await plugin._llm_request_pipeline._process_llm_request_final(
-            event, request, "hi there", "qq:GroupMessage:1", False, False, False
+            event, request, "hi there", "qq:GroupMessage:1", False, False
         )
         if enabled:
             assert facade.pending_count == 1, "开启时这一轮必须被捕获（否则相等是空证）"

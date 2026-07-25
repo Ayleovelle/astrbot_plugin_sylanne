@@ -19,19 +19,16 @@
 <p align="center">
   <a href="https://sylanne.app"><strong>官网</strong></a> &nbsp;·&nbsp;
   <a href="https://github.com/Ayleovelle/SylannEngine">计算引擎 SDK</a> &nbsp;·&nbsp;
-  <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne/tree/main/theory">理论</a> &nbsp;·&nbsp;
-  <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases">更新日志</a> &nbsp;·&nbsp;
-  <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/download/v1.2.0/scar_void_arxiv_paper_zh_v3.pdf">论文 (中文)</a> &nbsp;·&nbsp;
-  <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/download/v1.2.0/scar_void_arxiv_paper_v2.pdf">Paper (EN)</a>
+  <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases">更新日志</a>
 </p>
 
 > `astrbot_plugin_sylanne` 是面向 AstrBot 的长期记忆、关系状态建模与即时聊天插件，提供情感状态计算、认知编排、生活模拟、主动消息和 WebUI 管理与诊断入口。
 
 ## 项目概览
 
-Sylanne-Embodiment 将对话事件映射为可持久化的记忆、关系与表达状态，并通过 AstrBot 的 LLM 请求与响应钩子参与上下文构建、回复调度和状态更新。底层采用 **Scar Algebra（伤痕代数）**、**Void Calculus（空洞微积分）** 和 **Relational Sheaf Theory（关系层论）** 等形式化模型。
+Sylanne-Embodiment 将对话事件映射为可持久化的记忆、关系与表达状态，并通过 AstrBot 的 LLM 请求与响应钩子参与上下文构建、回复调度和状态更新。运行时由状态计算、记忆管理、关系建模、agent 编排、消息调度和持久化模块组成。
 
-项目适用于需要长期对话状态、关系建模、可配置即时聊天体验，或希望研究 agent 状态计算与记忆机制的 AstrBot 部署和开发场景。
+项目适用于需要长期对话状态、关系建模和可配置即时聊天体验的 AstrBot 部署。
 
 > [!IMPORTANT]
 > 文档中的“情绪”“人格”“伤痕”“空洞”等均为软件状态模型术语，不代表真实意识、主观体验或医学意义上的心理状态。跨群记忆、QQ 空间说说和即时聊天接管等高风险可选能力默认关闭，应按部署需要逐项启用并验证。
@@ -521,14 +518,11 @@ sylanne_alpha/
 
 ## 深入了解
 
-完整的计算架构、共振场、认知三拍编排、三层自我进化、工作流图与性能数据都在介绍网站 **[sylanne.app](https://sylanne.app)**。此外：
+部署说明、配置入口和运行状态见 **[sylanne.app](https://sylanne.app)**。此外：
 
-- [SylannEngine](https://github.com/Ayleovelle/SylannEngine) — 计算层 SDK。详细的计算理论、公理系统和 benchmark 在这个仓库。
-- [`theory/` 目录](https://github.com/Ayleovelle/astrbot_plugin_sylanne/tree/main/theory) — 三套理论的形式化推导。
-- 论文（PDF）：[中文版](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/download/v1.2.0/scar_void_arxiv_paper_zh_v3.pdf) · [English](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/download/v1.2.0/scar_void_arxiv_paper_v2.pdf) — 三套理论 + 人格闭环 + 11 组实验。
+- [SylannEngine](https://github.com/Ayleovelle/SylannEngine) — 计算层 SDK。
+- [`_conf_schema.json`](_conf_schema.json) — 完整配置定义与默认值。
 - [Releases](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases) — 各版本完整更新日志。
-
-> **相关工作：** Mopgar（2026.03）和 Hu & Rong（2026.05）讨论了后果表征与 agent 躯体化问题。本项目将形式化状态算子、缺席动力学与关系拓扑组合到同一插件架构；具体定义、假设与实验边界见 `theory/` 目录与论文。
 
 ---
 
