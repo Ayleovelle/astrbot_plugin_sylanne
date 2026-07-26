@@ -4,7 +4,7 @@
 
 ## [Unreleased]
 
-此条目对应即将发布的 `Embodiment-2.5.0`。Embodiment 命名版本与后文旧数字版本属于不同谱系，避免歧义。
+此条目对应尚未正式发布的 `Embodiment-2.5.0`。仓库元数据和历史条目里的 `2.5.0 stable` 标识仅描述目标制品身份，不代表 GitHub Release 已发布。Embodiment 命名版本与后文旧数字版本属于不同谱系，避免歧义。
 
 ### Added
 
@@ -19,7 +19,7 @@
 - 常用模型配置收口为聊天模型、共享辅助文本模型和 Embedding；专用 Provider 收入高级覆盖。
 - 普通对话的即时判断改为本地 v2core 计算，不再同步调用独立评估 LLM。
 - 明确运行依赖为 AstrBot `>=4.26,<5.0.0` 与 Python `3.10–3.13`。
-- stable 包身份统一为 `2.5.0`；v3 影子路径在 stable 中关闭，不接管请求、回复或状态写入。
+- 计划发布的 stable 包版本身份为 `2.5.0`；v3 影子路径在该包中关闭，不接管请求、回复或状态写入。
 
 ### Fixed
 
@@ -28,14 +28,14 @@
 - 历史仅保存成功投递的内容；中断、过期或失败的草稿不会误写入历史。
 - 工具中间结果不再被当作最终回复启动分段；异常或空 marker 不会产生空气泡，清理后按显式换行或整条回复回退。
 - WebUI 展示真实的 L1–L7 平均/分位耗时与计数，兼容旧监控数据；默认会话选择最活跃 host，并正确显示 0 和亚毫秒值。
-- 修复中文记忆整理的处理结果与展示。
+- 修复中文摘要在定时语义整理中因分词失配而长期停留在 L1、无法按评估结果下沉 L2。
 - 修复第三方 Agent 与 TTS 接管后的历史记录。
 - 修复 AstrBot 4.26 钩子兼容、覆盖安装后的热重载和上下文隔离。
 
 ### Removed
 
-- 移除旧配置键 `sylanne_enable_v2core`、`sylanne_alpha_fast_assessor_enabled`、`sylanne_alpha_fast_assessor_provider_id` 与 `sylanne_alpha_hajide_compat_mode`；当前认知路径无需这些开关。
-- 不再自动导入退役旧核心快照；原文件保留，当前核心从新状态启动。
+- 升级后不再读取旧配置键 `sylanne_enable_v2core`、`sylanne_alpha_fast_assessor_enabled`、`sylanne_alpha_fast_assessor_provider_id` 与 `sylanne_alpha_hajide_compat_mode`；残留值不生效、可安全删除。v2core 是固定逐轮认知路径，旧快速评估 Provider 与 hajide 兼容开关不再可配置。
+- 升级前备份 AstrBot 数据目录；旧核心快照不自动转换，原文件保留，Embodiment 核心状态重新初始化；用户记忆仍由记忆模块按兼容格式处理。
 
 ## [Embodiment-2.5.0-grey.7] - 2026-07-23
 
