@@ -265,8 +265,8 @@ def spectral_l2_upper_bound(matrix: tuple) -> float:
     """``sqrt(||matrix||_1 * ||matrix||_inf)`` — an upper bound on the 2-norm."""
 
     dimension = len(matrix)
-    norm_one = max(sum(matrix[r][c] for r in range(dimension)) for c in range(dimension))
-    norm_infinity = max(sum(matrix[r]) for r in range(dimension))
+    norm_one = max(fsum(matrix[r][c] for r in range(dimension)) for c in range(dimension))
+    norm_infinity = max(fsum(matrix[r]) for r in range(dimension))
     return sqrt(norm_one * norm_infinity)
 
 

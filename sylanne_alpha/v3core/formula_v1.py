@@ -7,7 +7,7 @@ authoritative semantic revision.
 from __future__ import annotations
 
 import hashlib
-from math import inf, isfinite, sqrt
+from math import fsum, inf, isfinite, sqrt
 from types import MappingProxyType
 
 from .canonical import canonical_json_bytes
@@ -566,10 +566,10 @@ def jacobian_absolute_upper_bound() -> tuple[tuple[float, ...], ...]:
 
 JACOBIAN_ABSOLUTE_UPPER_BOUND = jacobian_absolute_upper_bound()
 _jacobian_norm_one = max(
-    sum(JACOBIAN_ABSOLUTE_UPPER_BOUND[row][column] for row in range(STATE_DIM))
+    fsum(JACOBIAN_ABSOLUTE_UPPER_BOUND[row][column] for row in range(STATE_DIM))
     for column in range(STATE_DIM)
 )
-_jacobian_norm_infinity = max(sum(row) for row in JACOBIAN_ABSOLUTE_UPPER_BOUND)
+_jacobian_norm_infinity = max(fsum(row) for row in JACOBIAN_ABSOLUTE_UPPER_BOUND)
 JACOBIAN_STABILITY_BOUND = sqrt(_jacobian_norm_one * _jacobian_norm_infinity)
 del _jacobian_norm_one, _jacobian_norm_infinity
 
@@ -722,8 +722,11 @@ def validate_formula_manifest() -> float:
     _validate_matrix_shape_and_values("Jacobian", jacobian, STATE_DIM, STATE_DIM)
     if jacobian != JACOBIAN_ABSOLUTE_UPPER_BOUND:
         raise ValueError("materialized Jacobian differs from the live formula")
-    norm_one = max(sum(jacobian[row][column] for row in range(STATE_DIM)) for column in range(STATE_DIM))
-    norm_infinity = max(sum(row) for row in jacobian)
+    norm_one = max(
+        fsum(jacobian[row][column] for row in range(STATE_DIM))
+        for column in range(STATE_DIM)
+    )
+    norm_infinity = max(fsum(row) for row in jacobian)
     bound = sqrt(norm_one * norm_infinity)
     if not _is_finite_number(JACOBIAN_STABILITY_BOUND) or bound != JACOBIAN_STABILITY_BOUND:
         raise ValueError("Jacobian bound does not match the materialized bound")
