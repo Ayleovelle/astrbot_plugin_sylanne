@@ -993,6 +993,170 @@ def test_dispatch_setup_failure_falls_back_to_framework_send(
     asyncio.run(scenario())
 
 
+def test_dispatch_task_creation_none_does_not_leak_background_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """任务创建返回 None 时也必须干净回退，后台列表不能残留 None。"""
+
+    async def scenario() -> None:
+        plugin = _Plugin(
+            tempfile.mkdtemp(prefix="rt_task_none_fallback_"),
+            _cfg(enabled=True, intercept=True),
+        )
+        pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
+        monkeypatch.setattr(
+            "sylanne_alpha.llm_response_pipeline.realtime_plan",
+            lambda *_args, **_kwargs: {
+                "message_parts": [
+                    {
+                        "index": 0,
+                        "text": "仍由框架发送",
+                        "delay_before_seconds": 0.0,
+                    }
+                ],
+                "message_count": 1,
+                "segmentation_source": "single_fallback",
+            },
+        )
+        monkeypatch.setattr(
+            "sylanne_alpha.llm_response_pipeline.safe_ensure_future",
+            lambda *_args, **_kwargs: None,
+        )
+        event = _Ev()
+        response = LLMResponse(
+            role="assistant",
+            completion_text="仍由框架发送",
+        )
+
+        await pipe._on_llm_response_inner(event, response)
+        event._result = SimpleNamespace(chain=[Plain(response.completion_text)])
+        shell = object.__new__(EmotionalStatePlugin)
+        shell._llm_response_pipeline = pipe
+        handled = await EmotionalStatePlugin._maybe_suppress_realtime_takeover(
+            shell,
+            event,
+        )
+
+        assert handled is False
+        assert [part.text for part in event.get_result().chain] == ["仍由框架发送"]
+        assert event.get_extra("_syl_realtime_takeover") is False
+        assert event.get_extra(pipe._DELIVERY_TURN_EXTRA) is None
+        assert plugin._background_tasks == []
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("eager_tasks", [False, True])
+@pytest.mark.parametrize("registry_writes_before_failure", [False, True])
+def test_dispatch_registry_failure_rolls_back_before_any_text_send(
+    monkeypatch: pytest.MonkeyPatch,
+    eager_tasks: bool,
+    registry_writes_before_failure: bool,
+) -> None:
+    """任务已创建但注册失败时，也必须取消 transport 后再交回框架。"""
+
+    async def scenario() -> None:
+        plugin = _Plugin(
+            tempfile.mkdtemp(prefix="rt_registry_fallback_"),
+            _cfg(enabled=True, intercept=True),
+        )
+        sent: list[str] = []
+        created_task: asyncio.Task[object] | None = None
+
+        class Context:
+            async def send_message(self, _origin: str, message: object) -> None:
+                chain = getattr(message, "chain", None) or getattr(
+                    message,
+                    "parts",
+                    None,
+                )
+                sent.append(str(getattr(chain[0], "text", "")) if chain else "")
+
+        class BrokenTaskRegistry:
+            def __init__(self) -> None:
+                self.value: object | None = None
+
+            def set(self, _key: str, _value: object) -> None:
+                nonlocal created_task
+                assert isinstance(_value, asyncio.Task)
+                created_task = _value
+                if registry_writes_before_failure:
+                    self.value = _value
+                raise RuntimeError("task registry unavailable")
+
+            def get(self, _key: str, default: object = None) -> object:
+                return self.value if self.value is not None else default
+
+            def pop(self, _key: str, default: object = None) -> object:
+                value = self.value
+                self.value = None
+                return value if value is not None else default
+
+        plugin.context = Context()
+        broken_registry = BrokenTaskRegistry()
+        plugin._store.segmented_tasks = broken_registry  # type: ignore[assignment]
+        pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
+        monkeypatch.setattr(
+            "sylanne_alpha.llm_response_pipeline.realtime_plan",
+            lambda *_args, **_kwargs: {
+                "message_parts": [
+                    {
+                        "index": 0,
+                        "text": "只能由框架发送",
+                        "delay_before_seconds": 0.0,
+                    }
+                ],
+                "message_count": 1,
+                "segmentation_source": "single_fallback",
+            },
+        )
+        event = _Ev()
+        response = LLMResponse(
+            role="assistant",
+            completion_text="只能由框架发送",
+        )
+
+        await pipe._on_llm_response_inner(event, response)
+        event._result = SimpleNamespace(chain=[Plain(response.completion_text)])
+        shell = object.__new__(EmotionalStatePlugin)
+        shell._llm_response_pipeline = pipe
+        loop = asyncio.get_running_loop()
+        previous_task_factory = loop.get_task_factory()
+        if eager_tasks:
+            eager_task_factory = getattr(asyncio, "eager_task_factory", None)
+            if eager_task_factory is None:
+                pytest.skip("asyncio eager task factory requires Python 3.12+")
+            loop.set_task_factory(eager_task_factory)
+        try:
+            handled = await EmotionalStatePlugin._maybe_suppress_realtime_takeover(
+                shell,
+                event,
+            )
+        finally:
+            loop.set_task_factory(previous_task_factory)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert handled is False
+        assert [part.text for part in event.get_result().chain] == ["只能由框架发送"]
+        assert sent == []
+        assert created_task is not None
+        assert created_task.done()
+        assert created_task.cancelled()
+        assert plugin._background_tasks == []
+        assert broken_registry.get("sess:realtime-decouple") is None
+        assert event.get_extra("_syl_realtime_takeover") is False
+        assert event.get_extra(pipe._DELIVERY_TURN_EXTRA) is None
+        assert (
+            plugin._store.segmented_delivery_turns.get(
+                "sess:realtime-decouple"
+            )
+            is None
+        )
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize(
     "event",
     [

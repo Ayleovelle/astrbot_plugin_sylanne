@@ -696,30 +696,81 @@ class LLMResponsePipeline:
             return False
 
         task: asyncio.Task[Any] | None = None
-        dispatch_coro = self._dispatch_segmented_parts(
-            turn.origin,
-            parts,
-            session_key=turn.session_key,
-            delivery_turn=turn,
-        )
+        background_tasks: list[asyncio.Task[Any]] | None = None
+        dispatch_ready = asyncio.Event()
+
+        async def dispatch_after_commit() -> None:
+            await dispatch_ready.wait()
+            await self._dispatch_segmented_parts(
+                turn.origin,
+                parts,
+                session_key=turn.session_key,
+                delivery_turn=turn,
+            )
+
+        dispatch_coro = dispatch_after_commit()
         try:
             task = safe_ensure_future(
                 dispatch_coro,
                 name="dispatch_segmented_parts",
             )
+            if task is None:
+                raise RuntimeError("dispatch task creation returned no task")
             turn.task = task
             turn.status = "queued"
-            # The task cannot run until this synchronous block yields, so ownership
-            # becomes visible before the first bubble can leave the process.
-            set_extra("_syl_realtime_takeover", True)
+            background_tasks = ensure_background_tasks_list(self._p)
+            background_tasks.append(task)
+            task.add_done_callback(
+                lambda completed: (
+                    self._p._background_tasks.remove(completed)
+                    if completed in self._p._background_tasks
+                    else None
+                )
+            )
+            self._p._store.segmented_tasks.set(turn.session_key, task)
+            task.add_done_callback(
+                lambda completed: self._on_segment_dispatch_done_maybe_afterthought(
+                    completed,
+                    turn.session_key,
+                    turn.origin,
+                    turn.expression_drive,
+                    delivery_turn=turn,
+                )
+            )
+            # Commit ownership only after every cancellation handle is durable.
+            # The explicit gate also makes this safe under asyncio eager task
+            # factories, where create_task() may run a coroutine immediately.
             set_extra("_syl_realtime_candidate", False)
+            set_extra("_syl_realtime_takeover", True)
             if self._event_extra(event, "_syl_realtime_takeover", False) is not True:
                 raise RuntimeError("takeover extra did not round-trip")
+            dispatch_ready.set()
         except Exception:
             if task is not None:
-                task.cancel()
+                try:
+                    task.cancel()
+                except Exception:
+                    pass
             else:
-                dispatch_coro.close()
+                try:
+                    dispatch_coro.close()
+                except Exception:
+                    pass
+            if (
+                background_tasks is not None
+                and task is not None
+            ):
+                try:
+                    background_tasks.remove(task)
+                except (ValueError, TypeError):
+                    pass
+            registry = getattr(self._p._store, "segmented_tasks", None)
+            if registry is not None and task is not None:
+                try:
+                    if registry.get(turn.session_key) is task:
+                        registry.pop(turn.session_key, None)
+                except Exception:
+                    pass
             turn.task = None
             turn.status = "failed"
             active_turns = getattr(
@@ -727,14 +778,21 @@ class LLMResponsePipeline:
                 "segmented_delivery_turns",
                 None,
             )
-            if active_turns is not None and active_turns.get(turn.session_key) is turn:
-                active_turns.pop(turn.session_key, None)
-            try:
-                set_extra(self._DELIVERY_TURN_EXTRA, None)
-                set_extra("_syl_realtime_takeover", False)
-                set_extra("_syl_realtime_candidate", False)
-            except Exception:
-                pass
+            if active_turns is not None:
+                try:
+                    if active_turns.get(turn.session_key) is turn:
+                        active_turns.pop(turn.session_key, None)
+                except Exception:
+                    pass
+            for key, value in (
+                ("_syl_realtime_takeover", False),
+                ("_syl_realtime_candidate", False),
+                (self._DELIVERY_TURN_EXTRA, None),
+            ):
+                try:
+                    set_extra(key, value)
+                except Exception:
+                    pass
             logger.warning(
                 "Sylanne realtime takeover abandoned (dispatch setup failed): "
                 "session=%s",
@@ -747,24 +805,6 @@ class LLMResponsePipeline:
             "Sylanne segmented reply activated: session=%s parts=%d",
             turn.session_key,
             len(parts),
-        )
-        ensure_background_tasks_list(self._p).append(task)
-        task.add_done_callback(
-            lambda completed: (
-                self._p._background_tasks.remove(completed)
-                if completed in self._p._background_tasks
-                else None
-            )
-        )
-        self._p._store.segmented_tasks.set(turn.session_key, task)
-        task.add_done_callback(
-            lambda completed: self._on_segment_dispatch_done_maybe_afterthought(
-                completed,
-                turn.session_key,
-                turn.origin,
-                turn.expression_drive,
-                delivery_turn=turn,
-            )
         )
         return True
 
