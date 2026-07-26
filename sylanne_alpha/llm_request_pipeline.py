@@ -51,8 +51,6 @@ except ImportError:
 
     logger = _logging.getLogger("astrbot_plugin_sylanne")  # type: ignore
 
-# 单次未完成回复注入的最大字符数，防止 prompt 过长
-_MAX_UNFINISHED_CONTEXT_CHARS = 2000
 # M8：每会话主动发言反馈 audit 保留最近条数（deque maxlen，防无界增长）。
 _DISPATCH_AUDIT_PER_SESSION = 20
 
@@ -1702,7 +1700,9 @@ class LLMRequestPipeline:
             except Exception as e:
                 logger.debug(f"Sylanne pending followup consume-on-mention skipped: {e}")
 
-        # 注入未完成回复上下文
+        # 未发送文本不是对话事实。旧实现把被取消分段的 tail 以“上一轮回复
+        # 没有说完”注回 prompt，模型会据此坚信自己已经说过用户从未看见的话。
+        # 现在只保留“发生过中断”这一身体信号，并丢弃私有草稿本身。
         unfinished = p._store.unfinished_replies.pop(session_key, "")
         unfinished_fragment = ""
         if unfinished:
@@ -1712,12 +1712,6 @@ class LLMRequestPipeline:
             )
             mark_dirty("session")
             await p._persist_kernel(session_key, host)
-            capped = unfinished[:_MAX_UNFINISHED_CONTEXT_CHARS]
-            if len(unfinished) > _MAX_UNFINISHED_CONTEXT_CHARS:
-                capped += "\n[sylanne_trimmed_fragment]"
-            unfinished_fragment = (
-                f"\n上一轮回复没有说完，以下是未发送的部分（自然续接即可）：\n{capped}"
-            )
 
         # 消费待发送的生命事件上下文
         outreach_fragment = ""

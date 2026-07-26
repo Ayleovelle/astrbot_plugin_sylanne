@@ -86,6 +86,15 @@ class _Resp:
 class _Ev:
     unified_msg_origin = "sess:convrace"
 
+    def __init__(self) -> None:
+        self._extras: dict[str, object] = {}
+
+    def set_extra(self, key: str, value: object) -> None:
+        self._extras[key] = value
+
+    def get_extra(self, key: str, default: object = None) -> object:
+        return self._extras.get(key, default)
+
 
 class _FakeEngine:
     def expression_drive(self) -> float:
@@ -213,8 +222,9 @@ def test_intercept_segmented_reply_also_skips_conv_mgr_bot_sync() -> None:
         "拦截/分段发送分支正常回复也不应再触发插件自己的 conv_mgr bot 同步"
     )
     buf = p._store.conversation_buffers.get("sess:convrace")
-    assert buf is not None and any(m.get("role") == "bot" for m in buf.messages), (
-        "跳过的只是 conv_mgr 同步这一步，conversation_buffers 仍应照常写入"
+    assert buf is None, (
+        "模型草稿不能在 transport 结算前写入 conversation_buffers；"
+        "真实送达后的写入由 on_agent_done delivery ledger 负责"
     )
 
 

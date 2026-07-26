@@ -312,17 +312,27 @@ def _fold_punctuation_only_parts(
     return tuple(folded)
 
 
-def _parts_from_authored_line_breaks(text: str) -> tuple[SemanticBeatPart, ...]:
+def _parts_from_authored_line_breaks(
+    text: str,
+    *,
+    minimum_line_breaks: int = 1,
+) -> tuple[SemanticBeatPart, ...]:
     """Use visible line breaks as bounded beats without guessing sentence boundaries."""
 
     if _has_multiline_structure(text):
         return (SemanticBeatPart(text=text, pause_before=None),)
 
-    boundaries = [
-        match
-        for match in _LINE_BREAK_PATTERN.finditer(text)
-        if text[: match.start()].strip() and text[match.end() :].strip()
-    ][:MAX_SEMANTIC_MARKERS]
+    boundaries: list[re.Match[str]] = []
+    for match in _LINE_BREAK_PATTERN.finditer(text):
+        line_break_count = len(re.findall(r"\r\n|\n|\r", match.group(0)))
+        if (
+            line_break_count >= max(1, minimum_line_breaks)
+            and text[: match.start()].strip()
+            and text[match.end() :].strip()
+        ):
+            boundaries.append(match)
+            if len(boundaries) >= MAX_SEMANTIC_MARKERS:
+                break
     if not boundaries:
         return (SemanticBeatPart(text=text, pause_before=None),)
 
@@ -343,6 +353,42 @@ def _parts_from_authored_line_breaks(text: str) -> tuple[SemanticBeatPart, ...]:
         cursor = boundary.end()
     parts.append(SemanticBeatPart(text=text[cursor:], pause_before=pause_before))
     return _fold_punctuation_only_parts(parts, clean_text=text)
+
+
+def semantic_parts_from_visible_line_breaks(
+    text: str,
+) -> tuple[SemanticBeatPart, ...]:
+    """Return safe model-authored beats after all control markers are gone."""
+
+    return _parts_from_authored_line_breaks(text)
+
+
+def _refine_parts_with_authored_line_breaks(
+    parts: tuple[SemanticBeatPart, ...],
+) -> tuple[SemanticBeatPart, ...]:
+    """Honor visible paragraph boundaries inside otherwise valid marker beats."""
+
+    refined: list[SemanticBeatPart] = []
+    for part in parts:
+        # A valid model marker already defines the beat. Refine it only when the
+        # model also authored a real paragraph break; a single CRLF may merely
+        # format one thought and must remain byte-for-byte inside that beat.
+        visible_parts = _parts_from_authored_line_breaks(
+            part.text,
+            minimum_line_breaks=2,
+        )
+        for index, visible_part in enumerate(visible_parts):
+            refined.append(
+                SemanticBeatPart(
+                    text=visible_part.text,
+                    pause_before=(
+                        part.pause_before
+                        if index == 0
+                        else visible_part.pause_before
+                    ),
+                )
+            )
+    return tuple(refined)
 
 
 def parse_semantic_completion(raw: str, *, nonce: str) -> SemanticBeatPlan:
@@ -410,6 +456,7 @@ def parse_semantic_completion(raw: str, *, nonce: str) -> SemanticBeatPlan:
         return _rejected(clean_text, "EMPTY_PART")
 
     normalized_parts = _fold_punctuation_only_parts(parts, clean_text=clean_text)
+    normalized_parts = _refine_parts_with_authored_line_breaks(normalized_parts)
 
     return SemanticBeatPlan(
         clean_text=clean_text,
@@ -429,5 +476,6 @@ __all__ = [
     "new_semantic_nonce",
     "parse_semantic_completion",
     "scrub_semantic_marker_candidates",
+    "semantic_parts_from_visible_line_breaks",
     "semantic_beat_system_contract",
 ]

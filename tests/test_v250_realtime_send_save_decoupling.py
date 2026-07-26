@@ -28,6 +28,7 @@ message.components，精确复现框架 completion_text getter/setter 的真实
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 import tempfile
 import types
@@ -171,7 +172,13 @@ def _stub_dispatch(pipe: LLMResponsePipeline) -> list:
     """把 _dispatch_segmented_parts 换成记录调用的桩（不关心真实打字节奏）。"""
     calls: list = []
 
-    async def _fake(self, origin, parts, session_key: str = "") -> None:
+    async def _fake(
+        self,
+        origin,
+        parts,
+        session_key: str = "",
+        **_kwargs: object,
+    ) -> None:
         calls.append((origin, parts, session_key))
 
     pipe._dispatch_segmented_parts = types.MethodType(_fake, pipe)  # type: ignore[method-assign]
@@ -429,8 +436,10 @@ def test_punctuation_only_semantic_beat_preserves_meaningful_dispatch_parts() ->
     )
     expected_parts = [
         "嗯…………",
-        "你说这种话的时候能不能提前通知一下\n\n我没有防备的😾",
-        "但是不许用这个当借口熬夜啊\n\n身体搞坏了我打你",
+        "你说这种话的时候能不能提前通知一下",
+        "我没有防备的😾",
+        "但是不许用这个当借口熬夜啊",
+        "身体搞坏了我打你",
     ]
     response = LLMResponse(role="assistant", completion_text=raw)
 
@@ -440,11 +449,13 @@ def test_punctuation_only_semantic_beat_preserves_meaningful_dispatch_parts() ->
     assert response.completion_text == expected
     assert len(calls) == 1
     assert calls[0][2] == "sess:realtime-decouple"
-    assert [part["index"] for part in calls[0][1]] == [0, 1, 2]
+    assert [part["index"] for part in calls[0][1]] == [0, 1, 2, 3, 4]
     assert [part["text"] for part in calls[0][1]] == expected_parts
     assert calls[0][1][0]["delay_before_seconds"] >= 0
     assert 2.75 <= calls[0][1][1]["delay_before_seconds"] <= 4.8
     assert 1.25 <= calls[0][1][2]["delay_before_seconds"] <= 2.75
+    assert 1.25 <= calls[0][1][3]["delay_before_seconds"] <= 2.75
+    assert 1.25 <= calls[0][1][4]["delay_before_seconds"] <= 2.75
 
 
 def test_tool_call_intermediate_response_never_starts_segmented_delivery() -> None:
@@ -506,6 +517,439 @@ def test_marker_on_its_own_line_keeps_history_but_not_empty_bubble_rows() -> Non
         part["text"] == part["text"].strip()
         for part in calls[0][1]
     )
+
+
+def test_rejected_marker_falls_back_to_visible_authored_line_breaks() -> None:
+    """坏控制标记只能失去控制权，不能让可见换行退化成一个巨型气泡。"""
+
+    plugin = _Plugin(
+        tempfile.mkdtemp(prefix="rt_rejected_marker_"),
+        _cfg(enabled=True, intercept=True),
+    )
+    pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
+    calls = _stub_dispatch(pipe)
+    event = _Ev()
+    event.set_extra(SEMANTIC_BEAT_NONCE_EXTRA, "A7B8C9")
+    raw = (
+        "那你现在醒了嘛笨蛋\n"
+        '<syl-beat nonce="WRONG1" pause="normal"/>\n'
+        "我又没让你秒回，就是想说一下而已"
+    )
+    response = LLMResponse(role="assistant", completion_text=raw)
+
+    _run(pipe, response, plugin, event)
+
+    assert response.completion_text == (
+        "那你现在醒了嘛笨蛋\n\n我又没让你秒回，就是想说一下而已"
+    )
+    assert len(calls) == 1
+    assert [part["text"] for part in calls[0][1]] == [
+        "那你现在醒了嘛笨蛋",
+        "我又没让你秒回，就是想说一下而已",
+    ]
+
+
+def test_interrupted_delivery_commits_only_successfully_sent_prefix_to_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """未发送尾段不能进入 AstrBot history 或 Sylanne conversation buffer。"""
+
+    async def scenario() -> None:
+        plugin = _Plugin(
+            tempfile.mkdtemp(prefix="rt_delivery_truth_"),
+            _cfg(enabled=True, intercept=True),
+        )
+        first_sent = asyncio.Event()
+        sent: list[str] = []
+
+        class Context:
+            async def send_message(self, _origin: str, message: object) -> None:
+                if isinstance(message, str):
+                    text = message
+                else:
+                    chain = getattr(message, "chain", None) or getattr(
+                        message, "parts", None
+                    )
+                    text = str(getattr(chain[0], "text", "")) if chain else ""
+                sent.append(text)
+                first_sent.set()
+
+        plugin.context = Context()
+        pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
+
+        def deterministic_plan(*_args: object, **_kwargs: object) -> dict:
+            return {
+                "message_parts": [
+                    {
+                        "index": 0,
+                        "text": "没生气啊，别瞎想，快睡",
+                        "delay_before_seconds": 0.0,
+                    },
+                    {
+                        "index": 1,
+                        "text": "我想你",
+                        "delay_before_seconds": 30.0,
+                    },
+                ],
+                "message_count": 2,
+                "segmentation_source": "model_semantic_beats",
+            }
+
+        monkeypatch.setattr(
+            "sylanne_alpha.llm_response_pipeline.realtime_plan",
+            deterministic_plan,
+        )
+        event = _Ev()
+        response = LLMResponse(
+            role="assistant",
+            completion_text="没生气啊，别瞎想，快睡\n我想你",
+        )
+
+        await pipe._on_llm_response_inner(event, response)
+        task = plugin._store.segmented_tasks.get("sess:realtime-decouple")
+        assert task is not None
+        await asyncio.wait_for(first_sent.wait(), timeout=1.0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        assistant_part = SimpleNamespace(text=response.completion_text)
+        run_context = SimpleNamespace(
+            messages=[
+                SimpleNamespace(role="user", content="你生气了吗"),
+                SimpleNamespace(role="assistant", content=[assistant_part]),
+            ]
+        )
+        shell = object.__new__(EmotionalStatePlugin)
+        shell._llm_response_pipeline = pipe
+        shell._has_conversation_manager = lambda: False
+        shell._agent_was_aborted = lambda _event: False
+        shell._agent_run_done = lambda _event: True
+
+        await EmotionalStatePlugin.on_agent_done(
+            shell,
+            event,
+            run_context,
+            response,
+        )
+        if plugin._background_tasks:
+            await asyncio.gather(*plugin._background_tasks, return_exceptions=True)
+
+        assert sent == ["没生气啊，别瞎想，快睡"]
+        assert assistant_part.text == "没生气啊，别瞎想，快睡"
+        buffer = plugin._store.conversation_buffers.get("sess:realtime-decouple")
+        assert buffer is not None
+        assert [message["text"] for message in buffer.messages] == [
+            "没生气啊，别瞎想，快睡"
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_new_inbound_message_advances_epoch_and_interrupts_active_delivery() -> None:
+    """中断必须发生在 AstrBot 会话锁之前，不能等下一轮 on_llm_request。"""
+
+    class SessionMap:
+        def __init__(self) -> None:
+            self.values: dict[str, object] = {}
+
+        def get(self, key: str, default: object = None) -> object:
+            return self.values.get(key, default)
+
+        def set(self, key: str, value: object) -> None:
+            self.values[key] = value
+
+    class Turn:
+        def __init__(self) -> None:
+            self.interrupted = False
+
+        def interrupt(self) -> None:
+            self.interrupted = True
+
+    class Event(_Ev):
+        message_str = "行"
+        message_obj = SimpleNamespace(message_id="msg-next")
+
+    turn = Turn()
+    epochs = SessionMap()
+    active_turns = SessionMap()
+    active_turns.set("sess:realtime-decouple", turn)
+    store = SimpleNamespace(
+        conversation_input_epoch=epochs,
+        segmented_delivery_turns=active_turns,
+        last_user_message_time=SessionMap(),
+        stash_authenticated_identity=lambda *_args: None,
+    )
+    shell = object.__new__(EmotionalStatePlugin)
+    shell.config = _cfg(enabled=True, intercept=True)
+    shell._config = shell.config
+    shell._store = store
+    shell._session_ctx = SimpleNamespace(
+        session_key=lambda _event: "sess:realtime-decouple",
+        resolve_authenticated_identity=lambda _event: None,
+    )
+
+    event = Event()
+    asyncio.run(EmotionalStatePlugin.on_message(shell, event))
+
+    assert event.get_extra("_syl_input_epoch") == 1
+    assert epochs.get("sess:realtime-decouple") == 1
+    assert turn.interrupted is True
+
+
+def test_full_delivery_commits_exact_visible_bubbles_as_assistant_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """模型草稿只提供计划；最终历史必须由成功 send 的气泡重建。"""
+
+    async def scenario() -> None:
+        plugin = _Plugin(
+            tempfile.mkdtemp(prefix="rt_delivery_complete_"),
+            _cfg(enabled=True, intercept=True),
+        )
+        sent: list[str] = []
+
+        class Context:
+            async def send_message(self, _origin: str, message: object) -> None:
+                chain = getattr(message, "chain", None) or getattr(
+                    message, "parts", None
+                )
+                sent.append(str(getattr(chain[0], "text", "")) if chain else "")
+
+        plugin.context = Context()
+        pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
+        monkeypatch.setattr(
+            "sylanne_alpha.llm_response_pipeline.realtime_plan",
+            lambda *_args, **_kwargs: {
+                "message_parts": [
+                    {
+                        "index": 0,
+                        "text": "第一段",
+                        "delay_before_seconds": 0.0,
+                    },
+                    {
+                        "index": 1,
+                        "text": "第二段",
+                        "delay_before_seconds": 0.0,
+                    },
+                ],
+                "message_count": 2,
+                "segmentation_source": "model_semantic_beats",
+            },
+        )
+        event = _Ev()
+        response = LLMResponse(
+            role="assistant",
+            completion_text="第一段（模型草稿边界）第二段",
+        )
+        await pipe._on_llm_response_inner(event, response)
+
+        assistant_part = SimpleNamespace(text=response.completion_text)
+        run_context = SimpleNamespace(
+            messages=[
+                SimpleNamespace(role="user", content="继续"),
+                SimpleNamespace(role="assistant", content=[assistant_part]),
+            ]
+        )
+        shell = object.__new__(EmotionalStatePlugin)
+        shell._llm_response_pipeline = pipe
+        shell._has_conversation_manager = lambda: False
+
+        await EmotionalStatePlugin.on_agent_done(
+            shell,
+            event,
+            run_context,
+            response,
+        )
+
+        assert sent == ["第一段", "第二段"]
+        assert assistant_part.text == "第一段\n第二段"
+        assert response.completion_text == "第一段\n第二段"
+        buffer = plugin._store.conversation_buffers.get(
+            "sess:realtime-decouple"
+        )
+        assert buffer is not None
+        assert [message["text"] for message in buffer.messages] == [
+            "第一段\n第二段"
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_stale_generation_sends_zero_bubbles_and_removes_assistant_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """后来的用户消息先推进 epoch 时，旧模型整段输出都不得成为已说内容。"""
+
+    async def scenario() -> None:
+        plugin = _Plugin(
+            tempfile.mkdtemp(prefix="rt_delivery_stale_"),
+            _cfg(enabled=True, intercept=True),
+        )
+        sent: list[str] = []
+
+        class Context:
+            async def send_message(self, _origin: str, message: object) -> None:
+                sent.append(str(message))
+
+        plugin.context = Context()
+        plugin._store.conversation_input_epoch.set(
+            "sess:realtime-decouple",
+            2,
+        )
+        pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
+        monkeypatch.setattr(
+            "sylanne_alpha.llm_response_pipeline.realtime_plan",
+            lambda *_args, **_kwargs: {
+                "message_parts": [
+                    {
+                        "index": 0,
+                        "text": "这条已经过期",
+                        "delay_before_seconds": 0.0,
+                    }
+                ],
+                "message_count": 1,
+                "segmentation_source": "model_semantic_beats",
+            },
+        )
+        event = _Ev()
+        event.set_extra("_syl_input_epoch", 1)
+        response = LLMResponse(
+            role="assistant",
+            completion_text="这条已经过期",
+        )
+        await pipe._on_llm_response_inner(event, response)
+
+        run_context = SimpleNamespace(
+            messages=[
+                SimpleNamespace(role="user", content="第一条用户消息"),
+                SimpleNamespace(
+                    role="assistant",
+                    content=[SimpleNamespace(text=response.completion_text)],
+                ),
+            ]
+        )
+        shell = object.__new__(EmotionalStatePlugin)
+        shell._llm_response_pipeline = pipe
+        shell._has_conversation_manager = lambda: False
+
+        await EmotionalStatePlugin.on_agent_done(
+            shell,
+            event,
+            run_context,
+            response,
+        )
+
+        assert sent == []
+        assert [message.role for message in run_context.messages] == ["user"]
+        # AstrBot uses non-empty completion_text as its save gate; the assistant
+        # draft itself is absent from run_context, so the user turn still persists.
+        assert response.completion_text == "这条已经过期"
+        assert (
+            plugin._store.conversation_buffers.get(
+                "sess:realtime-decouple"
+            )
+            is None
+        )
+
+    asyncio.run(scenario())
+
+
+def test_inbound_registration_dedups_without_killing_its_first_llm_pass() -> None:
+    """锁外 epoch 登记与锁内幂等闸必须共享同一条事件所有权。"""
+
+    class SessionMap:
+        def __init__(self) -> None:
+            self.values: dict[str, object] = {}
+
+        def get(self, key: str, default: object = None) -> object:
+            return self.values.get(key, default)
+
+        def set(self, key: str, value: object) -> None:
+            self.values[key] = value
+
+    class Event(_Ev):
+        message_obj = SimpleNamespace(message_id="same-mid")
+
+    shell = object.__new__(EmotionalStatePlugin)
+    shell._inbound_seen = {}
+    shell._store = SimpleNamespace(
+        conversation_input_epoch=SessionMap(),
+        segmented_delivery_turns=SessionMap(),
+    )
+    first = Event()
+    duplicate = Event()
+
+    shell._advance_inbound_delivery_epoch(
+        first,
+        "sess:realtime-decouple",
+    )
+    shell._advance_inbound_delivery_epoch(
+        duplicate,
+        "sess:realtime-decouple",
+    )
+
+    assert shell._inbound_dup_gate(first) is False
+    assert shell._inbound_dup_gate(duplicate) is True
+    assert (
+        shell._store.conversation_input_epoch.get(
+            "sess:realtime-decouple"
+        )
+        == 1
+    )
+
+
+def test_dispatch_setup_failure_falls_back_to_framework_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """接管提交失败时必须清掉账本/旗标，不能既拦框架又没有发送任务。"""
+
+    async def scenario() -> None:
+        plugin = _Plugin(
+            tempfile.mkdtemp(prefix="rt_setup_fallback_"),
+            _cfg(enabled=True, intercept=True),
+        )
+        pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
+        monkeypatch.setattr(
+            "sylanne_alpha.llm_response_pipeline.realtime_plan",
+            lambda *_args, **_kwargs: {
+                "message_parts": [
+                    {
+                        "index": 0,
+                        "text": "由框架正常发送",
+                        "delay_before_seconds": 0.0,
+                    }
+                ],
+                "message_count": 1,
+                "segmentation_source": "single_fallback",
+            },
+        )
+        monkeypatch.setattr(
+            "sylanne_alpha.llm_response_pipeline.safe_ensure_future",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("task setup failed")
+            ),
+        )
+        event = _Ev()
+        response = LLMResponse(
+            role="assistant",
+            completion_text="由框架正常发送",
+        )
+
+        await pipe._on_llm_response_inner(event, response)
+
+        assert response.completion_text == "由框架正常发送"
+        assert event.get_extra("_syl_realtime_takeover") is False
+        assert event.get_extra(pipe._DELIVERY_TURN_EXTRA) is None
+        assert (
+            plugin._store.segmented_delivery_turns.get(
+                "sess:realtime-decouple"
+            )
+            is None
+        )
+        assert plugin._background_tasks == []
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(

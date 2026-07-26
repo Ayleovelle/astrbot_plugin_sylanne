@@ -181,13 +181,15 @@ def test_punctuation_only_model_beat_is_folded_without_losing_boundaries() -> No
     assert plan.parts == (
         SemanticBeatPart(text="嗯…………", pause_before=None),
         SemanticBeatPart(
-            text="你说这种话的时候能不能提前通知一下\n\n我没有防备的😾",
+            text="你说这种话的时候能不能提前通知一下\n\n",
             pause_before=PauseClass.DEEP,
         ),
+        SemanticBeatPart(text="我没有防备的😾", pause_before=PauseClass.NORMAL),
         SemanticBeatPart(
-            text="但是不许用这个当借口熬夜啊\n\n身体搞坏了我打你",
+            text="但是不许用这个当借口熬夜啊\n\n",
             pause_before=PauseClass.NORMAL,
         ),
+        SemanticBeatPart(text="身体搞坏了我打你", pause_before=PauseClass.NORMAL),
     )
     assert plan.rejection_reason is None
     assert plan.clean_text == (

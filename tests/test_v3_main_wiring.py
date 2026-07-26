@@ -1353,7 +1353,9 @@ def test_fire_afterthought_passes_settle_v3_false() -> None:
     source = (root / "sylanne_alpha/llm_response_pipeline.py").read_text(encoding="utf-8")
     assert "settle_v3: bool = True" in source
     assert "settle_v3=False" in source
-    assert source.count("if settle_v3:") == 3, "三条终端路径都要受 settle_v3 门控"
+    assert source.count("if settle_v3:") == 4, (
+        "成功、异常、取消和 cooperative interrupt 四条终端路径都要受门控"
+    )
 
 
 def test_plugin_wrapper_forwards_settle_v3(tmp_path: Path) -> None:

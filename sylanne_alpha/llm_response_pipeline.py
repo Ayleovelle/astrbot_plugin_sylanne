@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
+from sylanne_alpha.delivery_ledger import SegmentedDeliveryTurn
 from sylanne_alpha.llm_request_pipeline import (
     _PROACTIVE_TEMPLATE_PLACEHOLDER,
     _PROACTIVE_TEMPLATE_SIGNATURE,
@@ -48,6 +49,7 @@ from sylanne_alpha.semantic_segmentation import (
     SemanticBeatPart,
     parse_semantic_completion,
     scrub_semantic_marker_candidates,
+    semantic_parts_from_visible_line_breaks,
 )
 from sylanne_alpha.variant_pool import (
     EMPTY_REPLY_FALLBACK_VARIANTS,
@@ -164,6 +166,7 @@ class LLMResponsePipeline:
     _RE_SYLANNE_TAG = re.compile(r"\[sylanne_[^\]]*\]")
     _SEMANTIC_CORRELATION_EXTRA = "_syl_semantic_beat_correlation"
     _PROVIDER_HISTORY_TXN_EXTRA = "_syl_provider_history_txn"
+    _DELIVERY_TURN_EXTRA = "_syl_segmented_delivery_turn"
 
     def _sanitize_response(self, text: str) -> str:
         """过滤 LLM 返回中伪造的 [sylanne_*] 系统标签。
@@ -390,7 +393,9 @@ class LLMResponsePipeline:
 
         nonce = str(self._event_extra(event, SEMANTIC_BEAT_NONCE_EXTRA, "") or "")
         if not re.fullmatch(r"[0-9A-F]{6}", nonce):
-            return scrub_semantic_marker_candidates(sanitized_text), None
+            cleaned = scrub_semantic_marker_candidates(sanitized_text)
+            fallback = semantic_parts_from_visible_line_breaks(cleaned)
+            return cleaned, fallback if len(fallback) > 1 else None
 
         parsed = parse_semantic_completion(sanitized_text, nonce=nonce)
         cleaned = parsed.clean_text
@@ -407,7 +412,14 @@ class LLMResponsePipeline:
                 setter(self._SEMANTIC_CORRELATION_EXTRA, correlation)
             except Exception:
                 pass
-        return cleaned, parsed.parts if parsed.accepted else None
+        if parsed.accepted:
+            return cleaned, parsed.parts
+        # A malformed/unscoped hidden marker loses all control authority, but it
+        # must not disable the model's still-visible paragraph boundaries.  This
+        # fallback never guesses punctuation boundaries and never trusts marker
+        # attributes; it only uses the scrubbed visible line structure.
+        fallback = semantic_parts_from_visible_line_breaks(cleaned)
+        return cleaned, fallback if len(fallback) > 1 else None
 
     def scrub_owned_semantic_markers(self, event: Any, text: str) -> str:
         """Final send-side guard: no raw semantic control marker may be visible."""
@@ -419,7 +431,11 @@ class LLMResponsePipeline:
 
     @staticmethod
     def _message_text_slots(message: Any) -> tuple[str, list[tuple[Any, str]]] | None:
-        content = getattr(message, "content", None)
+        content = (
+            message.get("content")
+            if isinstance(message, dict)
+            else getattr(message, "content", None)
+        )
         if isinstance(content, str):
             return content, [(message, "content")]
         if not isinstance(content, list):
@@ -493,6 +509,143 @@ class LLMResponsePipeline:
                     pass
             return history_changed or changed
         return history_changed
+
+    @staticmethod
+    def _rewrite_current_assistant(
+        run_context: Any,
+        transcript: str,
+    ) -> bool:
+        """Replace the current turn's assistant message with delivered truth."""
+
+        messages = getattr(run_context, "messages", None)
+        if not isinstance(messages, list):
+            return False
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            role = _ctx_role(message)
+            if role == "user":
+                break
+            if role != "assistant":
+                continue
+            if not transcript:
+                messages.pop(index)
+                return True
+            extracted = LLMResponsePipeline._message_text_slots(message)
+            if extracted is None:
+                # Unknown provider message shape: try the common content field
+                # once. If it is immutable, remove the draft fail-closed so an
+                # unsent tail can never survive as history.
+                try:
+                    if isinstance(message, dict):
+                        message["content"] = transcript
+                    else:
+                        setattr(message, "content", transcript)
+                    return True
+                except Exception:
+                    messages.pop(index)
+                return False
+            _text, slots = extracted
+            if LLMResponsePipeline._replace_text_slots(slots, transcript):
+                return True
+            messages.pop(index)
+            return False
+        return False
+
+    async def settle_segmented_delivery_history(
+        self,
+        event: Any,
+        run_context: Any,
+        response: Any,
+    ) -> str | None:
+        """Wait for transport, then make delivered bubbles the sole history truth.
+
+        ``None`` means this was not a realtime segmented turn.  A string (including
+        the empty string) is the exact successfully delivered transcript.
+        """
+
+        turn = self._event_extra(event, self._DELIVERY_TURN_EXTRA, None)
+        if not isinstance(turn, SegmentedDeliveryTurn):
+            return None
+        if self._event_extra(event, "_syl_realtime_takeover", False) is not True:
+            return None
+        if turn.history_settled:
+            return turn.transcript
+
+        task = turn.task
+        if task is not None and not task.done():
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning(
+                    "Sylanne segmented delivery failed before history commit: "
+                    "session=%s error=%s",
+                    turn.session_key,
+                    type(exc).__name__,
+                )
+        elif task is not None:
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning(
+                    "Sylanne segmented delivery failed before history commit: "
+                    "session=%s error=%s",
+                    turn.session_key,
+                    type(exc).__name__,
+                )
+
+        transcript = turn.transcript
+        changed = self._rewrite_current_assistant(run_context, transcript)
+        if not changed:
+            logger.warning(
+                "Sylanne could not reconcile current assistant history: session=%s",
+                turn.session_key,
+            )
+        elif transcript and response is not None:
+            # Non-empty delivered text remains the framework save-gate and trace text.
+            # For zero delivery keep the generated completion non-empty: AstrBot then
+            # saves the current user message while run_context contains no assistant.
+            try:
+                response.completion_text = transcript
+            except Exception:
+                pass
+
+        # The realtime path used to observe the full generated draft immediately.
+        # Observe only after transport settles so plugin memory cannot learn unsent
+        # tails such as "我想你" that the user never saw.
+        if transcript and not turn.observed:
+            try:
+                await self._background_observe_response(
+                    turn.session_key,
+                    transcript,
+                    skip_conv_sync=True,
+                )
+                turn.observed = True
+            except Exception:
+                # Body/memory observation is secondary. A failure here must never
+                # roll history back from delivered truth to the provider draft.
+                logger.warning(
+                    "Sylanne delivered transcript observation failed: session=%s",
+                    turn.session_key,
+                    exc_info=True,
+                )
+
+        self._p._store.unfinished_replies.pop(turn.session_key, None)
+        active_turns = getattr(self._p._store, "segmented_delivery_turns", None)
+        if active_turns is not None and active_turns.get(turn.session_key) is turn:
+            active_turns.pop(turn.session_key, None)
+        turn.history_settled = True
+        logger.info(
+            "Sylanne delivery history committed: session=%s delivered=%d/%d chars=%d",
+            turn.session_key,
+            len(turn.delivered_parts),
+            len(turn.planned_parts),
+            len(transcript),
+        )
+        return transcript
 
     # ------------------------------------------------------------------
     # T1-02③ 身体驱动打字速度
@@ -1094,32 +1247,96 @@ class LLMResponsePipeline:
         #    落库内容。且与 provider 字段布局无关：result_chain 档和 _completion_text
         #    档到这一步都已统一坍缩成同一种 event.result.chain（各自经 tool_loop_
         #    agent_runner.py:803-814 的 if/elif 转成 MessageChain）。
-        # 用 event 级旗标标记"这轮已由本插件接管，后台分段发送将代替框架发送"，
-        # 供 on_decorating_result 消费。
+        # 先保留非空 completion_text 作为 AstrBot 的 turn 保存门，但真正写进
+        # run_context.messages 的 assistant 正文会在 on_agent_done 保存前屏障中，
+        # 由成功送达账本改写为可见前缀。
         response.completion_text = cleaned
         set_extra = getattr(event, "set_extra", None)
-        if callable(set_extra):
+        if not callable(set_extra):
+            logger.warning(
+                "Sylanne realtime takeover abandoned (event extras unavailable): "
+                "session=%s",
+                session_key,
+            )
+            return
+
+        epochs = getattr(self._p._store, "conversation_input_epoch", None)
+        current_epoch = int(epochs.get(session_key, 0) or 0) if epochs is not None else 0
+        event_epoch = self._event_extra(event, "_syl_input_epoch", current_epoch)
+        if not isinstance(event_epoch, int) or isinstance(event_epoch, bool):
+            event_epoch = current_epoch
+        turn = SegmentedDeliveryTurn(
+            session_key=session_key,
+            input_epoch=event_epoch,
+            planned_parts=tuple(str(part.get("text", "")) for part in parts),
+        )
+        active_turns = None
+        try:
+            set_extra(self._DELIVERY_TURN_EXTRA, turn)
+            if self._event_extra(event, self._DELIVERY_TURN_EXTRA, None) is not turn:
+                raise RuntimeError("delivery turn extra did not round-trip")
+            active_turns = getattr(
+                self._p._store, "segmented_delivery_turns", None
+            )
+            if active_turns is not None:
+                active_turns.set(session_key, turn)
+        except Exception:
+            if active_turns is not None and active_turns.get(session_key) is turn:
+                active_turns.pop(session_key, None)
             try:
-                set_extra("_syl_realtime_takeover", True)
-            except Exception:  # 标记失败不阻断分段发送，只是 on_decorating_result
-                pass          # 那边的抑制会落空——框架会额外重发一次（宁重不丢）。
+                set_extra(self._DELIVERY_TURN_EXTRA, None)
+                set_extra("_syl_realtime_takeover", False)
+            except Exception:
+                pass
+            logger.warning(
+                "Sylanne realtime takeover abandoned (delivery ledger unavailable): "
+                "session=%s",
+                session_key,
+                exc_info=True,
+            )
+            return
 
-        # 在后台 task 真正获得调度前就先保存【全量】正文。若新消息立即取消
-        # task（甚至首段 first_delay 尚未结束），也不会把首段/整条回复弄丢；
-        # dispatcher 只在每段 send_message 成功返回后才扣掉已发送部分。
-        queued_text = "".join(str(part.get("text", "")) for part in parts)
-        if queued_text:
-            self._p._store.unfinished_replies.set(session_key, queued_text)
-        else:
-            self._p._store.unfinished_replies.pop(session_key, None)
+        task: asyncio.Task[Any] | None = None
+        dispatch_coro = self._dispatch_segmented_parts(
+            origin,
+            parts,
+            session_key=session_key,
+            delivery_turn=turn,
+        )
+        try:
+            task = safe_ensure_future(
+                dispatch_coro,
+                name="dispatch_segmented_parts",
+            )
+            turn.task = task
+            # Commit takeover only after the delivery task exists. The current
+            # hook has not yielded yet, so a task cancelled in this block cannot
+            # race ahead and send a bubble while framework fallback is enabled.
+            set_extra("_syl_realtime_takeover", True)
+            if self._event_extra(event, "_syl_realtime_takeover", False) is not True:
+                raise RuntimeError("takeover extra did not round-trip")
+        except Exception:
+            if task is not None:
+                task.cancel()
+            else:
+                dispatch_coro.close()
+            if active_turns is not None and active_turns.get(session_key) is turn:
+                active_turns.pop(session_key, None)
+            try:
+                set_extra(self._DELIVERY_TURN_EXTRA, None)
+                set_extra("_syl_realtime_takeover", False)
+            except Exception:
+                pass
+            logger.warning(
+                "Sylanne realtime takeover abandoned (dispatch setup failed): "
+                "session=%s",
+                session_key,
+                exc_info=True,
+            )
+            return
 
-        # 后台调度分段发送
         logger.info(
             f"Sylanne segmented reply queued: session={session_key} parts={len(parts)}"
-        )
-        task = safe_ensure_future(
-            self._dispatch_segmented_parts(origin, parts, session_key=session_key),
-            name="dispatch_segmented_parts",
         )
         ensure_background_tasks_list(self._p).append(task)
         task.add_done_callback(
@@ -1136,35 +1353,16 @@ class LLMResponsePipeline:
         # 回调内部第一件事就是查 config 直接 return（零行为/零额外状态分配）。
         task.add_done_callback(
             lambda t: self._on_segment_dispatch_done_maybe_afterthought(
-                t, session_key, origin, expr_drive
+                t,
+                session_key,
+                origin,
+                expr_drive,
+                delivery_turn=turn,
             )
         )
 
-        # 将观测任务从热路径移出，后台异步执行
-        # fix/context-integrity round-3 纠偏：round-2 曾误判这条拦截/分段发送分支是
-        # "插件唯一历史写入者"，理由不成立——上面分段调度前显式保留了
-        # response.completion_text = cleaned（供 AstrBot 上下文使用），且本文件从未
-        # 调用 event.stop_event()。框架侧 _save_to_history 的落库条件只看
-        # completion_text 是否非空 + 事件是否被 stop，不关心走的是拦截分支还是非
-        # 拦截分支——两条分支这两个条件都成立，框架都会做一次全量覆盖写。故这里
-        # 必须和上面非拦截分支（~464 附近）同样传 skip_conv_sync=True，否则插件的
-        # 读-改-写与框架的全量覆盖写并发，产生 clobber / 重复 assistant 记录，与
-        # round-2 BLOCKER 是同一个 bug。conversation_buffers/last_bot_texts 等插件
-        # 自身状态不受影响，仍照常更新。
-        obs_task = safe_ensure_future(
-            self._background_observe_response(
-                session_key, cleaned, skip_conv_sync=True
-            ),
-            name="background_observe_response",
-        )
-        ensure_background_tasks_list(self._p).append(obs_task)
-        obs_task.add_done_callback(
-            lambda t: (
-                self._p._background_tasks.remove(t)
-                if t in self._p._background_tasks
-                else None
-            )
-        )
+        # 不在这里观测模型草稿。on_agent_done 会等待 transport 结算，然后只把
+        # 成功送达的前缀写进 conversation buffer / 身体状态 / AstrBot history。
 
     async def _append_bot_reply_buffer(
         self, session_key: str, text: str, *, skip_conv_sync: bool = False
@@ -1410,6 +1608,7 @@ class LLMResponsePipeline:
         session_key: str = "",
         *,
         settle_v3: bool = True,
+        delivery_turn: SegmentedDeliveryTurn | None = None,
     ) -> None:
         """逐段发送分段回复，每段之间按计划延迟。
 
@@ -1427,7 +1626,7 @@ class LLMResponsePipeline:
         total = len(parts)
 
         def record_remaining(start_index: int) -> None:
-            if not session_key:
+            if not session_key or delivery_turn is not None:
                 return
             remaining_text = "".join(
                 str(part.get("text", "")) for part in parts[start_index:]
@@ -1437,22 +1636,54 @@ class LLMResponsePipeline:
             else:
                 self._p._store.unfinished_replies.pop(session_key, None)
 
-        # Direct callers and a task that starts before the queue-side write both
-        # get the same no-loss invariant before the first await.
+        # Legacy direct callers retain their previous unfinished-reply behavior.
+        # Realtime takeover turns use delivery_turn instead: unsent text is a
+        # private draft and must never become conversational history.
         record_remaining(0)
         context = self._p.context
         if not hasattr(context, "send_message"):
+            if delivery_turn is not None:
+                delivery_turn.status = "failed"
             return
         # 栅栏令牌：在【任何 await 之前】同步取本轮的令牌。这条协程可能要跑好几秒
         # （段间 sleep），期间同一 session_key 上可能已经换了下一轮；结算时带着这枚
         # 令牌，v3 就能认出"我要结的那轮已经不在了"而放手，不会错结下一轮。
         v3_token = self._v3_pending_token(session_key) if settle_v3 else None
         sent_count = 0
+        interrupted = False
         try:
             for idx, part in enumerate(parts, 1):
+                if delivery_turn is not None:
+                    epochs = getattr(
+                        self._p._store, "conversation_input_epoch", None
+                    )
+                    current_epoch = (
+                        int(epochs.get(session_key, 0) or 0)
+                        if epochs is not None
+                        else delivery_turn.input_epoch
+                    )
+                    if delivery_turn.should_stop(current_epoch):
+                        interrupted = True
+                        break
                 delay = float(part.get("delay_before_seconds", 0))
                 if delay > 0:
-                    await asyncio.sleep(delay)
+                    if delivery_turn is None:
+                        await asyncio.sleep(delay)
+                    elif not await delivery_turn.wait_delay(delay):
+                        interrupted = True
+                        break
+                if delivery_turn is not None:
+                    epochs = getattr(
+                        self._p._store, "conversation_input_epoch", None
+                    )
+                    current_epoch = (
+                        int(epochs.get(session_key, 0) or 0)
+                        if epochs is not None
+                        else delivery_turn.input_epoch
+                    )
+                    if delivery_turn.should_stop(current_epoch):
+                        interrupted = True
+                        break
                 text = str(part.get("text", ""))
                 if not text:
                     sent_count = idx
@@ -1462,15 +1693,20 @@ class LLMResponsePipeline:
                 message = self._astrbot_message(text)
                 await context.send_message(origin, message)
                 sent_count = idx
+                if delivery_turn is not None:
+                    delivery_turn.mark_delivered(text)
                 # 只有明确收到 send_message 成功返回，才从 unfinished 扣掉该段。
                 record_remaining(sent_count)
         except asyncio.CancelledError:
-            # 新请求 cancel 旧分段任务（llm_request_pipeline 主动 cancel segmented_tasks）：
-            # 不静默吞——留痕已发到第几段，unfinished 保留剩余供续接/下轮判断，然后重抛。
+            # Legacy callers keep the old remainder contract. Realtime ledger
+            # callers preserve only the successful prefix; cancellation never
+            # promotes an unsent tail into the next prompt.
             record_remaining(sent_count)
+            if delivery_turn is not None:
+                delivery_turn.status = "cancelled"
+                self._p._store.unfinished_replies.pop(session_key, None)
             logger.info(
-                "Sylanne segmented dispatch cancelled: session=%s sent=%d/%d "
-                "(剩余留在 unfinished 供续接)",
+                "Sylanne segmented dispatch cancelled: session=%s sent=%d/%d",
                 session_key, sent_count, total,
             )
             # v3 shadow：段间取消 = 投递未完成 → UNKNOWN，绝不结算 SPEAK（design 14.2）。
@@ -1481,12 +1717,31 @@ class LLMResponsePipeline:
             # 任意一段 send 失败（首段/次段皆然）：v2 行为完全不变——原样重抛，交给
             # task.exception()/上游。这里只补一条 v3 终端证据：部分投递 → UNKNOWN。
             record_remaining(sent_count)
+            if delivery_turn is not None:
+                delivery_turn.status = "failed"
             if settle_v3:
                 self._v3_settle_segments(session_key, total, succeeded=False, token=v3_token)
             raise
+        if interrupted:
+            if delivery_turn is not None:
+                delivery_turn.status = "interrupted"
+                self._p._store.unfinished_replies.pop(session_key, None)
+            if settle_v3:
+                self._v3_settle_segments(
+                    session_key, total, succeeded=False, token=v3_token
+                )
+            logger.info(
+                "Sylanne segmented dispatch interrupted: session=%s sent=%d/%d",
+                session_key,
+                sent_count,
+                total,
+            )
+            return
         # 所有段发送成功——清除未完成标记
         if session_key:
             self._p._store.unfinished_replies.pop(session_key, None)
+        if delivery_turn is not None:
+            delivery_turn.status = "completed"
         # v3 shadow：唯一能证明 SPEAK 的地方——每一段都过了 send_message，无取消无异常。
         if settle_v3:
             self._v3_settle_segments(session_key, total, succeeded=True, token=v3_token)
@@ -1584,6 +1839,7 @@ class LLMResponsePipeline:
         expression_drive: float,
         *,
         rng: random.Random | None = None,
+        delivery_turn: SegmentedDeliveryTurn | None = None,
     ) -> None:
         """T2-02①：一段 SPEAK 分段回复正常发完（未取消/未炸）后的挂钩。
 
@@ -1598,6 +1854,8 @@ class LLMResponsePipeline:
                 return
         except asyncio.CancelledError:
             return
+        if delivery_turn is not None and delivery_turn.status != "completed":
+            return
         cfg = self._p._config or {}
         if not bool(cfg.get("sylanne_alpha_afterthought_enabled")):
             return
@@ -1610,13 +1868,10 @@ class LLMResponsePipeline:
         probability = self._afterthought_probability(expression_drive)
         if not self._afterthought_roll(probability, rng=rng):
             return
-        # T2-02③ 取消判定：本想用 conversation_input_epoch，但排查发现它只在【消息
-        # 撤回】特殊路径才递增（见 public_api.py withdraw 处理），普通用户消息完全
-        # 不碰它——拿它当锚点等于取消判定永远命不中（epoch_at_dispatch 恒为 0，
-        # 之后也恒为 0，`>` 判断恒假）。改用 card 给的 fallback：
-        # last_user_message_time——main.py on_message 对【每条】消息都更新它，是
-        # 真正随用户插话推进的信号。锚定当前值，_fire_afterthought 醒来后一旦发现
-        # 该值前进了，说明用户在等待期间说了话，取消补刀。
+        # T2-02③ 继续用 last_user_message_time 作为补刀的独立取消锚。实时分段
+        # 现在另有 conversation_input_epoch + delivery ledger 的锁外中断协议；
+        # 补刀则是一个已经结算后的新发送任务，用消息时间戳判定更直接，也兼容
+        # 未走实时分段的普通轮。醒来后时间前进即说明用户插了话，取消补刀。
         anchor_last_user_at = self._p._store.last_user_message_time.get(
             session_key, 0.0
         )

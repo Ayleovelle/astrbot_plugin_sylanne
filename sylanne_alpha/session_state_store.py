@@ -137,6 +137,11 @@ class SessionStateStore:
         self.stream_buffers: SessionMap = self._reg("stream_buffers", BoundedDict(maxsize=200))
         self.stream_first_sent: SessionMap = self._reg("stream_first_sent", BoundedDict(maxsize=200))
         self.segmented_tasks: SessionMap = self._reg("segmented_tasks", BoundedDict(maxsize=200))
+        # 当前实时回复的逐段送达回执。模型全文只是意图；只有该账本中成功
+        # send_message 的前缀才允许进入 AstrBot history / conversation buffer。
+        self.segmented_delivery_turns: SessionMap = self._reg(
+            "segmented_delivery_turns", BoundedDict(maxsize=200)
+        )
         # 碎片防抖缓冲（inline-await 方案B）：按 session_key 存
         # {texts: list[str], start_time: float, latest_seq: int}。
         # 经 _reg 登记，自动纳入 release_session / reset_all 统一清理；

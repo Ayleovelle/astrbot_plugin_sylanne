@@ -154,3 +154,61 @@ def test_prepare_memory_context_dedups_against_percept_recall():
         )
     )
     assert shared_text not in memory_fragment2
+
+
+def test_prepare_memory_context_never_promotes_unsent_draft_to_prompt() -> None:
+    """未送达 tail 只留下中断信号，正文必须从所有注入槽位消失。"""
+
+    from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline
+    from sylanne_alpha.session_state_store import SessionStateStore
+
+    store = SessionStateStore()
+    store.unfinished_replies.set("s1", "我想你（用户从未收到）")
+    observed: list[tuple[str, tuple[str, ...], str]] = []
+
+    class _Body:
+        def observe_shadow_signal(
+            self,
+            *,
+            text: str,
+            flags: list[str],
+            kind: str,
+        ) -> None:
+            observed.append((text, tuple(flags), kind))
+
+    class _Kernel:
+        body = _Body()
+
+    class _Host:
+        kernel = _Kernel()
+
+    class _Plugin:
+        _store = store
+        config: dict = {}
+        _config: dict = {}
+
+        def _host(self, _session_key: str) -> _Host:
+            return _Host()
+
+        async def _persist_kernel(
+            self,
+            _session_key: str,
+            _host: _Host,
+        ) -> None:
+            return None
+
+    pipe = LLMRequestPipeline(_Plugin())  # type: ignore[arg-type]
+    unfinished, outreach, memory = asyncio.run(
+        pipe._prepare_memory_context(
+            "s1",
+            "",
+            gap_seconds=0.0,
+            realtime_enabled=True,
+            history_depth=2,
+        )
+    )
+
+    assert unfinished == ""
+    assert "我想你" not in f"{unfinished}{outreach}{memory}"
+    assert store.unfinished_replies.get("s1") is None
+    assert observed == [("", ("unfinished_reply",), "interruption")]

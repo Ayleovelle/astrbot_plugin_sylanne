@@ -1936,6 +1936,108 @@ class EmotionalStatePlugin(Star):
     # 消息事件监听：捕获所有消息（含未经 LLM 的），更新时间戳和节奏
     # -----------------------------------------------------------------------
 
+    def _advance_inbound_delivery_epoch(self, event: Any, session_key: str) -> None:
+        """Register one real inbound message and interrupt an older delivery.
+
+        This hook runs before AstrBot enters its per-session agent lock. That is
+        the only point where a newly arrived user message can stop an older reply
+        that is still generating or sleeping between bubbles.
+        """
+
+        get_extra = getattr(event, "get_extra", None)
+        set_extra = getattr(event, "set_extra", None)
+        if callable(get_extra):
+            try:
+                if get_extra("_syl_inbound_registered", False):
+                    return
+            except Exception:
+                pass
+
+        duplicate = False
+        key = ""
+        seen: Any = None
+        registered_new = False
+        try:
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            mid = getattr(getattr(event, "message_obj", None), "message_id", None)
+            key = (
+                umo + "\x00" + mid
+                if umo and isinstance(mid, str) and mid.strip()
+                else ""
+            )
+            seen = getattr(self, "_inbound_seen", None)
+            # Only pre-register when the event can carry ownership into
+            # on_llm_request. Otherwise the legacy gate below would mistake this
+            # first legitimate pass for a redelivery.
+            if key and seen is not None and callable(set_extra):
+                duplicate = key in seen
+                if not duplicate:
+                    seen[key] = time.time()
+                    registered_new = True
+        except Exception:
+            logger.warning(
+                "Sylanne inbound epoch registration failed open",
+                exc_info=True,
+            )
+
+        if callable(set_extra):
+            try:
+                set_extra("_syl_inbound_duplicate", duplicate)
+                # Commit marker last: _inbound_dup_gate only trusts the pair
+                # after both values have been written.
+                set_extra("_syl_inbound_registered", True)
+            except Exception:
+                registered = False
+                if callable(get_extra):
+                    try:
+                        registered = bool(
+                            get_extra("_syl_inbound_registered", False)
+                        )
+                    except Exception:
+                        pass
+                if registered_new and not registered and seen is not None:
+                    try:
+                        seen.pop(key, None)
+                    except Exception:
+                        pass
+
+        if duplicate:
+            return
+
+        epochs = getattr(self._store, "conversation_input_epoch", None)
+        input_epoch = 0
+        if epochs is not None:
+            try:
+                input_epoch = int(epochs.get(session_key, 0) or 0) + 1
+                epochs.set(session_key, input_epoch)
+            except Exception:
+                logger.warning(
+                    "Sylanne inbound epoch advance failed: session=%s",
+                    session_key,
+                    exc_info=True,
+                )
+                input_epoch = 0
+        if callable(set_extra):
+            try:
+                set_extra("_syl_input_epoch", input_epoch)
+            except Exception:
+                pass
+
+        active_turns = getattr(self._store, "segmented_delivery_turns", None)
+        if active_turns is None:
+            return
+        try:
+            turn = active_turns.get(session_key)
+            interrupt = getattr(turn, "interrupt", None)
+            if callable(interrupt):
+                interrupt()
+        except Exception:
+            logger.warning(
+                "Sylanne active delivery interrupt failed: session=%s",
+                session_key,
+                exc_info=True,
+            )
+
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: Any, *args: Any, **kwargs: Any):
         """监听所有消息事件，更新 proactive scheduler 时间戳和节奏学习器。
@@ -1963,6 +2065,14 @@ class EmotionalStatePlugin(Star):
             except Exception:
                 pass
             session_key = self._session_ctx.session_key(event)
+            # Call through the class so narrow plugin-host stubs that bind only
+            # on_message still exercise the real hook without needing to copy
+            # every private helper onto their namespace.
+            EmotionalStatePlugin._advance_inbound_delivery_epoch(
+                self,
+                event,
+                session_key,
+            )
             now = time.time()
             # v2.5.0 slice-1b（design §8 BLOCKER B1，全矩阵扎实版修正）：主判据
             # 消费——供三写点（货架写/profile 软同步/出生播种，本 slice 货架写
@@ -2061,6 +2171,15 @@ class EmotionalStatePlugin(Star):
         注释警告的"用户在 bot 沉默时连发相同文字被误杀"，本轮禁区。
         """
         try:
+            # on_message 已在 AstrBot 的 per-session agent 锁之前登记了这条入站
+            # 消息。复用事件级判定，避免合法 on_llm_request 被自己的登记误杀；
+            # 独立重投递事件则携带 duplicate=True，在这里正常 stop。
+            get_extra = getattr(event, "get_extra", None)
+            if callable(get_extra) and get_extra(
+                "_syl_inbound_registered", False
+            ):
+                return bool(get_extra("_syl_inbound_duplicate", False))
+
             umo = str(getattr(event, "unified_msg_origin", "") or "")
             mid = getattr(getattr(event, "message_obj", None), "message_id", None)
             if not umo or not isinstance(mid, str) or not mid.strip():
@@ -2255,15 +2374,67 @@ class EmotionalStatePlugin(Star):
         *args: Any,
         **kwargs: Any,
     ) -> None:
-        """在 AstrBot 覆盖写会话历史前清掉本轮隐藏语义节拍标记。"""
+        """在 AstrBot 覆盖写历史前提交真实送达的 assistant 文本。"""
 
         try:
             self._llm_response_pipeline.on_agent_done(event, run_context, response)
         except Exception as e:
             logger.warning(f"Sylanne on_agent_done scrub failed: {e}", exc_info=True)
 
+        delivered_override: str | None = None
         try:
-            assistant_text = self._canonical_assistant_text(run_context, response)
+            settle_delivery = getattr(
+                self._llm_response_pipeline,
+                "settle_segmented_delivery_history",
+                None,
+            )
+            if callable(settle_delivery):
+                delivered_override = await settle_delivery(
+                    event,
+                    run_context,
+                    response,
+                )
+        except Exception as e:
+            # A ledger turn must fail closed. Keeping the provider's complete
+            # draft here would teach the next turn words that transport never sent.
+            event_extra = getattr(
+                self._llm_response_pipeline,
+                "_event_extra",
+                None,
+            )
+            turn = (
+                event_extra(
+                    event,
+                    getattr(
+                        self._llm_response_pipeline,
+                        "_DELIVERY_TURN_EXTRA",
+                        "_syl_segmented_delivery_turn",
+                    ),
+                    None,
+                )
+                if callable(event_extra)
+                else None
+            )
+            if turn is not None:
+                rewrite_assistant = getattr(
+                    self._llm_response_pipeline,
+                    "_rewrite_current_assistant",
+                    None,
+                )
+                if callable(rewrite_assistant):
+                    rewrite_assistant(run_context, "")
+                delivered_override = ""
+            logger.warning(
+                f"Sylanne on_agent_done delivery settlement failed: {e}",
+                exc_info=True,
+            )
+
+        try:
+            assistant_text = (
+                delivered_override
+                if delivered_override is not None
+                else self._canonical_assistant_text(run_context, response)
+            )
             await self._backfill_turn_if_framework_skips(
                 event,
                 response,
