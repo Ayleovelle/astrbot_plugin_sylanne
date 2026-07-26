@@ -9,6 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from sylanne_alpha.llm_request_pipeline import (
     LLMRequestPipeline,
     _PROACTIVE_TEMPLATE_PLACEHOLDER,
@@ -211,25 +213,27 @@ def test_main_agent_done_hook_has_restore_priority() -> None:
 
 
 def test_main_tool_respond_hook_registers_real_astrbot_event_with_priority() -> None:
+    star_handler = pytest.importorskip("astrbot.core.star.star_handler")
     import main
-    from astrbot.core.star.star_handler import EventType, star_handlers_registry
 
     handler = main.EmotionalStatePlugin.on_llm_tool_respond
     registrations = [
         registration
-        for registration in star_handlers_registry
+        for registration in star_handler.star_handlers_registry
         if registration.handler is handler
     ]
 
     assert len(registrations) == 1
     registration = registrations[0]
-    assert registration.event_type is EventType.OnLLMToolRespondEvent
+    assert registration.event_type is star_handler.EventType.OnLLMToolRespondEvent
     assert registration.extras_configs.get("priority", 0) >= 100
 
 
 def test_astrbot_direct_delivery_marks_runner_done_before_tool_respond_hook() -> None:
-    from astrbot.core import astr_agent_hooks
-    from astrbot.core.agent.runners import tool_loop_agent_runner
+    astr_agent_hooks = pytest.importorskip("astrbot.core.astr_agent_hooks")
+    tool_loop_agent_runner = pytest.importorskip(
+        "astrbot.core.agent.runners.tool_loop_agent_runner"
+    )
 
     runner_source = Path(tool_loop_agent_runner.__file__).read_text(encoding="utf-8")
     direct_delivery = runner_source.index("elif resp is None:")
@@ -378,13 +382,11 @@ def test_tool_respond_does_not_finalize_nonterminal_or_non_delivery_tools() -> N
 def test_astrbot_runs_restore_before_a_priority_zero_handler_stops(
     monkeypatch: Any,
 ) -> None:
-    from astrbot.core.pipeline import context_utils
-    from astrbot.core.star import star_handler as star_handler_module
-    from astrbot.core.star.star_handler import (
-        EventType,
-        StarHandlerMetadata,
-        StarHandlerRegistry,
-    )
+    context_utils = pytest.importorskip("astrbot.core.pipeline.context_utils")
+    star_handler_module = pytest.importorskip("astrbot.core.star.star_handler")
+    EventType = star_handler_module.EventType
+    StarHandlerMetadata = star_handler_module.StarHandlerMetadata
+    StarHandlerRegistry = star_handler_module.StarHandlerRegistry
 
     registry = StarHandlerRegistry()
     plugins: dict[str, Any] = {}
