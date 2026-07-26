@@ -568,6 +568,10 @@ class LLMResponsePipeline:
             return None
         if self._event_extra(event, "_syl_realtime_takeover", False) is not True:
             return None
+        if run_context is None:
+            run_context = turn.run_context
+        if response is None:
+            response = turn.response
         if turn.history_settled:
             return turn.transcript
 
@@ -646,6 +650,172 @@ class LLMResponsePipeline:
             len(transcript),
         )
         return transcript
+
+    def bind_segmented_delivery_context(
+        self,
+        event: Any,
+        run_context: Any,
+        response: Any,
+    ) -> bool:
+        """Bind AstrBot history objects while final output ownership is unresolved."""
+
+        turn = self._event_extra(event, self._DELIVERY_TURN_EXTRA, None)
+        if not isinstance(turn, SegmentedDeliveryTurn):
+            return False
+        turn.run_context = run_context
+        turn.response = response
+        return turn.task is None and turn.status == "planned"
+
+    def has_pending_segmented_candidate(self, event: Any) -> bool:
+        """Whether this turn still awaits final-chain output arbitration."""
+
+        turn = self._event_extra(event, self._DELIVERY_TURN_EXTRA, None)
+        return (
+            isinstance(turn, SegmentedDeliveryTurn)
+            and turn.task is None
+            and turn.status == "planned"
+            and not turn.history_settled
+        )
+
+    def activate_segmented_delivery(self, event: Any) -> bool:
+        """Commit text ownership and start transport after decorators finalize the chain."""
+
+        turn = self._event_extra(event, self._DELIVERY_TURN_EXTRA, None)
+        if not isinstance(turn, SegmentedDeliveryTurn):
+            return False
+        if turn.task is not None:
+            return self._event_extra(event, "_syl_realtime_takeover", False) is True
+        if turn.status != "planned":
+            return False
+
+        set_extra = getattr(event, "set_extra", None)
+        if not callable(set_extra):
+            return False
+        parts = [dict(part) for part in turn.dispatch_parts]
+        if not parts:
+            return False
+
+        task: asyncio.Task[Any] | None = None
+        dispatch_coro = self._dispatch_segmented_parts(
+            turn.origin,
+            parts,
+            session_key=turn.session_key,
+            delivery_turn=turn,
+        )
+        try:
+            task = safe_ensure_future(
+                dispatch_coro,
+                name="dispatch_segmented_parts",
+            )
+            turn.task = task
+            turn.status = "queued"
+            # The task cannot run until this synchronous block yields, so ownership
+            # becomes visible before the first bubble can leave the process.
+            set_extra("_syl_realtime_takeover", True)
+            set_extra("_syl_realtime_candidate", False)
+            if self._event_extra(event, "_syl_realtime_takeover", False) is not True:
+                raise RuntimeError("takeover extra did not round-trip")
+        except Exception:
+            if task is not None:
+                task.cancel()
+            else:
+                dispatch_coro.close()
+            turn.task = None
+            turn.status = "failed"
+            active_turns = getattr(
+                self._p._store,
+                "segmented_delivery_turns",
+                None,
+            )
+            if active_turns is not None and active_turns.get(turn.session_key) is turn:
+                active_turns.pop(turn.session_key, None)
+            try:
+                set_extra(self._DELIVERY_TURN_EXTRA, None)
+                set_extra("_syl_realtime_takeover", False)
+                set_extra("_syl_realtime_candidate", False)
+            except Exception:
+                pass
+            logger.warning(
+                "Sylanne realtime takeover abandoned (dispatch setup failed): "
+                "session=%s",
+                turn.session_key,
+                exc_info=True,
+            )
+            return False
+
+        logger.info(
+            "Sylanne segmented reply activated: session=%s parts=%d",
+            turn.session_key,
+            len(parts),
+        )
+        ensure_background_tasks_list(self._p).append(task)
+        task.add_done_callback(
+            lambda completed: (
+                self._p._background_tasks.remove(completed)
+                if completed in self._p._background_tasks
+                else None
+            )
+        )
+        self._p._store.segmented_tasks.set(turn.session_key, task)
+        task.add_done_callback(
+            lambda completed: self._on_segment_dispatch_done_maybe_afterthought(
+                completed,
+                turn.session_key,
+                turn.origin,
+                turn.expression_drive,
+                delivery_turn=turn,
+            )
+        )
+        return True
+
+    async def delegate_segmented_candidate_to_framework(self, event: Any) -> bool:
+        """Give a transformed non-text chain sole ownership without sending text."""
+
+        turn = self._event_extra(event, self._DELIVERY_TURN_EXTRA, None)
+        if not isinstance(turn, SegmentedDeliveryTurn):
+            return False
+        if turn.task is not None or turn.status != "planned":
+            return False
+
+        try:
+            if turn.cleaned_text and not turn.observed:
+                await self._background_observe_response(
+                    turn.session_key,
+                    turn.cleaned_text,
+                    skip_conv_sync=True,
+                )
+                turn.observed = True
+        except Exception:
+            logger.warning(
+                "Sylanne framework-owned transcript observation failed: session=%s",
+                turn.session_key,
+                exc_info=True,
+            )
+        finally:
+            turn.status = "delegated"
+            turn.history_settled = True
+            self._p._store.unfinished_replies.pop(turn.session_key, None)
+            active_turns = getattr(
+                self._p._store,
+                "segmented_delivery_turns",
+                None,
+            )
+            if active_turns is not None and active_turns.get(turn.session_key) is turn:
+                active_turns.pop(turn.session_key, None)
+            set_extra = getattr(event, "set_extra", None)
+            if callable(set_extra):
+                try:
+                    set_extra(self._DELIVERY_TURN_EXTRA, None)
+                    set_extra("_syl_realtime_candidate", False)
+                    set_extra("_syl_realtime_takeover", False)
+                except Exception:
+                    pass
+
+        logger.info(
+            "Sylanne segmented candidate delegated to final framework chain: session=%s",
+            turn.session_key,
+        )
+        return True
 
     # ------------------------------------------------------------------
     # T1-02③ 身体驱动打字速度
@@ -1024,7 +1194,7 @@ class LLMResponsePipeline:
                     # conversation_buffers/last_bot_texts 这些插件自身状态照常更新。
                     # round-3 纠偏：这个论证同样适用于下面拦截/分段发送分支——round-2
                     # 曾误以为那条分支是"插件唯一历史写入者"而不传 True，源码里那条
-                    # 分支在分段调度前同样显式保留了 response.completion_text = cleaned
+                    # 分支在候选登记前同样显式保留了 response.completion_text = cleaned
                     # （供 AstrBot 记录用），事件同样未被 stop，框架一样会保存，故那边
                     # 现在也已改成显式 skip_conv_sync=True（见
                     # _background_observe_response 调用点）。
@@ -1269,6 +1439,10 @@ class LLMResponsePipeline:
             session_key=session_key,
             input_epoch=event_epoch,
             planned_parts=tuple(str(part.get("text", "")) for part in parts),
+            origin=origin,
+            dispatch_parts=tuple(dict(part) for part in parts),
+            cleaned_text=cleaned,
+            expression_drive=expr_drive,
         )
         active_turns = None
         try:
@@ -1280,11 +1454,14 @@ class LLMResponsePipeline:
             )
             if active_turns is not None:
                 active_turns.set(session_key, turn)
+            set_extra("_syl_realtime_candidate", True)
+            set_extra("_syl_realtime_takeover", False)
         except Exception:
             if active_turns is not None and active_turns.get(session_key) is turn:
                 active_turns.pop(session_key, None)
             try:
                 set_extra(self._DELIVERY_TURN_EXTRA, None)
+                set_extra("_syl_realtime_candidate", False)
                 set_extra("_syl_realtime_takeover", False)
             except Exception:
                 pass
@@ -1296,73 +1473,16 @@ class LLMResponsePipeline:
             )
             return
 
-        task: asyncio.Task[Any] | None = None
-        dispatch_coro = self._dispatch_segmented_parts(
-            origin,
-            parts,
-            session_key=session_key,
-            delivery_turn=turn,
-        )
-        try:
-            task = safe_ensure_future(
-                dispatch_coro,
-                name="dispatch_segmented_parts",
-            )
-            turn.task = task
-            # Commit takeover only after the delivery task exists. The current
-            # hook has not yielded yet, so a task cancelled in this block cannot
-            # race ahead and send a bubble while framework fallback is enabled.
-            set_extra("_syl_realtime_takeover", True)
-            if self._event_extra(event, "_syl_realtime_takeover", False) is not True:
-                raise RuntimeError("takeover extra did not round-trip")
-        except Exception:
-            if task is not None:
-                task.cancel()
-            else:
-                dispatch_coro.close()
-            if active_turns is not None and active_turns.get(session_key) is turn:
-                active_turns.pop(session_key, None)
-            try:
-                set_extra(self._DELIVERY_TURN_EXTRA, None)
-                set_extra("_syl_realtime_takeover", False)
-            except Exception:
-                pass
-            logger.warning(
-                "Sylanne realtime takeover abandoned (dispatch setup failed): "
-                "session=%s",
-                session_key,
-                exc_info=True,
-            )
-            return
-
         logger.info(
-            f"Sylanne segmented reply queued: session={session_key} parts={len(parts)}"
-        )
-        ensure_background_tasks_list(self._p).append(task)
-        task.add_done_callback(
-            lambda t: (
-                self._p._background_tasks.remove(t)
-                if t in self._p._background_tasks
-                else None
-            )
-        )
-        self._p._store.segmented_tasks.set(session_key, task)
-
-        # T2-02①：SPEAK 分段发送任务正常发完（未被打断/未炸）后，按表达驱动力
-        # 概率骰子决定要不要在 20~180s 后追发一句补刀/改口。config 关闭时
-        # 回调内部第一件事就是查 config 直接 return（零行为/零额外状态分配）。
-        task.add_done_callback(
-            lambda t: self._on_segment_dispatch_done_maybe_afterthought(
-                t,
-                session_key,
-                origin,
-                expr_drive,
-                delivery_turn=turn,
-            )
+            "Sylanne segmented reply planned: session=%s parts=%d "
+            "(awaiting final-chain arbitration)",
+            session_key,
+            len(parts),
         )
 
-        # 不在这里观测模型草稿。on_agent_done 会等待 transport 结算，然后只把
-        # 成功送达的前缀写进 conversation buffer / 身体状态 / AstrBot history。
+        # 不在这里观测模型草稿。on_agent_done 只把 run_context/response 绑定到账本；
+        # 最终装饰阶段先完成 TTS/图片等 chain 变换，再由
+        # 单一仲裁点决定是启动文本 transport，还是把本轮完整交给框架非文本 chain。
 
     async def _append_bot_reply_buffer(
         self, session_key: str, text: str, *, skip_conv_sync: bool = False

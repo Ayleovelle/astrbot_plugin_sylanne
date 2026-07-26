@@ -2374,7 +2374,7 @@ class EmotionalStatePlugin(Star):
         *args: Any,
         **kwargs: Any,
     ) -> None:
-        """在 AstrBot 覆盖写历史前提交真实送达的 assistant 文本。"""
+        """绑定本轮历史对象；已启动的分段投递则提交真实送达文本。"""
 
         try:
             self._llm_response_pipeline.on_agent_done(event, run_context, response)
@@ -2382,13 +2382,27 @@ class EmotionalStatePlugin(Star):
             logger.warning(f"Sylanne on_agent_done scrub failed: {e}", exc_info=True)
 
         delivered_override: str | None = None
+        delivery_deferred = False
         try:
+            bind_delivery = getattr(
+                self._llm_response_pipeline,
+                "bind_segmented_delivery_context",
+                None,
+            )
+            if callable(bind_delivery):
+                delivery_deferred = bool(
+                    bind_delivery(
+                        event,
+                        run_context,
+                        response,
+                    )
+                )
             settle_delivery = getattr(
                 self._llm_response_pipeline,
                 "settle_segmented_delivery_history",
                 None,
             )
-            if callable(settle_delivery):
+            if not delivery_deferred and callable(settle_delivery):
                 delivered_override = await settle_delivery(
                     event,
                     run_context,
@@ -2593,25 +2607,13 @@ class EmotionalStatePlugin(Star):
                 exc_info=True,
             )
 
-    @filter.on_decorating_result()
+    @filter.on_decorating_result(priority=1000)
     async def on_decorating_result(self, event: Any, *args: Any, **kwargs: Any) -> None:
-        """Stage 8 兜底：strip thinking/draft 块，防止 tool loop 中间步骤泄露。
+        """Stage 8 前置清洗：在 TTS/图片装饰器消费文本前移除内部控制内容。
 
         *args/**kwargs：兜住 AstrBot 各版本多传的钩子参数，避免新版 TypeError。
-
-        另：若该消息是 Sylanne 主动发言桥接登记的"待接管分段"，则清空 chain 阻止
-        大饼整段发送，改由 Sylanne 后台连发人格化分段。即时聊天 LLM 响应接管
-        （realtime 完整重做 Model-D）同理，见 _maybe_suppress_realtime_takeover。
         """
         try:
-            # 分段接管优先判定（大饼主动消息）
-            if await self._maybe_takeover_segments(event):
-                return
-
-            # 即时聊天接管抑制判定（LLM 响应，M1-M3 send/save 解耦核心）
-            if await self._maybe_suppress_realtime_takeover(event):
-                return
-
             from sylanne_alpha.message_dispatch import strip_draft_blocks
 
             result = event.get_result()
@@ -2641,6 +2643,27 @@ class EmotionalStatePlugin(Star):
         except Exception as e:
             logger.warning(
                 f"Sylanne on_decorating_result strip failed: {e}", exc_info=True
+            )
+
+    @filter.on_decorating_result(priority=-1000)
+    async def _on_final_output_arbitration(
+        self,
+        event: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """在普通装饰器完成后决定由框架 chain 还是 Sylanne 分段 transport 发送。"""
+
+        try:
+            # 主动消息和即时聊天都必须等 TTS/图片等装饰完成后再认领输出，
+            # 否则会先直发文字，稍后又由框架发送 Record/Image。
+            if await self._maybe_takeover_segments(event):
+                return
+            await self._maybe_suppress_realtime_takeover(event)
+        except Exception as e:
+            logger.warning(
+                f"Sylanne final output arbitration failed: {e}",
+                exc_info=True,
             )
 
     def _v3_settle_ordinary(self, event: Any) -> None:
@@ -2899,28 +2922,63 @@ class EmotionalStatePlugin(Star):
     async def _maybe_suppress_realtime_takeover(self, event: Any) -> bool:
         """即时聊天 LLM 响应接管的发送抑制（realtime 完整重做 Model-D 核心）。
 
-        llm_response_pipeline._on_llm_response_inner 已在后台调度好 Sylanne 自己
-        的分段连发，并置位 event extra `_syl_realtime_takeover=True`；本函数只在这里、
-        用框架自己的装饰钩子清空【规范化后的 event.result.chain】来阻止框架重复发送。
-        "存"与"发"能解耦是因为二者读【不同对象】、与 stage 先后无关：框架历史保存
-        （InternalAgentSubStage._save_to_history）读 llm_response.completion_text +
-        run_context.messages（assistant 段已在 tool_loop_agent_runner.py:197 提交），
-        从不读 event.result.chain；本函数完全不碰 llm_resp.completion_text/result_chain。
-        （真实时序是 decorate 随 run_agent 消费先跑、save 在其后，但因读不同对象故无影响。）
+        ``_on_llm_response_inner`` 只登记分段候选，绝不启动 transport；
+        ``on_agent_done`` 只把 run_context/response 绑定到账本。此装饰器以低优先级
+        在常规 TTS/图片装饰器之后查看【最终】event.result.chain：
 
-        安全网（issue26 同类判据）：即便走到这里，chain 若含非 Plain 组件
-        （理论上 on_llm_response 已提前放弃接管，不会走到这——双保险，任何时序
-        假设失效都不吞图片/语音）——不清空，交框架原样发送；仅纯 Plain 才清空。
+        - 仍为纯 Plain：提交文本所有权、启动分段 transport、清空框架 chain，
+          等实际投递结算后把成功送达前缀写回历史；
+        - 已变为 Record/Image 等非 Plain（或被其他装饰器清空）：放弃文本所有权，
+          不启动 transport，完整交给框架发送。
+
+        AstrBot 只会在 run_agent 生成器（包含本装饰阶段）消费完成后覆盖写历史，
+        因此纯文本分支的送达结算仍发生在保存之前；非文本分支则保留 provider
+        assistant 文本作为语音/图片回合的上下文。这个最终链仲裁点消除了
+        “先发分段文字，稍后 CloneTTS 又发 Record”的竞态。
 
         返回 True 表示本轮由本机制处理（调用方应 return，跳过后续通用
         strip_draft_blocks 逻辑——分段发送前已经 sanitize/strip 过）。
         """
+        pipeline = getattr(self, "_llm_response_pipeline", None)
+        has_candidate = getattr(
+            pipeline,
+            "has_pending_segmented_candidate",
+            None,
+        )
+        candidate_pending = bool(has_candidate(event)) if callable(has_candidate) else False
         get_extra = getattr(event, "get_extra", None)
-        if not callable(get_extra) or not get_extra("_syl_realtime_takeover", False):
+        if not candidate_pending and (
+            not callable(get_extra)
+            or not get_extra("_syl_realtime_takeover", False)
+        ):
             return False
         try:
             result = event.get_result()
             chain = getattr(result, "chain", None) if result is not None else None
+            if candidate_pending:
+                if not chain or any(not isinstance(seg, Plain) for seg in chain):
+                    delegate = getattr(
+                        pipeline,
+                        "delegate_segmented_candidate_to_framework",
+                        None,
+                    )
+                    if callable(delegate):
+                        await delegate(event)
+                    logger.info(
+                        "Sylanne final output delegated to framework chain: "
+                        "non_plain=%s for %s",
+                        bool(
+                            chain
+                            and any(not isinstance(seg, Plain) for seg in chain)
+                        ),
+                        getattr(event, "unified_msg_origin", ""),
+                    )
+                    return False
+
+                activate = getattr(pipeline, "activate_segmented_delivery", None)
+                if not callable(activate) or not activate(event):
+                    return False
+
             if chain and any(not isinstance(seg, Plain) for seg in chain):
                 logger.info(
                     "Sylanne realtime takeover suppression skipped: chain 含非 "
@@ -2935,6 +2993,14 @@ class EmotionalStatePlugin(Star):
                     chain[:] = []  # 切片清空，保留 list/MessageChain 子类身份
                 else:
                     result.chain = []
+            if candidate_pending:
+                settle_delivery = getattr(
+                    pipeline,
+                    "settle_segmented_delivery_history",
+                    None,
+                )
+                if callable(settle_delivery):
+                    await settle_delivery(event, None, None)
             return True
         except Exception as e:
             logger.warning(

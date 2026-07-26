@@ -19,11 +19,17 @@ class SegmentedDeliveryTurn:
     session_key: str
     input_epoch: int
     planned_parts: tuple[str, ...]
+    origin: str = ""
+    dispatch_parts: tuple[dict[str, Any], ...] = ()
+    cleaned_text: str = ""
+    expression_drive: float = 0.0
     delivered_parts: list[str] = field(default_factory=list)
-    status: str = "queued"
+    status: str = "planned"
     history_settled: bool = False
     observed: bool = False
     task: asyncio.Task[Any] | None = field(default=None, repr=False)
+    run_context: Any | None = field(default=None, repr=False)
+    response: Any | None = field(default=None, repr=False)
     _interrupted: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
     def interrupt(self) -> None:

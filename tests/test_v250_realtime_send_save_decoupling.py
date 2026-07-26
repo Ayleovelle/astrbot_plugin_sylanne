@@ -8,8 +8,8 @@
   M2  历史真落库：不再清空 result_chain/chain，completion_text 保持非空
       （框架 SAVE-GATE 读的正是这个字段），result_chain 对象身份不被置 None。
   M3  跨 provider 不双发：result_chain 档（Gemini/OpenAI 形态）与
-      _completion_text 档（Anthropic 形态）都只置接管旗标 + 分段调度，
-      从不清空 result_chain——发送抑制统一交 on_decorating_result。
+      _completion_text 档（Anthropic 形态）都先登记候选，不立即发送；
+      on_decorating_result 看过最终 chain 后才提交文本接管并启动分段。
   M4  流式不双发：on_llm_response 入口检测 event.get_result().
       result_content_type == STREAMING_RESULT 时彻底放弃接管；请求侧
       do_first 门补 realtime_enabled，与响应侧对齐。
@@ -158,8 +158,15 @@ def _cfg(*, enabled: bool, intercept: bool) -> dict:
 
 
 def _run(pipe: LLMResponsePipeline, resp: object, plugin: _Plugin, ev: _Ev) -> None:
+    """跑响应规划，并为管线单测显式模拟“最终纯文本链已裁决”。
+
+    真框架由 ``on_decorating_result`` 调用同一 activation；这里直接激活，避免
+    每个只关心 sanitize/分段计划的窄测试都搭一套 AstrBot 装饰阶段桩。
+    """
+
     async def go() -> None:
         await pipe._on_llm_response_inner(ev, resp)
+        pipe.activate_segmented_delivery(ev)
         if plugin._background_tasks:
             await asyncio.gather(*plugin._background_tasks)
         for _ in range(5):
@@ -180,6 +187,11 @@ def _stub_dispatch(pipe: LLMResponsePipeline) -> list:
         **_kwargs: object,
     ) -> None:
         calls.append((origin, parts, session_key))
+        delivery_turn = _kwargs.get("delivery_turn")
+        if delivery_turn is not None:
+            for part in parts:
+                delivery_turn.mark_delivered(str(part.get("text", "")))
+            delivery_turn.status = "complete"
 
     pipe._dispatch_segmented_parts = types.MethodType(_fake, pipe)  # type: ignore[method-assign]
     return calls
@@ -217,7 +229,7 @@ def test_default_path_intercept_only_without_enabled_stays_noop() -> None:
 
 # ===========================================================================
 # M2/M3：两种 provider 形态都不再清空 result_chain，completion_text 保持
-# 非空（SAVE-GATE 通过），只置接管旗标交给 on_decorating_result 抑制发送
+# 非空（SAVE-GATE 通过）；最终纯文本裁决后才置接管旗标并启动 transport
 # ===========================================================================
 
 
@@ -248,8 +260,8 @@ def test_result_chain_provider_keeps_chain_alive_and_flags_takeover() -> None:
 def test_completion_text_only_provider_keeps_none_chain_and_flags_takeover() -> None:
     """Anthropic 形态（result_chain 从未被赋值，只用 _completion_text）：M3 治
     双发——result_chain 全程保持 None（不因清空动作产生任何副作用），
-    completion_text 非空，只靠接管旗标交给 decorate 抑制，不再靠"清 result_chain"
-    这个对该形态 provider 天生无效的旧 hack。"""
+    completion_text 非空，最终纯文本裁决后再用接管旗标抑制框架发送，不再靠
+    "清 result_chain"这个对该形态 provider 天生无效的旧 hack。"""
     p = _Plugin(tempfile.mkdtemp(prefix="rt_ct_"), _cfg(enabled=True, intercept=True))
     pipe = LLMResponsePipeline(p)  # type: ignore[arg-type]
     calls = _stub_dispatch(pipe)
@@ -606,13 +618,6 @@ def test_interrupted_delivery_commits_only_successfully_sent_prefix_to_history(
         )
 
         await pipe._on_llm_response_inner(event, response)
-        task = plugin._store.segmented_tasks.get("sess:realtime-decouple")
-        assert task is not None
-        await asyncio.wait_for(first_sent.wait(), timeout=1.0)
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-
         assistant_part = SimpleNamespace(text=response.completion_text)
         run_context = SimpleNamespace(
             messages=[
@@ -632,6 +637,17 @@ def test_interrupted_delivery_commits_only_successfully_sent_prefix_to_history(
             run_context,
             response,
         )
+        event._result = SimpleNamespace(chain=[Plain(response.completion_text)])
+        arbitration = asyncio.create_task(
+            EmotionalStatePlugin._maybe_suppress_realtime_takeover(shell, event)
+        )
+        await asyncio.wait_for(first_sent.wait(), timeout=1.0)
+        task = plugin._store.segmented_tasks.get("sess:realtime-decouple")
+        assert task is not None
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        assert await arbitration is True
         if plugin._background_tasks:
             await asyncio.gather(*plugin._background_tasks, return_exceptions=True)
 
@@ -761,6 +777,14 @@ def test_full_delivery_commits_exact_visible_bubbles_as_assistant_history(
             run_context,
             response,
         )
+        event._result = SimpleNamespace(chain=[Plain(response.completion_text)])
+        assert (
+            await EmotionalStatePlugin._maybe_suppress_realtime_takeover(
+                shell,
+                event,
+            )
+            is True
+        )
 
         assert sent == ["第一段", "第二段"]
         assert assistant_part.text == "第一段\n第二段"
@@ -838,6 +862,14 @@ def test_stale_generation_sends_zero_bubbles_and_removes_assistant_draft(
             event,
             run_context,
             response,
+        )
+        event._result = SimpleNamespace(chain=[Plain(response.completion_text)])
+        assert (
+            await EmotionalStatePlugin._maybe_suppress_realtime_takeover(
+                shell,
+                event,
+            )
+            is True
         )
 
         assert sent == []
@@ -937,8 +969,17 @@ def test_dispatch_setup_failure_falls_back_to_framework_send(
         )
 
         await pipe._on_llm_response_inner(event, response)
+        event._result = SimpleNamespace(chain=[Plain(response.completion_text)])
+        shell = object.__new__(EmotionalStatePlugin)
+        shell._llm_response_pipeline = pipe
+        handled = await EmotionalStatePlugin._maybe_suppress_realtime_takeover(
+            shell,
+            event,
+        )
 
         assert response.completion_text == "由框架正常发送"
+        assert handled is False
+        assert [part.text for part in event.get_result().chain] == ["由框架正常发送"]
         assert event.get_extra("_syl_realtime_takeover") is False
         assert event.get_extra(pipe._DELIVERY_TURN_EXTRA) is None
         assert (
@@ -1103,31 +1144,154 @@ def test_suppress_realtime_takeover_noop_without_flag() -> None:
 
 
 # ===========================================================================
-# 端到端衔接：on_llm_response 置旗标 → on_decorating_result 抑制发送
+# 端到端衔接：on_llm_response 登记候选 → 最终装饰阶段提交文本所有权
 # ===========================================================================
 
 
 def test_end_to_end_takeover_flag_flows_into_decorate_suppression() -> None:
-    """把 on_llm_response 产出的 result_chain（已坍缩为单个 cleaned Plain）
-    喂给 on_decorating_result 的抑制判定，钉死两段代码之间的旗标契约。"""
-    p = _Plugin(tempfile.mkdtemp(prefix="rt_e2e_"), _cfg(enabled=True, intercept=True))
-    pipe = LLMResponsePipeline(p)  # type: ignore[arg-type]
-    _stub_dispatch(pipe)
+    """最终 chain 仍是纯文本时，装饰阶段才启动 transport 并抑制框架发送。"""
 
-    mc = MessageChain()
-    mc.chain = [Plain("原始未清理文本")]
-    resp = LLMResponse(role="assistant", result_chain=mc)
-    ev = _Ev()
-    _run(pipe, resp, p, ev)
-    assert ev.get_extra("_syl_realtime_takeover") is True
-
-    # 模拟框架把 hook 后的 result_chain 灌进 event.get_result().chain
-    # （tool_loop_agent_runner.py:803-806 -> astr_agent_run_util.py:258-264）。
-    decorate_event = _decorate_event(list(resp.result_chain.chain), takeover=True)
-    handled = asyncio.run(
-        EmotionalStatePlugin._maybe_suppress_realtime_takeover(
-            SimpleNamespace(), decorate_event
+    async def scenario() -> None:
+        plugin = _Plugin(
+            tempfile.mkdtemp(prefix="rt_e2e_"),
+            _cfg(enabled=True, intercept=True),
         )
-    )
-    assert handled is True
-    assert decorate_event.get_result().chain == [], "框架发送应被抑制——分段已在后台发了"
+        pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
+        calls = _stub_dispatch(pipe)
+
+        chain = MessageChain()
+        chain.chain = [Plain("原始未清理文本")]
+        response = LLMResponse(role="assistant", result_chain=chain)
+        event = _Ev()
+        await pipe._on_llm_response_inner(event, response)
+
+        assert event.get_extra("_syl_realtime_candidate") is True
+        assert event.get_extra("_syl_realtime_takeover") is False
+        assert calls == [], "最终 chain 尚未完成装饰前不得提前发送"
+
+        assistant_part = SimpleNamespace(text=response.completion_text)
+        run_context = SimpleNamespace(
+            messages=[
+                SimpleNamespace(role="user", content="继续"),
+                SimpleNamespace(role="assistant", content=[assistant_part]),
+            ]
+        )
+        shell = object.__new__(EmotionalStatePlugin)
+        shell._llm_response_pipeline = pipe
+        shell._has_conversation_manager = lambda: False
+        await EmotionalStatePlugin.on_agent_done(
+            shell,
+            event,
+            run_context,
+            response,
+        )
+
+        # 模拟框架在 CloneTTS 等常规装饰器之后，把最终纯 Plain chain 交给
+        # Sylanne 的低优先级仲裁器。
+        event._result = SimpleNamespace(chain=list(response.result_chain.chain))
+        handled = await EmotionalStatePlugin._maybe_suppress_realtime_takeover(
+            shell,
+            event,
+        )
+
+        assert handled is True
+        assert event.get_result().chain == []
+        assert event.get_extra("_syl_realtime_takeover") is True
+        assert len(calls) == 1
+        assert assistant_part.text == "原始未清理文本"
+
+    asyncio.run(scenario())
+
+
+def test_late_tts_record_owns_turn_before_segmented_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """下游装饰器把最终文本变成 Record 时，只能发送语音，不能先发分段文本。"""
+
+    async def scenario() -> None:
+        plugin = _Plugin(
+            tempfile.mkdtemp(prefix="rt_late_tts_owner_"),
+            _cfg(enabled=True, intercept=True),
+        )
+        sent: list[str] = []
+
+        class Context:
+            async def send_message(self, _origin: str, message: object) -> None:
+                chain = getattr(message, "chain", None) or getattr(
+                    message, "parts", None
+                )
+                sent.append(str(getattr(chain[0], "text", "")) if chain else "")
+
+        plugin.context = Context()
+        pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
+        monkeypatch.setattr(
+            "sylanne_alpha.llm_response_pipeline.realtime_plan",
+            lambda *_args, **_kwargs: {
+                "message_parts": [
+                    {
+                        "index": 0,
+                        "text": "写什么插件呀",
+                        "delay_before_seconds": 0.0,
+                    },
+                    {
+                        "index": 1,
+                        "text": "你最近好像一直在折腾这些",
+                        "delay_before_seconds": 0.0,
+                    },
+                ],
+                "message_count": 2,
+                "segmentation_source": "model_semantic_beats",
+            },
+        )
+        event = _Ev()
+        response = LLMResponse(
+            role="assistant",
+            completion_text="写什么插件呀\n你最近好像一直在折腾这些",
+        )
+
+        await pipe._on_llm_response_inner(event, response)
+        assistant_part = SimpleNamespace(text=response.completion_text)
+        run_context = SimpleNamespace(
+            messages=[
+                SimpleNamespace(role="user", content="在写插件 没干啥啊"),
+                SimpleNamespace(role="assistant", content=[assistant_part]),
+            ]
+        )
+        shell = object.__new__(EmotionalStatePlugin)
+        shell._llm_response_pipeline = pipe
+        shell._has_conversation_manager = lambda: False
+
+        await EmotionalStatePlugin.on_agent_done(
+            shell,
+            event,
+            run_context,
+            response,
+        )
+
+        record = Record(file="/tmp/clonetts.wav")
+        event._result = SimpleNamespace(chain=[record])
+        handled = await EmotionalStatePlugin._maybe_suppress_realtime_takeover(
+            shell,
+            event,
+        )
+
+        assert handled is False
+        assert event.get_result().chain == [record]
+        assert sent == [], "最终输出已由 Record 接管时，不得提前发送任何文本气泡"
+
+    asyncio.run(scenario())
+
+
+def test_sanitizer_precedes_default_tts_and_arbitrator_follows_it() -> None:
+    """清洗先于 TTS，输出所有权仲裁晚于 TTS，形成固定三阶段顺序。"""
+
+    from astrbot.core.star.register.star_handler import star_handlers_registry
+
+    handlers = {
+        metadata.handler_name: metadata
+        for metadata in star_handlers_registry.get_handlers_by_module_name("main")
+        if metadata.handler_name
+        in {"on_decorating_result", "_on_final_output_arbitration"}
+    }
+    assert handlers["on_decorating_result"].extras_configs.get("priority") == 1000
+    assert handlers["_on_final_output_arbitration"].extras_configs.get("priority") == -1000
