@@ -122,6 +122,21 @@ def _cap_parts(parts: list[str], *, max_parts: int) -> list[str]:
     return head
 
 
+def _trim_semantic_delivery_boundaries(parts: list[str]) -> list[str]:
+    """Remove transport-only whitespace around separately sent semantic beats.
+
+    The parser keeps every authored character so persisted history remains
+    lossless.  Once those slices become separate IM messages, however, leading
+    or trailing line breaks render as empty rows inside a bubble.  Trim only
+    multi-part semantic delivery; ordinary and oversized single-message text
+    keeps its exact bytes.
+    """
+
+    if len(parts) <= 1:
+        return parts
+    return [part.strip() for part in parts]
+
+
 def realtime_plan(
     session_key: str,
     text: str,
@@ -155,6 +170,11 @@ def realtime_plan(
     capped = _cap_parts(parts, max_parts=max_parts)
     if pause_classes is not None and len(capped) != len(parts):
         pause_classes = pause_classes[: len(capped)]
+    delivery_parts = (
+        _trim_semantic_delivery_boundaries(capped)
+        if semantic is not None
+        else capped
+    )
     return {
         "schema_version": REALTIME_PLAN_SCHEMA_VERSION,
         "kind": "realtime_chat_plan",
@@ -163,10 +183,10 @@ def realtime_plan(
         "max_parts": max_parts,
         "capped": len(capped) != len(parts),
         "uncapped_count": len(parts),
-        "message_count": len(capped),
+        "message_count": len(delivery_parts),
         "segmentation_source": segmentation_source,
         "message_parts": _message_parts(
-            capped,
+            delivery_parts,
             chars_per_second=chars_per_second,
             rng=rng,
             first_delay=first_delay,

@@ -760,6 +760,15 @@ class LLMResponsePipeline:
     # ------------------------------------------------------------------
     # Main response handler
     # ------------------------------------------------------------------
+    @staticmethod
+    def _has_pending_tool_calls(response: Any) -> bool:
+        """Return whether this is an intermediate assistant tool-call response."""
+
+        return any(
+            bool(getattr(response, field, None))
+            for field in ("tools_call_args", "tools_call_name", "tools_call_ids")
+        )
+
     async def _on_llm_response_inner(self, event: Any, response: Any) -> None:
         """LLM 响应拦截的主入口。
 
@@ -779,6 +788,38 @@ class LLMResponsePipeline:
         cfg = self._p._config or {}
         # 次要修复②：统一走 realtime_flags（与请求侧同一口径，见该函数 docstring）。
         realtime_enabled, intercept = realtime_flags(cfg)
+
+        if response is None:
+            return
+
+        # 工具循环的 assistant 响应不是最终用户回复。AstrBot 会继续执行工具，
+        # 再由工具本身或后续最终 assistant 响应决定交付。这里若提前分段直发，
+        # 会把 TTS/send_message 等自发送工具的参数或前置文本先发一遍，随后工具
+        # 再发一次，形成跨插件双交付。只做安全清理，绝不置接管旗标、调度分段
+        # 或把中间步骤写入对话观测；判据只看框架公开的 tool-call 字段，不识别
+        # 任何具体插件或工具名。
+        if self._has_pending_tool_calls(response):
+            text = normalize_completion_text(getattr(response, "completion_text", ""))
+            cleaned = strip_draft_blocks(text)
+            cleaned = self._sanitize_response(cleaned)
+            cleaned, _semantic_parts = self._parse_semantic_response(
+                event,
+                original_text=text,
+                sanitized_text=cleaned,
+            )
+            if cleaned != text:
+                response.completion_text = cleaned
+            logger.info(
+                "Sylanne segmented delivery skipped for intermediate tool call: "
+                "session=%s calls=%d",
+                session_key,
+                max(
+                    len(getattr(response, "tools_call_args", None) or ()),
+                    len(getattr(response, "tools_call_name", None) or ()),
+                    len(getattr(response, "tools_call_ids", None) or ()),
+                ),
+            )
+            return
 
         if not realtime_enabled or not intercept:
             # 未启用即时聊天拦截时，仅清理 thinking/draft 块 + 注入防御；
@@ -848,9 +889,6 @@ class LLMResponsePipeline:
                             else None
                         )
                     )
-            return
-
-        if response is None:
             return
 
         # M4b（realtime 完整重做 Model-D，响应侧第二层防御）：本轮若正走框架

@@ -447,6 +447,67 @@ def test_punctuation_only_semantic_beat_preserves_meaningful_dispatch_parts() ->
     assert 1.25 <= calls[0][1][2]["delay_before_seconds"] <= 2.75
 
 
+def test_tool_call_intermediate_response_never_starts_segmented_delivery() -> None:
+    """工具循环中间响应由框架/工具继续处理，Sylanne 不能抢先直发其前置文本。"""
+
+    plugin = _Plugin(
+        tempfile.mkdtemp(prefix="rt_tool_call_"),
+        _cfg(enabled=True, intercept=True),
+    )
+    pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
+    calls = _stub_dispatch(pipe)
+    nonce = "A7B8C9"
+    event = _Ev()
+    event.set_extra(SEMANTIC_BEAT_NONCE_EXTRA, nonce)
+    marker = build_marker(nonce, PauseClass.NORMAL)
+    raw = f"……你说得好有道理{marker}我竟无法反驳"
+    response = LLMResponse(
+        role="assistant",
+        completion_text=raw,
+        tools_call_args=[{"text": "……你说得好有道理我竟无法反驳"}],
+        tools_call_name=["clone_tts"],
+        tools_call_ids=["call_tts_1"],
+    )
+
+    _run(pipe, response, plugin, event)
+
+    assert response.completion_text == "……你说得好有道理我竟无法反驳"
+    assert response.tools_call_name == ["clone_tts"]
+    assert response.tools_call_args == [{"text": "……你说得好有道理我竟无法反驳"}]
+    assert event.get_extra("_syl_realtime_takeover") is None
+    assert calls == []
+
+
+def test_marker_on_its_own_line_keeps_history_but_not_empty_bubble_rows() -> None:
+    plugin = _Plugin(
+        tempfile.mkdtemp(prefix="rt_marker_line_"),
+        _cfg(enabled=True, intercept=True),
+    )
+    pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
+    calls = _stub_dispatch(pipe)
+    nonce = "A7B8C9"
+    event = _Ev()
+    event.set_extra(SEMANTIC_BEAT_NONCE_EXTRA, nonce)
+    marker = build_marker(nonce, PauseClass.NORMAL)
+    raw = f"嗯，你以为博士就是全知全能的嘛\n{marker}\n……才六点多，你怎么醒这么早"
+    response = LLMResponse(role="assistant", completion_text=raw)
+
+    _run(pipe, response, plugin, event)
+
+    assert response.completion_text == (
+        "嗯，你以为博士就是全知全能的嘛\n\n……才六点多，你怎么醒这么早"
+    )
+    assert len(calls) == 1
+    assert [part["text"] for part in calls[0][1]] == [
+        "嗯，你以为博士就是全知全能的嘛",
+        "……才六点多，你怎么醒这么早",
+    ]
+    assert all(
+        part["text"] == part["text"].strip()
+        for part in calls[0][1]
+    )
+
+
 @pytest.mark.parametrize(
     "event",
     [

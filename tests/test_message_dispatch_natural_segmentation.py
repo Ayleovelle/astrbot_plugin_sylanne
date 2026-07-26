@@ -54,6 +54,33 @@ def test_real_reply_uses_model_authored_semantic_beats_not_local_rebalancing() -
     assert plan["segmentation_source"] == "model_semantic_beats"
 
 
+def test_semantic_delivery_strips_boundary_whitespace_from_each_chat_bubble() -> None:
+    clean_text = "嗯，你以为博士就是全知全能的嘛\n\n……才六点多，你怎么醒这么早"
+    semantic_parts = [
+        {
+            "text": "嗯，你以为博士就是全知全能的嘛\n",
+            "pause_before": None,
+        },
+        {
+            "text": "\n……才六点多，你怎么醒这么早",
+            "pause_before": "normal",
+        },
+    ]
+
+    plan = realtime_plan(
+        "2300184498",
+        clean_text,
+        semantic_parts=semantic_parts,
+        rng=random.Random(8),
+    )
+
+    assert [part["text"] for part in plan["message_parts"]] == [
+        "嗯，你以为博士就是全知全能的嘛",
+        "……才六点多，你怎么醒这么早",
+    ]
+    assert plan["source_text_chars"] == len(clean_text)
+
+
 def test_missing_semantic_plan_sends_ordinary_reply_as_one_exact_message() -> None:
     text = "第一句。\n第二句，仍然属于同一条普通回复。  "
 
