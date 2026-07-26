@@ -1575,27 +1575,38 @@ class WebUIRoutes:
     def _frontend_spine_layers(self, comp: Any) -> list[dict[str, Any]]:
         """将计时数据转换为前端期望的 spine_layers 数组。"""
         layer_meta = [
-            ("L1", "HDC Perception", "Hyperdimensional binary encoding. Converts text to 2048-bit vectors."),
-            ("L2", "Predictive Coding Gate", "Computes Hamming surprise against prediction. Routes processing path."),
-            ("L3", "Void-Scar Engine", "Irreversible scar state tracking. Wounds heal through stages."),
-            ("L4", "Relational Sheaf", "Cross-relationship propagation via sheaf Laplacian."),
-            ("L5", "MoE-HGT", "Mixture-of-Experts + Heterogeneous Graph Transformer."),
-            ("L6", "Autopoietic Boundary", "32-dim identity kernel with orthogonal projection."),
-            ("L7", "Phase Transition", "Pressure accumulation to threshold. Expression modes."),
+            ("L1", "perception", "HDC Perception", "Hyperdimensional binary encoding. Converts text to 2048-bit vectors."),
+            ("L2", "gate", "Predictive Coding Gate", "Computes Hamming surprise against prediction. Routes processing path."),
+            ("L3", "void_scar", "Void-Scar Engine", "Irreversible scar state tracking. Wounds heal through stages."),
+            ("L4", "sheaf", "Relational Sheaf", "Cross-relationship propagation via sheaf Laplacian."),
+            ("L5", "hgt", "MoE-HGT", "Mixture-of-Experts + Heterogeneous Graph Transformer."),
+            ("L6", "boundary", "Autopoietic Boundary", "32-dim identity kernel with orthogonal projection."),
+            ("L7", "expression", "Phase Transition", "Pressure accumulation to threshold. Expression modes."),
         ]
         timing_raw = comp.timing_stats() if hasattr(comp, "timing_stats") else {}
         result = []
-        for lid, name, desc in layer_meta:
-            stats = timing_raw.get(lid, timing_raw.get(lid.replace("L", "layer_"), {}))
+        for lid, internal_key, name, desc in layer_meta:
+            stats = timing_raw.get(
+                internal_key,
+                timing_raw.get(lid, timing_raw.get(lid.replace("L", "layer_"), {})),
+            )
             if not isinstance(stats, dict):
                 stats = {}
-            avg_ms = round(stats.get("mean_ns", stats.get("p50_ns", 0)) / 1_000_000, 1)
-            p50_ms = round(stats.get("p50_ns", 0) / 1_000_000, 1)
-            p99_ms = round(stats.get("p99_ns", stats.get("p95_ns", 0)) / 1_000_000, 1)
+            avg_ms = round(
+                stats.get("mean_ns", stats.get("p50_ns", 0)) / 1_000_000, 6
+            )
+            p50_ms = round(stats.get("p50_ns", 0) / 1_000_000, 6)
+            p95_ms = round(
+                stats.get("p95_ns", stats.get("p99_ns", 0)) / 1_000_000, 6
+            )
+            p99_ms = round(
+                stats.get("p99_ns", stats.get("p95_ns", 0)) / 1_000_000, 6
+            )
             count = int(stats.get("count", 0))
             result.append({
                 "id": lid, "name": name, "status": "active" if count > 0 else "idle",
-                "avg": avg_ms, "p50": p50_ms, "p99": p99_ms, "count": count, "desc": desc,
+                "avg": avg_ms, "p50": p50_ms, "p95": p95_ms, "p99": p99_ms,
+                "count": count, "desc": desc,
             })
         return result
 

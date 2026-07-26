@@ -193,6 +193,112 @@ def test_standalone_state_supports_resonance_spine_without_empty_fallback() -> N
         "tick_count": 0,
     }
 
+
+def test_standalone_state_exposes_real_resonance_layer_timings() -> None:
+    from sylanne_alpha._engine.sylanne_core.compute.kernel import AlphaKernel
+    from sylanne_alpha.webui_server import _build_state
+
+    kernel = AlphaKernel.boot("timed-session")
+    kernel.tick({"text": "timing probe", "now": 1.0})
+    plugin = SimpleNamespace(
+        _config={},
+        _hosts={"timed-session": SimpleNamespace(kernel=kernel)},
+        _last_user_texts={},
+        _last_bot_texts={},
+        _webui_runtime_id="test-runtime",
+    )
+
+    state = _build_state(plugin, session="timed-session")
+
+    assert kernel.computation.latest_timing_ns > 0
+    assert [item["id"] for item in state["spine_layers"]] == [
+        "L1",
+        "L2",
+        "L3",
+        "L4",
+        "L5",
+        "L6",
+        "L7",
+    ]
+    assert all(item["count"] == 1 for item in state["spine_layers"])
+    assert all(item["avg"] > 0 for item in state["spine_layers"])
+
+
+def test_standalone_default_session_selects_most_active_host() -> None:
+    from sylanne_alpha._engine.sylanne_core.compute.kernel import AlphaKernel
+    from sylanne_alpha.webui_server import _build_state
+
+    default_kernel = AlphaKernel.boot("default")
+    active_kernel = AlphaKernel.boot("active-session")
+    default_kernel.computation._tick_count = 0
+    active_kernel.computation._tick_count = 7
+    plugin = SimpleNamespace(
+        _config={},
+        _hosts={
+            "default": SimpleNamespace(kernel=default_kernel),
+            "active-session": SimpleNamespace(kernel=active_kernel),
+        },
+        _last_user_texts={},
+        _last_bot_texts={},
+        _webui_runtime_id="test-runtime",
+    )
+
+    state = _build_state(plugin, session="default")
+
+    assert state["current_session"] == "active-session"
+    assert state["session_id"] == "active-session"
+    assert state["tick_count"] == 7
+
+
+def test_native_spine_layers_map_internal_timing_keys_to_l1_l7() -> None:
+    from sylanne_alpha.webui_routes import WebUIRoutes
+
+    internal_keys = [
+        "perception",
+        "gate",
+        "void_scar",
+        "sheaf",
+        "hgt",
+        "boundary",
+        "expression",
+    ]
+    timing = {
+        key: {
+            "mean_ns": index * 1_000_000,
+            "p50_ns": (index + 10) * 1_000_000,
+            "p99_ns": (index + 20) * 1_000_000,
+            "count": index,
+        }
+        for index, key in enumerate(internal_keys, start=1)
+    }
+    comp = SimpleNamespace(timing_stats=lambda: timing)
+
+    layers = WebUIRoutes(SimpleNamespace())._frontend_spine_layers(comp)
+
+    assert [item["id"] for item in layers] == [
+        "L1",
+        "L2",
+        "L3",
+        "L4",
+        "L5",
+        "L6",
+        "L7",
+    ]
+    assert [
+        (
+            item["avg"],
+            item["p50"],
+            item["p99"],
+            item["count"],
+            item["status"],
+        )
+        for item in layers
+    ] == [
+        (float(index), float(index + 10), float(index + 20), index, "active")
+        for index in range(1, 8)
+    ]
+
+
 if __name__ == "__main__":
     test_glossary_data()
     test_config_presets()

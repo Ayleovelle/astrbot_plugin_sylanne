@@ -78,6 +78,26 @@ export interface TimingLayer {
   count?: number
 }
 
+export interface TimingEntry {
+  layer?: string
+  avg?: number | string
+  p95?: number | string
+  p99?: number | string
+  count?: number
+}
+
+export interface SpineLayer {
+  id: string
+  name?: string
+  status?: string
+  avg?: number
+  p50?: number
+  p95?: number
+  p99?: number
+  count?: number
+  desc?: string
+}
+
 export interface PersonalitySixItem {
   name?: string
   value?: number
@@ -107,8 +127,9 @@ export interface StateResponse {
   route_distribution?: RouteDistribution
   boundary?: BoundaryState
   expression?: ExpressionState
-  timing?: Record<string, number>
+  timing?: Record<string, number> | TimingEntry[]
   layers?: Record<string, TimingLayer>
+  spine_layers?: SpineLayer[]
   personality?: PersonalityState
   feedback?: FeedbackState
   sessions?: SessionInfo[]

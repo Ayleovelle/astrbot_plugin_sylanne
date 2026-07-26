@@ -8,6 +8,7 @@ import StatGrid from '../components/ui/StatGrid.vue'
 import Badge from '../components/ui/Badge.vue'
 import RouteBar from '../components/ui/RouteBar.vue'
 import type { RouteDistribution } from '../api/types'
+import { buildTimingRows, type TimingRow } from './monitorTiming'
 
 // Mirrors the old dashboard's adaptState()/num() helper (UI/index.html,
 // pre-rebuild — see git history at 1f8a21f). Explicit null/undefined/''
@@ -24,10 +25,6 @@ function num(obj: Record<string, unknown> | undefined, keys: string[], dflt: num
     }
   }
   return dflt
-}
-
-function fmtMs(v: number): string {
-  return v.toFixed(1) + 'ms'
 }
 
 const live = useLiveStore()
@@ -107,50 +104,7 @@ const feedbackItems = computed(() => {
   ]
 })
 
-interface TimingRow {
-  layer: string
-  avg: string
-  p95: string
-  count: string
-}
-
-const LAYER_ORDER = ['L1', 'L2', 'L3', 'L4', 'L5', 'L6', 'L7']
-
-const timingRows = computed<TimingRow[]>(() => {
-  const s = live.state
-  if (!s) return []
-
-  if (s.layers) {
-    const layers = s.layers
-    const rows: TimingRow[] = []
-    for (const key of LAYER_ORDER) {
-      const l = layers[key]
-      if (!l) continue
-      const avg = l.avg ?? l.avg_ms
-      const p95 = l.p95 ?? l.p95_ms
-      rows.push({
-        layer: key,
-        avg: avg !== undefined ? fmtMs(avg) : '—',
-        p95: p95 !== undefined ? fmtMs(p95) : '—',
-        count: l.count !== undefined ? String(l.count) : '—',
-      })
-    }
-    if (rows.length) return rows
-  }
-
-  if (s.timing) {
-    const timing = s.timing
-    const rows: TimingRow[] = []
-    for (const key of LAYER_ORDER) {
-      const ms = num(timing, [key + '_ms'], NaN)
-      if (Number.isNaN(ms)) continue
-      rows.push({ layer: key, avg: fmtMs(ms), p95: '—', count: '—' })
-    }
-    if (rows.length) return rows
-  }
-
-  return []
-})
+const timingRows = computed<TimingRow[]>(() => buildTimingRows(live.state))
 </script>
 
 <template>

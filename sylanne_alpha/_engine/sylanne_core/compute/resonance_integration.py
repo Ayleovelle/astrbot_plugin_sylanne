@@ -54,6 +54,15 @@ if TYPE_CHECKING:
     from ..config import DimensionProfile
 
 _TIMING_WINDOW = 50
+_TIMING_LAYER_KEYS = (
+    "perception",
+    "gate",
+    "void_scar",
+    "sheaf",
+    "hgt",
+    "boundary",
+    "expression",
+)
 
 
 class ResonanceSpine:
@@ -81,6 +90,7 @@ class ResonanceSpine:
         "_route_counts",
         "_feedback_counts",
         "_timings",
+        "_layer_timings",
         "_expression_drive",
         "_expression_threshold",
         "_should_express",
@@ -181,6 +191,9 @@ class ResonanceSpine:
             "rejected": 0,
         }
         self._timings: deque[int] = deque(maxlen=_TIMING_WINDOW)
+        self._layer_timings: dict[str, deque[int]] = {
+            layer: deque(maxlen=_TIMING_WINDOW) for layer in _TIMING_LAYER_KEYS
+        }
         self._expression_drive = 0.0
         self._expression_threshold = 0.6
         self._should_express = False
@@ -398,19 +411,26 @@ class ResonanceSpine:
         self._last_process_time = timestamp
 
         # === Module 0: HDC Perception ===
+        layer_started = time.perf_counter_ns()
         h = self._encoder.encode_text(text)
         self._last_hdc_vec = h
         hdc_signal = self._hdc_to_field_signal(h)
         self._field.inject(0, hdc_signal)
+        self._layer_timings["perception"].append(
+            time.perf_counter_ns() - layer_started
+        )
 
         # === Module 1: Predictive Coding Gate ===
+        layer_started = time.perf_counter_ns()
         surprise = self._gate.surprise(h)
         self._gate.update(h, surprise)
         self._last_surprise = surprise
         gate_signal = [surprise * 0.5] * self._field.state_dim
         self._field.inject(1, gate_signal)
+        self._layer_timings["gate"].append(time.perf_counter_ns() - layer_started)
 
         # === Module 2: VoidScar Engine ===
+        layer_started = time.perf_counter_ns()
         ssm_input = self._hdc_to_ssm_input(h, surprise)
         engine_result = self._engine.process(
             event_vec=bytes(h),
@@ -451,16 +471,22 @@ class ResonanceSpine:
         # Pad to state_dim
         void_signal += [0.0] * (self._field.state_dim - len(void_signal))
         self._field.inject(2, void_signal[: self._field.state_dim])
+        self._layer_timings["void_scar"].append(
+            time.perf_counter_ns() - layer_started
+        )
 
         # === Module 3: Relational Sheaf ===
+        layer_started = time.perf_counter_ns()
         sheaf_result = self._sheaf.tick(0, ssm_input, timestamp=timestamp)
         sheaf_energy = float(
             sheaf_result.get("energy", 0.0) if isinstance(sheaf_result, dict) else 0.0
         )
         sheaf_signal = [sheaf_energy * 0.3] * self._field.state_dim
         self._field.inject(3, sheaf_signal)
+        self._layer_timings["sheaf"].append(time.perf_counter_ns() - layer_started)
 
         # === Module 4: HGT Decision ===
+        layer_started = time.perf_counter_ns()
         hgt_tokens = self._hgt.build_tokens_from_spine(
             scar_state=self._engine.scar_state,
             void_space=self._engine.void_space,
@@ -473,8 +499,10 @@ class ResonanceSpine:
         hgt_decision = self._hgt.forward(hgt_tokens, self._personality)
         hgt_signal = list(hgt_decision) + [0.0] * (self._field.state_dim - len(hgt_decision))
         self._field.inject(4, hgt_signal[: self._field.state_dim])
+        self._layer_timings["hgt"].append(time.perf_counter_ns() - layer_started)
 
         # === Module 5: Autopoietic Boundary ===
+        layer_started = time.perf_counter_ns()
         force = self._emotion_to_boundary_force(emotion)
         boundary_result = self._boundary.perturb(force)
         self._boundary.self_repair()
@@ -483,8 +511,12 @@ class ResonanceSpine:
         if boundary_result.get("phase_transition"):
             boundary_signal[0] += 0.5
         self._field.inject(5, boundary_signal)
+        self._layer_timings["boundary"].append(
+            time.perf_counter_ns() - layer_started
+        )
 
         # === Module 6: Expression (pre-resonance drive) ===
+        layer_started = time.perf_counter_ns()
         drive = self._engine.expression_drive()
         drive = max(0.0, min(1.0, drive + hgt_decision[0] * 0.3))
         expr_signal = [drive * 0.5] * self._field.state_dim
@@ -505,8 +537,9 @@ class ResonanceSpine:
         # === Extract expression decision from converged field ===
         self._update_expression(resonance_meta, emergence, dt, hgt_decision)
 
-        elapsed = time.perf_counter_ns() - t0
-        self._timings.append(elapsed)
+        finished = time.perf_counter_ns()
+        self._layer_timings["expression"].append(finished - layer_started)
+        self._timings.append(finished - t0)
 
         result = self._build_result(text, timestamp, self._should_express, hgt_decision)
         if dialogue_quality is not None:
@@ -1139,6 +1172,35 @@ class ResonanceSpine:
     def latest_timing_ns(self) -> int:
         """Most recent end-to-end computation duration."""
         return int(self._timings[-1]) if self._timings else 0
+
+    def timing_stats(self) -> dict[str, dict[str, float]]:
+        """Return rolling per-layer timing statistics in nanoseconds."""
+        stats: dict[str, dict[str, float]] = {}
+        for layer, samples in self._layer_timings.items():
+            if not samples:
+                stats[layer] = {
+                    "mean_ns": 0.0,
+                    "p50_ns": 0.0,
+                    "p95_ns": 0.0,
+                    "p99_ns": 0.0,
+                    "count": 0,
+                }
+                continue
+            ordered = sorted(samples)
+            count = len(ordered)
+
+            def percentile(fraction: float) -> float:
+                index = max(0, min(count - 1, math.ceil(count * fraction) - 1))
+                return float(ordered[index])
+
+            stats[layer] = {
+                "mean_ns": float(sum(ordered) / count),
+                "p50_ns": percentile(0.50),
+                "p95_ns": percentile(0.95),
+                "p99_ns": percentile(0.99),
+                "count": count,
+            }
+        return stats
 
     # ------------------------------------------------------------------
     # Public embodiment controls

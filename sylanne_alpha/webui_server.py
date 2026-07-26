@@ -3195,9 +3195,16 @@ def _frontend_spine_layers(timing_raw: dict, comp_diag: dict) -> list[dict[str, 
         stats = timing_raw.get(internal_key, timing_raw.get(lid, {}))
         if not isinstance(stats, dict):
             stats = {}
-        avg_ms = round(stats.get("mean_ns", stats.get("p50_ns", 0)) / 1_000_000, 1)
-        p50_ms = round(stats.get("p50_ns", 0) / 1_000_000, 1)
-        p99_ms = round(stats.get("p99_ns", stats.get("p95_ns", 0)) / 1_000_000, 1)
+        avg_ms = round(
+            stats.get("mean_ns", stats.get("p50_ns", 0)) / 1_000_000, 6
+        )
+        p50_ms = round(stats.get("p50_ns", 0) / 1_000_000, 6)
+        p95_ms = round(
+            stats.get("p95_ns", stats.get("p99_ns", 0)) / 1_000_000, 6
+        )
+        p99_ms = round(
+            stats.get("p99_ns", stats.get("p95_ns", 0)) / 1_000_000, 6
+        )
         count = int(stats.get("count", 0))
         result.append(
             {
@@ -3206,6 +3213,7 @@ def _frontend_spine_layers(timing_raw: dict, comp_diag: dict) -> list[dict[str, 
                 "status": "active" if count > 0 else "idle",
                 "avg": avg_ms,
                 "p50": p50_ms,
+                "p95": p95_ms,
                 "p99": p99_ms,
                 "count": count,
                 "desc": desc,
@@ -3247,7 +3255,7 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
 
     # 如果没有指定 session，自动选择最活跃的（tick_count 最高的 host）
     # 避免选到从未处理过消息的 "default" 空 host
-    if not session or session not in all_sessions:
+    if not session or session == "default" or session not in all_sessions:
         best_key = all_sessions[0]
         best_ticks = -1
         for sk in all_sessions:
