@@ -278,14 +278,13 @@ class CanonicalKernelBodyPort:
                 ls = getattr(comp, "_last_surprise", None)
                 if ls is not None:
                     ext["surprise"] = float(ls)
-                gate = getattr(comp, "_gate", None)
-                if gate is not None:
-                    prec = getattr(gate, "precision", None)
-                    if prec is not None:
-                        ext["precision"] = float(prec)
-                    ms = getattr(gate, "mean_surprise", None)
-                    if ms is not None:
-                        ext["mean_surprise"] = float(ms)
+                gate = comp.gate
+                prec = getattr(gate, "precision", None)
+                if prec is not None:
+                    ext["precision"] = float(prec)
+                ms = getattr(gate, "mean_surprise", None)
+                if ms is not None:
+                    ext["mean_surprise"] = float(ms)
                 # Wave 3：void_pressure（VoidScarEngine 空腔压力）也只在 computation 上，不在
                 # surface。engine.observe() 经核实只读（带缓存、不推进；haiku 侦察 + 上游 audit），
                 # 同 surprise/precision 的单一来源纪律，从这唯一边界处取，禁止 agent 下探。

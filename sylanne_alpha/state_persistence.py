@@ -215,6 +215,22 @@ class StatePersistence:
         # _scan_pending_deletes 载入；扫描完成前为空。在此之前 WebUI load 一律不准入
         # store（只返回游离副本渲染），防抢跑的读把崩溃残留的删除意图漏检、复活归档。
         self._pending_delete_scan_done: bool = False
+        # v2.5.0 跨群 profile 软同步（§3/§4.1/§8 B1-B4）：per-person 锁，键为
+        # f"{platform}:{sender_id}"，只护 PersonProfile 的读改写临界区
+        # （load → 纯函数合并 → save），与 per-session 锁体系
+        # （session_context.py 的 session_lock/conv_sync_lock）完全独立、互不
+        # 干扰——design §3"并发"一节明文这是新增的独立锁，不复用/不混入既有
+        # session 锁语义。惰性建，无容量上限清理（人数量级远小于 session 数，
+        # 且锁本身极轻量；若未来证明有界需要，仿 session_locks 加淘汰）。
+        self._person_profile_locks: dict[str, asyncio.Lock] = {}
+
+    def _get_person_profile_lock(self, platform: str, sender_id: str) -> asyncio.Lock:
+        key = f"{platform}:{sender_id}"
+        lock = self._person_profile_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._person_profile_locks[key] = lock
+        return lock
 
     def _current_memory_occupant(self, session_key: str) -> Any:
         """返回某 session 在 store 里当前占位的 MemorySystem（占位者权威兜底用）。"""
@@ -460,6 +476,115 @@ class StatePersistence:
             await asyncio.to_thread(host.runtime.save, host.kernel)
         except Exception as e:
             logger.warning(f"Sylanne kernel file persist: {e}", exc_info=True)
+
+        # v2.5.0 跨群记忆 profile 软同步（§3/§4.1）——与上面的 dirty-KV/文件落盘
+        # 完全并列、不依赖 dirty_set 非空（profile 落盘节奏独立于 kernel KV 落盘
+        # 节奏）。默认全关（cross_relationship/cross_personality 均 False 且
+        # mode="off"）时 `cross_session_settings` 直接短路，本段零成本、零副作用。
+        try:
+            await self._soft_sync_person_profile(session_key, host, snapshot)
+        except Exception as e:
+            logger.debug(f"Sylanne person profile soft-sync skipped: {e}")
+
+    async def _soft_sync_person_profile(
+        self, session_key: str, host: SylanneAlphaHost, snapshot: dict[str, Any]
+    ) -> None:
+        """persist_kernel 专用软同步钩子（design §3 关系+人格 / §4.1 transient）。
+
+        本方法只做"读身份→读现有档案→纯函数合并→写回"，不碰 kernel/host 本身
+        （kernel 侧的施加只发生在出生播种点，见 `session_context.host()`）。
+        任一前置条件不满足即静默 no-op：无跨群开关 / 认不出身份 / 反向索引登记
+        失败（B5：先登记成功再落盘，同货架写侧既定次序）。
+        """
+        from .cross_session_config import cross_session_settings
+        from .person_profile import (
+            apply_flush_observation,
+            load_person_profile,
+            save_person_profile,
+        )
+        from .person_shelf import register_person_shelf_origin
+
+        settings = cross_session_settings(self._p)
+        if not settings.enabled:
+            # mode="off"：§7 "停读停写旁挂层"——即便 cross_relationship/
+            # cross_personality 某个 bool 已被提前拧开，主档位仍是 off 时
+            # 一律不得把（含 valence/arousal/tension 静态隐私面在内的）
+            # profile 写进 KV。
+            return
+        if not (settings.cross_relationship or settings.cross_personality):
+            return
+
+        identity = self._p._store.get_authenticated_identity(session_key)
+        if not identity:
+            return
+        platform = str(identity.get("platform", "") or "")
+        sender_id = str(identity.get("sender_id", "") or "")
+        if not platform or not sender_id:
+            return
+
+        lock = self._get_person_profile_lock(platform, sender_id)
+        async with lock:
+            safe = self._safe_session_key(session_key)
+            registered = await register_person_shelf_origin(
+                self._p, safe, platform, sender_id, str(identity.get("origin_id", "") or "")
+            )
+            if not registered:
+                return  # B5：登记失败即跳过本轮 profile 落盘，绝不产生孤儿
+
+            profile = await load_person_profile(self._p, platform, sender_id)
+
+            body_snapshot = snapshot.get("body") if isinstance(snapshot, dict) else None
+            body_snapshot = body_snapshot if isinstance(body_snapshot, dict) else {}
+            temperature = body_snapshot.get("temperature")
+            temperature = temperature if isinstance(temperature, dict) else {}
+            current_warmth = float(temperature.get("warmth", profile.warmth_baseline) or 0.0)
+            current_volatility = float(temperature.get("volatility", 0.0) or 0.0)
+
+            memory_snap = body_snapshot.get("memory")
+            memory_snap = memory_snap if isinstance(memory_snap, dict) else {}
+            relationship_snap = memory_snap.get("relationship")
+            relationship_snap = relationship_snap if isinstance(relationship_snap, dict) else {}
+            relationship_counts = (
+                relationship_snap.get("signals")
+                if settings.cross_relationship
+                else None
+            )
+            if not isinstance(relationship_counts, dict):
+                relationship_counts = None
+
+            six_observed: dict[str, float] | None = None
+            if settings.cross_personality:
+                personality_snap = snapshot.get("personality")
+                personality_snap = personality_snap if isinstance(personality_snap, dict) else {}
+                traits = personality_snap.get("traits")
+                if isinstance(traits, dict):
+                    six_observed = traits
+
+            valence = arousal = tension = None
+            if settings.cross_relationship:
+                try:
+                    engine = host.kernel.computation.engine  # type: ignore[union-attr]
+                    observed = engine.observe()
+                    if isinstance(observed, dict):
+                        valence = observed.get("valence")
+                        arousal = observed.get("arousal")
+                        tension = observed.get("tension")
+                except Exception:
+                    valence = arousal = tension = None
+
+            new_profile = apply_flush_observation(
+                profile,
+                now=time.time(),
+                current_warmth=current_warmth,
+                current_volatility=current_volatility,
+                relationship_counts=relationship_counts,
+                six_observed=six_observed,
+                valence=valence,
+                arousal=arousal,
+                tension=tension,
+                update_relationship_affect=settings.cross_relationship,
+            )
+            await save_person_profile(self._p, platform, sender_id, new_profile)
 
     def _extract_dirty_snapshot(
         self, snapshot: dict[str, Any], dirty_set: set[str]
@@ -2044,6 +2169,76 @@ class StatePersistence:
         # meltdown / session-delete 两条 op 各自 scrub、漏了 purge_data）自动获得清扫，
         # 不再各自漏一处。host 不存在时 scrub 内部安全早返回。
         scrub_ok = await self._scrub_kernel_alpha_json_memory(session_key)
+
+        # v2.5.0 P0 slice 2（design §8 B5 数据安全红线）：per-person 货架桶按
+        # (platform, sender_id) 存，与本方法的 session_key 粒度是两套键空间，
+        # 靠反向索引反查级联删除。best-effort、不 gate 上面 all_deleted/scrub_ok
+        # ——货架级联失败不应该阻塞记忆三键删除的 pending-delete entry 摘除
+        # （同 :2099-2104 / :2216-2227 非记忆键清理的既定 best-effort 模式）。
+        try:
+            from .person_shelf import (
+                clear_person_shelf_origin_index,
+                load_person_shelf_origin_index,
+                purge_person_shelf_by_origin,
+            )
+
+            shelf_origins = await load_person_shelf_origin_index(self._p, safe)
+            for entry in shelf_origins:
+                try:
+                    await purge_person_shelf_by_origin(
+                        self._p,
+                        entry["platform"],
+                        entry["sender_id"],
+                        entry["origin_id"],
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        f"Sylanne person_shelf purge cascade skipped for "
+                        f"{session_key!r} entry {entry!r}: {exc}"
+                    )
+
+            # v2.5.0 跨群 profile purge 级联（design §7 "purge 一致性" / §8 B5
+            # 红线）：`valence`/`arousal`/`tension` + `transient_affect` 落明文
+            # KV 备份，是 2.4.1 没有的静态隐私面，必须随 per-session purge 一并
+            # 清除。MEMORY_KV_KEYS_MANIFEST 未单开 `person_profile_origin_index`
+            # ——复用同一份货架反向索引反查 (platform, sender_id)（design 意图，
+            # 见 memory_migration_spine.py:139-176 注释），按 (platform,
+            # sender_id) 去重后每人只重置一次（同一人可能因货架/profile 各自
+            # 登记过不同 origin_id 而在索引里出现多条）。只清瞬时/静态隐私面六
+            # 字段，保留关系四计数/Sylanne Six/warmth_baseline（跨会话长期状态，
+            # 不是"本次会话产生的"）。best-effort，同货架级联一样不 gate
+            # all_deleted/scrub_ok。
+            try:
+                from .person_profile import reset_person_profile_transient
+
+                seen_people: set[tuple[str, str]] = set()
+                for entry in shelf_origins:
+                    person_key = (entry["platform"], entry["sender_id"])
+                    if person_key in seen_people:
+                        continue
+                    seen_people.add(person_key)
+                    try:
+                        await reset_person_profile_transient(
+                            self._p, entry["platform"], entry["sender_id"]
+                        )
+                    except Exception as exc:
+                        logger.debug(
+                            f"Sylanne person_profile transient purge skipped for "
+                            f"{session_key!r} person {person_key!r}: {exc}"
+                        )
+            except Exception as exc:
+                logger.debug(
+                    f"Sylanne person_profile transient purge cascade failed for "
+                    f"{session_key!r}: {exc}"
+                )
+
+            if shelf_origins:
+                await clear_person_shelf_origin_index(self._p, safe)
+        except Exception as exc:
+            logger.debug(
+                f"Sylanne person_shelf purge cascade failed for {session_key!r}: {exc}"
+            )
+
         return all_deleted and scrub_ok
 
     async def purge_session_after_meltdown(self, session_key: str) -> None:
@@ -2236,67 +2431,71 @@ class StatePersistence:
 
     async def sync_message_to_conv_mgr(
         self, session_key: str, role: str, text: str
-    ) -> None:
-        """将消息同步到 AstrBot 的 ConversationManager（平行路径）。
+    ) -> bool:
+        """Append one message to AstrBot history and report whether it landed."""
+        return await self._sync_entries_to_conv_mgr(
+            session_key, [(role, text)]
+        )
 
-        保持 AstrBot 对话系统同步，但不替代 Sylanne 自身的 ConversationBuffer
-        （后者仍用于 flush/consolidation 逻辑）。
+    async def sync_turn_to_conv_mgr(
+        self,
+        session_key: str,
+        user_text: str,
+        assistant_text: str = "",
+    ) -> bool:
+        """Append a complete turn with one snapshot and one database update."""
+        entries = [("user", user_text)]
+        if assistant_text:
+            entries.append(("assistant", assistant_text))
+        return await self._sync_entries_to_conv_mgr(session_key, entries)
 
-        Args:
-            session_key: 会话标识。
-            role: 消息角色（"user" 或 "assistant"）。
-            text: 消息文本内容。
-        """
-        p = self._p
-        conv_mgr = getattr(p, "_conv_mgr", None)
-        if conv_mgr is None:
-            return
-
-        # AstrBot ConversationManager 按 unified_msg_origin 建索引，插件内部的
-        # session_key 不是同一个 key 空间——且不止群聊场景：session_context.py:
-        # session_key() 的 base 取的是 event.session_id（取不到才退化到
-        # unified_msg_origin），本身就常常与 unified_msg_origin 不同；":sender_id"
-        # 后缀只要 event 带 sender_id/user_id（私聊消息通常也带）就会追加，并非
-        # "仅群聊"才有。两条差异叠加，session_key 在真实平台上几乎不可能等于
-        # unified_msg_origin。llm_request_pipeline 在每次
-        # 请求时都会把 session_key → unified_msg_origin 的映射写进
-        # p._store.session_origins（见 llm_request_pipeline.py:846-849），这里
-        # 取出来对齐，取不到时才退化用 session_key 自己（好过完全不同步）。
+    def _resolve_conv_mgr_umo(self, session_key: str) -> str:
+        """Resolve the ConversationManager key before selecting its sync lock."""
         umo = session_key
         try:
-            store = getattr(p, "_store", None)
+            store = getattr(self._p, "_store", None)
             origins = getattr(store, "session_origins", None) if store else None
             if origins is not None:
                 mapped = origins.get(session_key, "")
                 if mapped:
                     umo = str(mapped)
         except Exception:
-            pass  # 映射查询失败不阻断同步，退化用 session_key
+            pass
+        return umo
 
-        # 取 per-session 同步锁，串行化同一会话的"读历史→append→写回"。
-        # 拿不到锁容器（旧版/测试环境无 _store）时降级为无锁——绝不能因为锁机制
-        # 本身报错而阻断同步。锁挂在 store 上跨多次 sync 调用持久存在。锁本身仍按
-        # 插件内部 session_key 取（同一 session_key 必然映射到同一 umo，用哪个
-        # 做锁名不影响互斥语义，session_key 是插件内部本来就有的稳定粒度）。
-        lock = None
+    async def _sync_entries_to_conv_mgr(
+        self, session_key: str, entries: list[tuple[str, str]]
+    ) -> bool:
+        """Serialize one history snapshot/update for all supplied entries."""
+        p = self._p
+        conv_mgr = getattr(p, "_conv_mgr", None)
+        if conv_mgr is None or not entries:
+            return False
+
+        umo = self._resolve_conv_mgr_umo(session_key)
+
+        lock_lease = None
         try:
             store = getattr(p, "_store", None)
             if store is not None:
-                lock = store.get_conv_sync_lock(session_key)
+                lease_factory = getattr(store, "lease_conv_sync_lock", None)
+                if callable(lease_factory):
+                    lock_lease = lease_factory(session_key, umo)
+                else:
+                    lock_lease = store.get_conv_sync_lock(umo)
         except Exception as e:
-            # 降级无锁是有意取向（绝不因锁机制本身报错而阻断同步），但不能静默：
-            # 恰是高并发时最易触发，无日志运维无从发现并发覆盖风险。
-            lock = None
+            lock_lease = None
             logger.warning(
                 "Sylanne conv-sync 取锁失败，降级为无锁同步（并发写回可能互相覆盖）：%s",
                 e,
             )
 
-        if lock is not None:
-            async with lock:
-                await self._do_sync_to_conv_mgr(conv_mgr, umo, role, text)
-        else:
-            await self._do_sync_to_conv_mgr(conv_mgr, umo, role, text)
+        if lock_lease is not None:
+            async with lock_lease:
+                return await self._do_sync_entries_to_conv_mgr(
+                    conv_mgr, umo, entries
+                )
+        return await self._do_sync_entries_to_conv_mgr(conv_mgr, umo, entries)
 
     @staticmethod
     def _extract_conv_history_list(conversation: Any) -> list | None:
@@ -2402,42 +2601,48 @@ class StatePersistence:
             return entry
         return None
 
+    @staticmethod
+    def _conv_history_entry(role: str, text: str) -> dict[str, Any]:
+        """Build one JSON-safe history entry with a normalized role."""
+        normalized_role = "user" if role == "user" else "assistant"
+        try:
+            from astrbot.core.agent.message import (
+                AssistantMessageSegment,
+                TextPart,
+                UserMessageSegment,
+            )
+
+            if normalized_role == "user":
+                message = UserMessageSegment(content=[TextPart(text=text)])
+            else:
+                message = AssistantMessageSegment(content=[TextPart(text=text)])
+            return message.model_dump()
+        except ImportError:
+            return {"role": normalized_role, "content": text}
+
     async def _do_sync_to_conv_mgr(
         self, conv_mgr: Any, umo: str, role: str, text: str
-    ) -> None:
-        """实际执行 ConversationManager 同步的"读→append→写回"。
+    ) -> bool:
+        """Backward-compatible one-entry wrapper for the shared primitive."""
+        return await self._do_sync_entries_to_conv_mgr(
+            conv_mgr, umo, [(role, text)]
+        )
 
-        必须在 per-session 同步锁内调用（由 sync_message_to_conv_mgr 负责），
-        以避免并发整表写回互相覆盖。`umo` 必须是框架的 unified_msg_origin
-        （由调用方 sync_message_to_conv_mgr 完成 session_key → umo 的映射），
-        不是插件内部 session_key。
+    async def _do_sync_entries_to_conv_mgr(
+        self,
+        conv_mgr: Any,
+        umo: str,
+        entries: list[tuple[str, str]],
+    ) -> bool:
+        """Append entries using exactly one history snapshot and one update.
+
+        The caller must hold the resolved-UMO lock.
         """
         try:
             # 获取或创建当前会话
             curr_cid = await conv_mgr.get_curr_conversation_id(umo)
             if not curr_cid:
                 curr_cid = await conv_mgr.new_conversation(umo)
-
-            # 尝试使用 AstrBot 消息类型；不可用时回退到普通字典
-            try:
-                from astrbot.core.agent.message import (
-                    AssistantMessageSegment,
-                    TextPart,
-                    UserMessageSegment,
-                )
-
-                if role == "user":
-                    msg_obj = UserMessageSegment(content=[TextPart(text=text)])
-                else:
-                    msg_obj = AssistantMessageSegment(content=[TextPart(text=text)])
-                # 立即拍平成普通 dict：整条历史最终要经 SQLAlchemy JSON 列落库
-                # （默认 json.dumps 序列化器），直接把 pydantic 对象塞进历史列表
-                # 会在写库时炸 TypeError，且被本方法自己的 except 静默吞掉——
-                # 表现为"同步看起来成功，实际上库里什么都没写"。
-                msg = msg_obj.model_dump()
-            except ImportError:
-                # 旧版 AstrBot 或测试环境：使用普通字典
-                msg = {"role": role, "content": text}
 
             conversation = await conv_mgr.get_conversation(umo, curr_cid)
             history = self._extract_conv_history_list(conversation)
@@ -2453,7 +2658,7 @@ class StatePersistence:
                     "已存储历史",
                     umo,
                 )
-                return
+                return False
             # fix/context-integrity round-2 MAJOR② / round-3 纠偏：幂等守卫（第二道
             # 防线）。round-2 曾以为第一道防线（llm_response_pipeline.py 非拦截分支的
             # skip_conv_sync）已经让【本方法只会在拦截/分段发送分支被调用】、且那条
@@ -2496,23 +2701,34 @@ class StatePersistence:
             # 连续两轮发完全相同的文字（例如中间那轮 bot 恰好 SILENT、没有任何
             # assistant 记录夹在中间）会被这条 guard 误判成"重复"而丢掉第二条真实
             # 用户消息——这是比它防的竞态更容易踩中的真实回归，必须避免。
-            if role != "user" and history:
-                last_entry = self._last_conversational_entry(history)
-                new_sig = self._history_entry_signature(msg)
-                last_sig = (
-                    self._history_entry_signature(last_entry)
-                    if last_entry is not None
-                    else None
-                )
-                if new_sig is not None and last_sig is not None and last_sig == new_sig:
-                    logger.debug(
-                        "Sylanne conv-sync 幂等跳过：末条（跳过尾随 checkpoint/"
-                        "system/tool 记录后）已是同 role+content (umo=%s)，"
-                        "疑似与框架 _save_to_history 并发写重叠",
-                        umo,
+            changed = False
+            for role, text in entries:
+                msg = self._conv_history_entry(role, text)
+                normalized_role = "user" if role == "user" else "assistant"
+                if normalized_role != "user" and history:
+                    last_entry = self._last_conversational_entry(history)
+                    new_sig = self._history_entry_signature(msg)
+                    last_sig = (
+                        self._history_entry_signature(last_entry)
+                        if last_entry is not None
+                        else None
                     )
-                    return
-            history.append(msg)
+                    if (
+                        new_sig is not None
+                        and last_sig is not None
+                        and last_sig == new_sig
+                    ):
+                        logger.debug(
+                            "Sylanne conv-sync 幂等跳过：末条已是同 role+content "
+                            "(umo=%s)",
+                            umo,
+                        )
+                        continue
+                history.append(msg)
+                changed = True
+
+            if not changed:
+                return True
             # 防御竞态：本方法与 AstrBot 自身 _save_to_history 无锁并发，可能读到
             # tool 循环中途的快照（含 assistant tool_calls 但尚无 tool 响应）。写回前
             # 清除破损的 tool_calls/tool 配对，避免把孤儿持久化进历史（fixes #18）。
@@ -2525,6 +2741,7 @@ class StatePersistence:
             except Exception:
                 pass
             await conv_mgr.update_conversation(umo, curr_cid, history=history)
+            return True
         except Exception as e:
             # 2.4.1 红线闸 finding：此处曾是 debug 级别，会把"该补写却因瞬时
             # DB/IO 故障吞掉"的 SILENT 补写失败静默藏起来（fail-open by design，
@@ -2533,6 +2750,7 @@ class StatePersistence:
             logger.warning(
                 f"Sylanne: ConversationManager sync failed: {e}", exc_info=True
             )
+            return False
 
     # ------------------------------------------------------------------
     # AstrBot PersonaManager 集成
@@ -2706,8 +2924,6 @@ class StatePersistence:
         p._cfg_bool("enabled", True)
         p._cfg_bool("use_llm_assessor", True)
         p._cfg("emotion_provider_id", "")
-        p._cfg_bool("fast_assessor_enabled", False)
-        p._cfg("fast_assessor_provider_id", "")
         p._cfg_int("fast_assessor_max_context_chars", 600)
         p._cfg_float("fast_assessor_timeout_seconds", 2.0)
         p._cfg_float("fast_assessor_temperature", 0.0)
@@ -2801,6 +3017,15 @@ class StatePersistence:
         p._cfg_bool("integrated_self_memory_write_enabled", True)
         p._cfg("integrated_self_degradation_profile", "balanced")
         p._cfg_bool("sylanne_alpha_auto_detect_group_context", True)
+        # v2.5.0 P0 slice 1：跨群记忆 6 个开关（design §6），全默认关/最保守档，
+        # 本 slice 不被任何生产读写路径读取——注册默认值只是为了配置面板/WebUI
+        # 展示与后续 slice 接线时零意外，对现网行为零影响。
+        p._cfg("sylanne_alpha_cross_session_mode", "off")
+        p._cfg("sylanne_alpha_cross_session_scope", "owner")
+        p._cfg_bool("sylanne_alpha_cross_dialogue", False)
+        p._cfg_bool("sylanne_alpha_cross_relationship", False)
+        p._cfg_bool("sylanne_alpha_cross_personality", False)
+        p._cfg("sylanne_alpha_cross_visibility_tier", "same_group")
 
     # ------------------------------------------------------------------
     # Item 18: 记忆系统分片存储

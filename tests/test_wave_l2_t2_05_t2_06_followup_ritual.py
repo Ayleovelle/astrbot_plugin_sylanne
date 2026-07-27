@@ -11,8 +11,7 @@ T2-05 —— user_followup 跟进线索：
 
 T2-06 —— 晚安仪式感：
   ④ 早安/晚安关键词观察 → session_context.RitualRegistry.observe_pattern。
-     偏差：assessor 的 greeting/farewell flag 在插件运行时路径不可达
-     （EngineFacade 默认 assessor_enabled=False 且全仓无覆盖点），改用关键词兜底
+     偏差：SDK assessor 的 greeting/farewell flag 在插件运行时路径不可达，改用关键词兜底
      （见 session_context._detect_greeting_ritual_pattern 的注释）。
   ④'：一旦自动注册（≥3 次观测），同步接线进 ProactiveScheduler.register_ritual，
      使既有 reason_code='ritual' 缺席检测（check_ritual_absence）真正可达

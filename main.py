@@ -1,6 +1,6 @@
 """Sylanne-Embodiment -- AstrBot 插件主入口模块。
 
-本模块是 Sylanne 情感身体运行时的 AstrBot 插件薄宿主层，职责：
+本模块是 Sylanne 长期对话状态与行为运行时的 AstrBot 插件薄宿主层，职责：
 1. 继承 AstrBot Star 基类，注册为 AstrBot 插件
 2. 初始化所有子系统（kernel/host/memory/assessor/scheduler/webui 等）
 3. 注册 LLM 请求/响应事件钩子，在 LLM 管线中注入情感状态
@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import hmac
 import os
 import sys
 
@@ -22,11 +23,35 @@ _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
+# ---------------------------------------------------------------------------
+# 热重载防腐:导入任何 sylanne_alpha 之前,先清掉 sys.modules 里残留的旧 sylanne_alpha*。
+# 根因:本插件把插件目录加进 sys.path、用【顶层绝对名】`sylanne_alpha.*` 导入子包,
+# 这些 sys.modules 键不带 `data.plugins.<dir>.` 前缀,逃过了 AstrBot 重载时的模块清理
+# (star_manager._get_plugin_related_modules 只删该前缀的键)。于是装过旧版的进程热
+# 重载/覆盖安装新版时,旧的 sylanne_alpha.* 会赖在 sys.modules 里遮蔽磁盘新文件——
+# Python 直接返回缓存,新增符号(如 realtime_flags)报 "cannot import name"。这里主动
+# 清一次,强制每次(重)加载都从磁盘读新文件。全新进程无残留 → no-op。
+# 仅在非 pytest 下执行:测试进程里其他用例可能已按顶层名导入过 sylanne_alpha,若在此
+# 清掉会造成新旧两份同名模块共存(isinstance/类身份断裂),故测试环境跳过(测试不走
+# AstrBot 热重载路径,无此问题)。生产由 AstrBot import main 触发,此清理必然先于插件
+# 自身的 sylanne_alpha 导入。
+if "pytest" not in sys.modules:
+    import importlib as _importlib
+
+    for _stale_mod in [
+        _k
+        for _k in list(sys.modules)
+        if _k == "sylanne_alpha" or _k.startswith("sylanne_alpha.")
+    ]:
+        del sys.modules[_stale_mod]
+    _importlib.invalidate_caches()
+
 import asyncio  # noqa: E402
 import collections  # noqa: E402
 import contextvars  # noqa: E402
 import importlib  # noqa: E402
 import json  # noqa: E402
+import math  # noqa: E402
 import time  # noqa: E402
 from datetime import timedelta, timezone  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -69,6 +94,18 @@ except ImportError:
 
             return decorator
 
+        def on_agent_begin(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
+        def on_agent_done(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
         def on_llm_stream_chunk(self, *args, **kwargs):
             def decorator(func):
                 return func
@@ -94,6 +131,12 @@ except ImportError:
             return decorator
 
         def on_using_llm_tool(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
+        def on_llm_tool_respond(self, *args, **kwargs):
             def decorator(func):
                 return func
 
@@ -151,7 +194,7 @@ from sylanne_alpha import webui_server as _sylanne_webui_server  # noqa: E402
 from sylanne_alpha.assessor_async import AsyncAssessor  # noqa: E402
 from sylanne_alpha.bounded_dict import BoundedDict  # noqa: E402
 from sylanne_alpha.diagnostics_surface import command_surface, memory_surface, reset_surface  # noqa: E402
-from sylanne_alpha.message_dispatch import realtime_dispatch  # noqa: E402
+from sylanne_alpha.message_dispatch import realtime_dispatch, realtime_flags  # noqa: E402
 from sylanne_alpha.host import SylanneAlphaHost, SylanneAlphaHostEvent  # noqa: E402
 from sylanne_alpha.life_simulation import LifeSimulator  # noqa: E402
 from sylanne_alpha.memory_system import MemorySystem  # noqa: E402
@@ -206,7 +249,8 @@ stop_webui_server = _sylanne_webui_server.stop_webui_server
 # 常量定义
 # ---------------------------------------------------------------------------
 PLUGIN_NAME = "astrbot_plugin_sylanne"
-PLUGIN_VERSION = "1.4.5"
+# Release identity — keep in sync with metadata.yaml `version` and the @register() below.
+PLUGIN_VERSION = "2.5.0"
 PUBLIC_API_VERSION = "1.0"
 MAX_LLM_REQUEST_PROMPT_CHARS = 12000
 _MAX_PAYLOAD_SERIALIZED_CHARS = 60000
@@ -227,6 +271,9 @@ PROACTIVE_SCHEDULER_IDLE_DELAY_SECONDS = 1800.0
 # T1-04②：RhythmLearner 节流落盘间隔（秒）。由 on_message 高频驱动，节流到与
 # life_sim 同量级，避免每条消息都写 KV。
 _RHYTHM_LEARNER_SAVE_MIN_GAP_SECONDS = 90.0
+# PR-Qzone：说说审计/频率闸状态节流落盘间隔。与 rel_state 同量级——发布/确认
+# 都是用户即时动作或低频候选事件，不需要 life_sim 那种 tick 级节流。
+_QZONE_AUDIT_SAVE_MIN_GAP_SECONDS = 10.0
 
 from sylanne_alpha.utils import safe_ensure_future  # noqa: E402, F401
 
@@ -335,7 +382,6 @@ class _StateInjectionBudget:
         "compat_mode",
         "injected",
         "skipped",
-        "model_hint",
         "max_added_chars",
         "max_parts",
         "added_chars",
@@ -344,12 +390,11 @@ class _StateInjectionBudget:
         "context_owner",
     )
 
-    def __init__(self, session_key: str = "", model_hint: str = ""):
+    def __init__(self, session_key: str = ""):
         self.session_key = session_key
         self.compat_mode = ""
         self.injected: list[dict[str, Any]] = []
         self.skipped: list[dict[str, Any]] = []
-        self.model_hint = model_hint
         self.max_added_chars: int = 2400
         self.max_parts: int = 8
         self.added_chars: int = 0
@@ -369,7 +414,7 @@ def _optional_stream_chunk_filter(**kwargs: Any):
     return dec(**kwargs)
 
 
-def _optional_using_llm_tool_filter(**kwargs: Any):
+def _optional_tool_use_filter(**kwargs: Any):
     """AstrBot 部分版本 filter 无 on_using_llm_tool → 直通注册（不挂钩子，降级为无操作）。"""
     dec = getattr(filter, "on_using_llm_tool", None)
     if dec is None:
@@ -377,19 +422,797 @@ def _optional_using_llm_tool_filter(**kwargs: Any):
     return dec(**kwargs)
 
 
+def _optional_tool_respond_filter(**kwargs: Any):
+    """AstrBot 旧版本无 on_llm_tool_respond 时安全降级为不注册该钩子。"""
+    dec = getattr(filter, "on_llm_tool_respond", None)
+    if dec is None:
+        return lambda f: f
+    return dec(**kwargs)
+
+
+def _optional_agent_done_filter(**kwargs: Any):
+    """AstrBot 旧版本无 on_agent_done 时安全降级为不注册该钩子。"""
+
+    dec = getattr(filter, "on_agent_done", None)
+    if dec is None:
+        return lambda f: f
+    return dec(**kwargs)
+
+
+def _optional_agent_begin_filter(**kwargs: Any):
+    """AstrBot 旧版本无 on_agent_begin 时安全降级为不注册该钩子。"""
+
+    dec = getattr(filter, "on_agent_begin", None)
+    if dec is None:
+        return lambda f: f
+    return dec(**kwargs)
+
+
+def _model_function_tool(**kwargs: Any):
+    """Register a model-callable function tool, including zero-argument tools."""
+    return filter.llm_tool(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# v3 shadow：构建期开关的隔离影子（plan Task 13 / design 4.3、14.1、14.2、16.1）
+#
+# 红线（违反即回退）：
+#   - 默认关（build_flags.V3_SHADOW_ENABLED=False，只有 grey 打包才翻）；开着也只观察，
+#     绝不改 v2 的 reply/prompt/history/memory/body，绝不多发一次 LLM/tool 调用。
+#   - 绝不把 v3 身份写进 event.extra；v3 的 future/task 绝不进 plugin._background_tasks
+#     （那份列表的关停顺序归 legacy/v2 所有）。
+#   - 每个异常封死在 v3 内，绝不外泄进 v2；v3 fail 时 v2 照常完成。
+# 本 facade 只做「宿主边界 + 惰性所有权」：__init__ 纯构造零 IO，仓库/线程池全部推迟到
+# initialize()。v3bridge 一律函数内惰性 import（对齐本文件 v2core 的既有写法），import
+# 失败只 fail-close v3。
+# ---------------------------------------------------------------------------
+
+_V3_MAX_PENDING_TURNS = 256
+_V3_SETTLED_HISTORY = 64
+_V3_SHADOW_TERMINATE_TIMEOUT_S = 5.0
+
+
+class _V3PendingTurn:
+    """一轮已捕获、待终端结算的不可变宿主事实。"""
+
+    __slots__ = (
+        "handle",
+        "platform_id",
+        "unified_msg_origin",
+        "message_id",
+        "observation",
+        "context",
+        "session_ref",
+        "speaker_digest",
+        "is_group",
+        "token",
+    )
+
+    def __init__(
+        self,
+        *,
+        handle: Any,
+        platform_id: str,
+        unified_msg_origin: str,
+        message_id: str,
+        observation: Any,
+        context: Any,
+        session_ref: Any,
+        speaker_digest: bytes | None,
+        is_group: bool | None,
+        token: int,
+    ) -> None:
+        self.handle = handle
+        self.platform_id = platform_id
+        self.unified_msg_origin = unified_msg_origin
+        self.message_id = message_id
+        self.observation = observation
+        self.context = context
+        self.session_ref = session_ref
+        self.speaker_digest = speaker_digest
+        self.is_group = is_group
+        # 单调递增的栅栏令牌：同一 session_key 上后一轮会顶掉前一轮，令牌让"迟到的
+        # 终端回调"能认出自己要结算的那轮已经不在了，从而放手而不是错结下一轮。
+        self.token = token
+
+
+class _V3ShadowFacade:
+    """插件持有的唯一 v3 对象；构造零 IO，全部失败模式 fail-close v3。"""
+
+    def __init__(self) -> None:
+        self.enabled = False
+        try:
+            from sylanne_alpha.v3bridge.build_flags import V3_SHADOW_ENABLED
+
+            self.enabled = bool(V3_SHADOW_ENABLED)
+        except Exception:  # noqa: BLE001 - v3 缺失/损坏一律当关闭，绝不影响 v2 装载
+            self.enabled = False
+        self.runtime: Any = None
+        self.counters: Any = None
+        self.accepting = False
+        self._identity: Any = None
+        self._pending: "collections.OrderedDict[str, _V3PendingTurn]" = collections.OrderedDict()
+        self._migration_tasks: dict[Any, asyncio.Task] = {}
+        self._deferred_offer_tasks: set[asyncio.Task] = set()
+        self._ready_sessions: "collections.OrderedDict[Any, None]" = collections.OrderedDict()
+        self._last_speakers: "collections.OrderedDict[Any, bytes]" = collections.OrderedDict()
+        self._lifecycle_lock = asyncio.Lock()
+        self._initialize_task: asyncio.Task | None = None
+        self._terminate_task: asyncio.Task | None = None
+        self._migration_gate = asyncio.Semaphore(1)
+        self._next_token = 0
+        self.settled_actions: collections.deque = collections.deque(maxlen=_V3_SETTLED_HISTORY)
+        # 每进程一次性随机身份/密钥：只活在内存，绝不落盘、绝不进 trace。
+        self._instance_id = f"sylanne-v3-{os.urandom(8).hex()}"
+        self._correlation_secret = os.urandom(32)
+
+    # -- 生命周期 ---------------------------------------------------------
+
+    async def initialize(self, *, root: Any, supervisor_kwargs: dict | None = None) -> bool:
+        """Coalesce concurrent starts; caller cancellation cannot cancel startup."""
+
+        async with self._lifecycle_lock:
+            if not self.enabled or self.runtime is not None:
+                return False
+            if self._terminate_task is not None and self._terminate_task.done():
+                self._terminate_task = None
+            if self._terminate_task is not None and not self._terminate_task.done():
+                return False
+            if self._initialize_task is None:
+                self._initialize_task = asyncio.create_task(
+                    self._initialize(root=root, supervisor_kwargs=supervisor_kwargs)
+                )
+            task = self._initialize_task
+        return bool(await asyncio.shield(task))
+
+    async def _initialize(self, *, root: Any, supervisor_kwargs: dict | None) -> bool:
+        runtime = None
+        try:
+            from sylanne_alpha.v3bridge.integration import V3ShadowRuntime
+            from sylanne_alpha.v3bridge.session_identity import (
+                load_or_create_session_identity_key,
+            )
+            root_path = Path(root)
+            identity = await asyncio.to_thread(
+                load_or_create_session_identity_key,
+                root_path / "session_identity.key",
+            )
+            runtime = await asyncio.to_thread(
+                lambda: V3ShadowRuntime(
+                    root=root_path,
+                    plugin_data_root=root_path.parent,
+                    plugin_instance_id=self._instance_id,
+                    correlation_secret=self._correlation_secret,
+                    **(supervisor_kwargs or {}),
+                )
+            )
+            # V3ShadowRuntime.initialize() 内部就是「先 committer.acquire_epoch()，
+            # 再造 registry/supervisor 起 worker」的顺序，不要在这里重排。
+            await runtime.initialize()
+        except BaseException as exc:  # cleanup also covers loop-shutdown cancellation
+            if runtime is not None:
+                try:
+                    await asyncio.shield(runtime.terminate())
+                except BaseException:  # noqa: BLE001
+                    pass
+            self.runtime = None
+            self.counters = None
+            self.accepting = False
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            self.enabled = False
+            logger.warning(f"Sylanne v3 shadow disabled (initialize failed): {exc}")
+            return False
+        self.runtime = runtime
+        self.counters = runtime.counters
+        self._identity = identity
+        self.accepting = True
+        return True
+
+    def begin_shutdown(self) -> None:
+        """同步关闸：v2 的收尾 save 开始 drain 之前，先断掉新的 v3 准入。"""
+
+        self.accepting = False
+
+    async def terminate(
+        self,
+        *,
+        timeout: float = _V3_SHADOW_TERMINATE_TIMEOUT_S,
+    ) -> None:
+        """Coalesce teardown, but never let wedged v3 IO block plugin shutdown."""
+
+        self.accepting = False
+        async with self._lifecycle_lock:
+            initialize_task = self._initialize_task
+            if (
+                self.runtime is None
+                and (initialize_task is None or initialize_task.done())
+                and self._terminate_task is None
+            ):
+                return
+            if self._terminate_task is None:
+                self._terminate_task = asyncio.create_task(self._terminate())
+            task = self._terminate_task
+        try:
+            completed = bool(
+                await asyncio.wait_for(asyncio.shield(task), timeout=float(timeout))
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Sylanne v3 shadow terminate timed out; "
+                "cleanup remains tracked while plugin teardown continues"
+            )
+            return
+        if not completed:
+            async with self._lifecycle_lock:
+                if self._terminate_task is task:
+                    self._terminate_task = None
+
+    async def _terminate(self) -> bool:
+        initialize_task = self._initialize_task
+        if initialize_task is not None and not initialize_task.done():
+            await asyncio.gather(initialize_task, return_exceptions=True)
+        runtime = self.runtime
+        if runtime is None:
+            return True
+        try:
+            await self.join_private_tasks()
+            await runtime.terminate()
+        except Exception as exc:  # noqa: BLE001 - v3 关停失败绝不阻断 v2 关停
+            logger.warning(f"Sylanne v3 shadow terminate failed: {exc}")
+            return False
+        self.runtime = None
+        self.counters = None
+        self._identity = None
+        self._pending.clear()
+        self._migration_tasks.clear()
+        self._deferred_offer_tasks.clear()
+        self._ready_sessions.clear()
+        self._last_speakers.clear()
+        self._initialize_task = None
+        return True
+
+    async def join_private_tasks(self) -> None:
+        """Drain migration and deferred-offer tasks owned only by this facade."""
+
+        while True:
+            # A task may finish immediately before its done-callback gets an event-loop
+            # turn to remove it from the owner collection.  Re-gathering that completed
+            # task returns synchronously, which can otherwise spin forever and starve
+            # the callback that would remove it.  Prune completed entries explicitly so
+            # teardown never depends on callback scheduling order.
+            for session_ref, task in tuple(self._migration_tasks.items()):
+                if task.done() and self._migration_tasks.get(session_ref) is task:
+                    self._migration_tasks.pop(session_ref, None)
+            self._deferred_offer_tasks.difference_update(
+                task for task in self._deferred_offer_tasks if task.done()
+            )
+            tasks = tuple(self._migration_tasks.values()) + tuple(self._deferred_offer_tasks)
+            if not tasks:
+                return
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def ensure_session(
+        self,
+        *,
+        plugin: Any,
+        session_key: str,
+        platform_id: Any,
+        unified_msg_origin: Any,
+    ) -> bool:
+        """Start one background seed migration and reserve sequence 1.
+
+        The request path never waits for disk IO. A terminal arriving before the
+        migration completes is deferred inside the private v3 task set.
+        """
+
+        if not self.accepting or self.runtime is None or self._identity is None:
+            return False
+        try:
+            from sylanne_alpha.v3bridge.limits import MAX_REPOSITORY_SESSIONS
+
+            platform = _v3_text(platform_id)
+            origin = _v3_text(unified_msg_origin)
+            if not platform or not origin:
+                return False
+            session_ref = self._identity.session_ref(platform, origin, session_generation=0)
+            if session_ref is None:
+                return False
+            if session_ref in self._ready_sessions:
+                self._ready_sessions.move_to_end(session_ref)
+                return True
+            if session_ref in self._migration_tasks:
+                return False
+            if len(self._migration_tasks) + len(self._ready_sessions) >= MAX_REPOSITORY_SESSIONS:
+                return False
+            self.runtime.reserve_migration_sequence(session_ref)
+            task = asyncio.get_running_loop().create_task(
+                self._migrate_session(plugin, session_key, session_ref)
+            )
+            self._migration_tasks[session_ref] = task
+
+            def completed(done: asyncio.Task, ref: Any = session_ref) -> None:
+                self._migration_tasks.pop(ref, None)
+                try:
+                    ready = bool(done.result())
+                except BaseException:
+                    ready = False
+                if ready:
+                    self._ready_sessions[ref] = None
+                    self._ready_sessions.move_to_end(ref)
+                    while len(self._ready_sessions) > MAX_REPOSITORY_SESSIONS:
+                        self._ready_sessions.popitem(last=False)
+
+            task.add_done_callback(completed)
+            return False
+        except Exception as exc:  # noqa: BLE001 - migration admission is shadow-only
+            logger.debug(f"Sylanne v3 shadow migration scheduling skipped: {exc}")
+            return False
+
+    async def _migrate_session(self, plugin: Any, session_key: str, session_ref: Any) -> bool:
+        try:
+            from sylanne_alpha.v2core.shadow_snapshot import (
+                SeedSnapshotUnavailable,
+                freeze_seed_snapshot_fallback,
+            )
+            from sylanne_alpha.v3bridge.effect_committer import CommitStatus
+            from sylanne_alpha.v3bridge.migration_coordinator import RecoveryDecision
+            from sylanne_alpha.v3core.formula_v1 import FORMULA_DIGEST
+
+            async with self._migration_gate:
+                if not self.accepting or self.runtime is None:
+                    return False
+                runtime = self.runtime
+                recovery = await asyncio.to_thread(
+                    runtime.recover,
+                    session_ref,
+                    source_digest=FORMULA_DIGEST,
+                    writer_epoch=runtime.epoch,
+                )
+                if recovery.decision is not RecoveryDecision.FRESH_MIGRATION_REQUIRED:
+                    ready = recovery.state is not None
+                    if ready:
+                        runtime.complete_migration_sequence(session_ref)
+                    return ready
+                try:
+                    seed = await freeze_seed_snapshot_fallback(plugin, session_key)
+                except SeedSnapshotUnavailable:
+                    return False
+                outcome = await asyncio.to_thread(
+                    runtime.migrate,
+                    session_ref,
+                    source_digest=FORMULA_DIGEST,
+                    writer_epoch=runtime.epoch,
+                    seed_snapshot=seed,
+                )
+                ready = outcome.status in {
+                    CommitStatus.COMMITTED,
+                    CommitStatus.ALREADY_MIGRATED,
+                }
+                if ready:
+                    runtime.complete_migration_sequence(session_ref)
+                return ready
+        except Exception as exc:  # noqa: BLE001 - v3 migration never escapes into v2
+            logger.debug(
+                f"Sylanne v3 shadow migration skipped: {type(exc).__name__}: {exc}",
+                exc_info=True,
+            )
+            return False
+
+    # -- 请求边界（design 14.1）-------------------------------------------
+
+    def capture_request(
+        self,
+        *,
+        session_key: str,
+        platform_id: Any,
+        unified_msg_origin: Any,
+        message_id: Any,
+        text_length: int,
+        history_present: bool,
+        gap_seconds: Any,
+        body: Any,
+        addressed: bool = True,
+        proactive: bool = False,
+        text_warm: float | None = None,
+        text_cold: float | None = None,
+        text_distress: float | None = None,
+        text_question: bool | None = None,
+        text_exclaim: float | None = None,
+        text_punct: float | None = None,
+        text_valence_cue: float | None = None,
+        text_engagement_cue: float | None = None,
+        sender_id: Any = None,
+        is_group: bool | None = None,
+    ) -> None:
+        """冻结一轮的公开输入事实；不推进 v3 状态，不阻塞 v2。
+
+        context 必须在【捕获时】就定对，不能事后按终端证据倒推：主动轮走的也是大饼的
+        LLM 管线、同样触发 on_llm_request，若一律冻成 ADDRESSED，影子学到的就是
+        「ADDRESSED ⇒ REACH」这条假规律——群里没点名的环境轮同理会被误标成点名。
+        """
+
+        if not self.accepting or self.runtime is None or self._identity is None:
+            return
+        try:
+            from sylanne_alpha.v3bridge.actual_action import ActualAction
+            from sylanne_alpha.v3bridge.observation_adapter import build_observation_facts
+            from sylanne_alpha.v3core.contracts import TurnContextClass
+            from sylanne_alpha.v2core.shadow_snapshot import V2TurnObservationSnapshotV1
+
+            platform = _v3_text(platform_id)
+            origin = _v3_text(unified_msg_origin)
+            message = _v3_text(message_id)
+            if not platform or not origin or not message:
+                return
+            session_ref = self._identity.session_ref(platform, origin, session_generation=0)
+            if session_ref is None:
+                return
+            try:
+                sender = _v3_text(sender_id)
+            except Exception:  # noqa: BLE001 - relation becomes unknown, turn remains valid
+                sender = ""
+            speaker_digest = self._identity.speaker_digest(platform, sender or None)
+            # 三个上下文位互斥（快照自己会校验），且必须与 context class 一致。
+            is_proactive = bool(proactive)
+            is_addressed = bool(addressed) and not is_proactive
+            if is_proactive:
+                context = TurnContextClass.PROACTIVE
+            elif is_addressed:
+                context = TurnContextClass.ADDRESSED
+            else:
+                context = TurnContextClass.AMBIENT
+            snapshot = V2TurnObservationSnapshotV1(
+                body_warmth=_v3_finite(body, "warmth"),
+                body_tension=_v3_finite(body, "tension"),
+                text_length=max(0, int(text_length)),
+                addressed=is_addressed,
+                idle=False,
+                proactive=is_proactive,
+                history_present=bool(history_present),
+                gap_seconds=_v3_gap(gap_seconds),
+                text_warm=_v3_optional_finite(text_warm),
+                text_cold=_v3_optional_finite(text_cold),
+                text_distress=_v3_optional_finite(text_distress),
+                text_question=text_question if type(text_question) is bool else None,
+                text_exclaim=_v3_optional_finite(text_exclaim),
+                text_punct=_v3_optional_finite(text_punct),
+                text_valence_cue=_v3_optional_finite(text_valence_cue),
+                text_engagement_cue=_v3_optional_finite(text_engagement_cue),
+            )
+            facts = build_observation_facts(
+                snapshot,
+                context,
+                ActualAction.UNKNOWN,
+            )
+            handle = self.runtime.capture_request(
+                session_ref=session_ref,
+                bridge_request_nonce=os.urandom(16).hex(),
+                request_attempt=0,
+                platform_id=platform,
+                unified_msg_origin=origin,
+                message_id=message,
+            )
+            if handle is None:
+                return
+            self._next_token += 1
+            self._pending[session_key] = _V3PendingTurn(
+                handle=handle,
+                platform_id=platform,
+                unified_msg_origin=origin,
+                message_id=message,
+                observation=(facts.raw_values, facts.previous_action),
+                context=context,
+                session_ref=session_ref,
+                speaker_digest=speaker_digest,
+                is_group=is_group if type(is_group) is bool else None,
+                token=self._next_token,
+            )
+            while len(self._pending) > _V3_MAX_PENDING_TURNS:
+                self._pending.popitem(last=False)
+        except Exception as exc:  # noqa: BLE001 - 捕获失败只丢这一轮影子
+            logger.debug(f"Sylanne v3 shadow capture skipped: {exc}")
+
+    # -- 响应边界（design 14.2）-------------------------------------------
+
+    def settle(
+        self,
+        *,
+        session_key: str,
+        route_kind: str,
+        reply_kind: str | None = None,
+        part_count: int = 0,
+        after_message_sent: bool = False,
+        all_segments_succeeded: bool | None = None,
+        proactive_dispatched: bool | None = None,
+        token: int | None = None,
+    ) -> None:
+        """认领这一轮的终端证据并做一次非阻塞 offer；一轮只结算一次。
+
+        token 是可选的栅栏：调用方在【投递开始时】取一次 pending_token()，投递结束
+        （成功/失败/取消，可能是好几秒后）再带着它来结算。期间若同一 session_key 上
+        已经换成了下一轮，令牌对不上就放手——绝不把下一轮的 handle 认领成本轮的结果，
+        也就不会把下一轮真正的终端证据挤掉。不传 token 则退化为"结算当前那轮"。
+        """
+
+        if self.runtime is None:
+            return
+        pending = self._pending.get(session_key)
+        if pending is None:
+            return  # 没捕获过 / 已结算过 → 重复终端回调天然只算一次
+        if token is not None and pending.token != token:
+            return  # 迟到的终端回调：它那轮早已不在，这轮不归它
+        del self._pending[session_key]
+        if not self.accepting:
+            return
+        try:
+            from sylanne_alpha.v2core.shadow_snapshot import V2ResponseCandidateV1
+            from sylanne_alpha.v3bridge.actual_action import project_actual_action
+            from sylanne_alpha.v3core.contracts import ReactionFacts
+
+            candidate = V2ResponseCandidateV1(
+                route_kind=route_kind,
+                reply_kind=reply_kind,
+                part_count=part_count,
+                correlation_proven=True,
+                after_message_sent=after_message_sent,
+                all_segments_succeeded=all_segments_succeeded,
+                proactive_dispatched=proactive_dispatched,
+            )
+            action = project_actual_action(candidate)
+            self.settled_actions.append(action)
+            # ``same_sender`` is a response-boundary fact (formula-v2 spec §1.4).
+            # A later request can arrive while an earlier response is still in flight;
+            # request-time comparison would then use a stale previous speaker.  Compare
+            # against the latest *settled* speaker first, and only afterward publish this
+            # turn's speaker as the baseline for the next response boundary.
+            previous_speaker = self._last_speakers.get(pending.session_ref)
+            if pending.is_group is False:
+                same_sender: bool | None = True
+            elif previous_speaker is None or pending.speaker_digest is None:
+                same_sender = None
+            else:
+                same_sender = hmac.compare_digest(previous_speaker, pending.speaker_digest)
+            reaction_facts = ReactionFacts(same_sender=same_sender)
+            if pending.speaker_digest is not None:
+                self._last_speakers[pending.session_ref] = pending.speaker_digest
+                self._last_speakers.move_to_end(pending.session_ref)
+                while len(self._last_speakers) > _V3_SETTLED_HISTORY:
+                    self._last_speakers.popitem(last=False)
+            migration = self._migration_tasks.get(pending.session_ref)
+            if migration is None:
+                self._offer_pending(pending, action, reaction_facts)
+            else:
+                task = asyncio.get_running_loop().create_task(
+                    self._offer_after_migration(migration, pending, action, reaction_facts)
+                )
+                self._deferred_offer_tasks.add(task)
+                task.add_done_callback(self._deferred_offer_tasks.discard)
+        except Exception as exc:  # noqa: BLE001 - 结算失败只丢这一轮影子
+            logger.debug(f"Sylanne v3 shadow settle skipped: {exc}")
+
+    def _offer_pending(
+        self,
+        pending: _V3PendingTurn,
+        action: Any,
+        reaction_facts: Any,
+    ) -> None:
+        runtime = self.runtime
+        if runtime is None:
+            return
+        runtime.offer_response(
+            handle=pending.handle,
+            context=pending.context,
+            observation=pending.observation,
+            actual_action=action,
+            quality_score=None,
+            reaction_facts=reaction_facts,
+            platform_id=pending.platform_id,
+            unified_msg_origin=pending.unified_msg_origin,
+            message_id=pending.message_id,
+        )
+
+    async def _offer_after_migration(
+        self,
+        migration: asyncio.Task,
+        pending: _V3PendingTurn,
+        action: Any,
+        reaction_facts: Any,
+    ) -> None:
+        await asyncio.gather(migration, return_exceptions=True)
+        try:
+            self._offer_pending(pending, action, reaction_facts)
+        except Exception as exc:  # noqa: BLE001 - deferred offer is shadow-only
+            logger.debug(f"Sylanne v3 shadow deferred offer skipped: {exc}")
+
+    def has_pending(self, session_key: str) -> bool:
+        """这一轮是否还有未结算的捕获（供调用方在多个候选键里挑对的那个）。"""
+
+        return session_key in self._pending
+
+    def pending_token(self, session_key: str) -> int | None:
+        """当前待结算那轮的栅栏令牌；没有待结算轮就是 None。"""
+
+        pending = self._pending.get(session_key)
+        return None if pending is None else pending.token
+
+    def pending_is_proactive(self, session_key: str) -> bool:
+        """待结算的这一轮是不是主动轮（它只能由 REACH 结算，别的终端面必须让开）。"""
+
+        pending = self._pending.get(session_key)
+        if pending is None:
+            return False
+        try:
+            from sylanne_alpha.v3core.contracts import TurnContextClass
+
+            return pending.context is TurnContextClass.PROACTIVE
+        except Exception:  # noqa: BLE001 - 判不出来就当普通轮
+            return False
+
+    def build_local_g2_report(self) -> dict[str, Any]:
+        """Build the canonical local-shadow G2 evidence from bounded diagnostics."""
+
+        runtime = self.runtime
+        counters = self.counters
+        if runtime is None or counters is None or runtime.registry is None:
+            raise RuntimeError("local G2 report requires an initialized v3 runtime")
+
+        import hashlib
+        import platform
+
+        from sylanne_alpha.v3bridge.build_flags import BUILD_CHANNEL, V3_SHADOW_ENABLED
+        from sylanne_alpha.v3core import formula_v1 as formula
+        from sylanne_alpha.v3core.canonical import canonical_json_bytes, canonical_sha256
+
+        telemetry = runtime.telemetry.recent()
+        registry_stats = runtime.registry.stats()
+        isolation_counters = counters.as_dict()
+        runtime_fingerprint = {
+            "formula_version": formula.FORMULA_VERSION,
+            "formula_digest": formula.FORMULA_DIGEST,
+            "model_revision": formula.ACTION_MODEL_REVISION,
+            "profile_id": formula.FORMULA_V2_PROFILE_ID,
+            "python_minor": f"{sys.version_info.major}.{sys.version_info.minor}",
+            "math_backend": "scalar-v1",
+            "cpu_architecture": platform.machine(),
+        }
+        runtime_fingerprint_digest = hashlib.sha256(
+            b"sylanne.v3.runtime-fingerprint.v1\x00"
+            + canonical_json_bytes(runtime_fingerprint)
+        ).hexdigest()
+        model_fingerprint = {
+            "revision": formula.ACTION_MODEL_REVISION,
+            "formula_digest": formula.FORMULA_DIGEST,
+        }
+        model_fingerprint["digest"] = canonical_sha256(model_fingerprint)
+        accepted_count = sum(1 for record in telemetry if record.queue_accepted)
+        dropped_count = sum(1 for record in telemetry if record.dropped)
+        correlated_count = registry_stats.accepted_terminal_claims
+        report: dict[str, Any] = {
+            "report_kind": "v3_local_shadow_g2_v1",
+            "plugin_version": PLUGIN_VERSION,
+            "source_channel": "grey" if "grey" in PLUGIN_VERSION.lower() else "stable",
+            "build_channel": BUILD_CHANNEL,
+            "build_shadow_enabled": bool(V3_SHADOW_ENABLED),
+            "formula_fingerprint": {
+                "version": formula.FORMULA_VERSION,
+                "digest": formula.FORMULA_DIGEST,
+            },
+            "model_fingerprint": model_fingerprint,
+            "runtime_fingerprint": runtime_fingerprint,
+            "runtime_fingerprint_digest": runtime_fingerprint_digest,
+            "accepted_count": accepted_count,
+            "dropped_count": dropped_count,
+            "correlated_count": correlated_count,
+            "isolation_counters": isolation_counters,
+            "passed": (
+                accepted_count > 0
+                and dropped_count == 0
+                and correlated_count > 0
+                and counters.all_zero()
+            ),
+        }
+        report["report_digest"] = canonical_sha256(report)
+        return report
+
+    @staticmethod
+    def _local_g2_report_path_from_environment() -> Path | None:
+        key = "SYLANNE_V3_GATE_REPORT"
+        if key not in os.environ:
+            return None
+        raw = os.environ[key]
+        if (
+            not raw
+            or raw != raw.strip()
+            or raw.startswith("~")
+            or any(character in raw for character in "\x00*?\"<>|")
+        ):
+            raise ValueError("G2 report path is malformed")
+        path = Path(raw)
+        if path.name in {"", ".", ".."} or path.suffix.lower() != ".json":
+            raise ValueError("G2 report path must name one explicit .json file")
+        if path.exists() and not path.is_file():
+            raise ValueError("G2 report path points to a non-file target")
+        return path
+
+    def write_local_g2_report_from_environment(self) -> dict[str, Any] | None:
+        """Write G2 only when an explicit target is requested by the gate command."""
+
+        path = self._local_g2_report_path_from_environment()
+        if path is None:
+            return None
+
+        from sylanne_alpha.v3core.canonical import canonical_json_bytes, canonical_sha256
+
+        report = self.build_local_g2_report()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(canonical_json_bytes(report) + b"\n")
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            body = dict(loaded)
+            digest = body.pop("report_digest")
+        except (OSError, TypeError, ValueError, KeyError) as exc:
+            raise RuntimeError("requested G2 report is missing or malformed") from exc
+        if loaded != report or digest != canonical_sha256(body):
+            raise RuntimeError("requested G2 report failed canonical validation")
+        return report
+
+    @property
+    def pending_count(self) -> int:
+        return len(self._pending)
+
+
+def _v3_text(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
+def _v3_finite(body: Any, name: str) -> float | None:
+    """只接受有限数；其它一律 None（→ 编码器清有效位，design 14.3）。"""
+
+    if not isinstance(body, dict):
+        return None
+    value = body.get(name)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) else None
+
+
+def _v3_optional_finite(value: Any) -> float | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    resolved = float(value)
+    return resolved if math.isfinite(resolved) else None
+
+
+def _v3_gap(value: Any) -> float | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    value = float(value)
+    if not math.isfinite(value) or value < 0.0:
+        return None  # 生产里 gap 会是 inf（首轮），快照只收有限值
+    return value
+
+
+def _v3_shadow_of(owner: Any) -> Any:
+    """从任意持有插件引用的对象上取 facade；取不到就是 None（v3 不在场）。"""
+
+    return getattr(owner, "_v3_shadow", None)
+
+
 @register(
     "astrbot_plugin_sylanne",
-    "Aylovelle.S.S",
-    "Sylanne-Embodiment: sovereign emotional body runtime.",
-    "1.3.0",
+    "2718 Labs",
+    "Long-term memory, relational state modelling, and real-time chat for AstrBot.",
+    "2.5.0",  # keep in sync with metadata.yaml version + PLUGIN_VERSION
     "https://github.com/Ayleovelle/astrbot_plugin_sylanne",
 )
 class EmotionalStatePlugin(Star):
-    """Sylanne-Embodiment 情感身体运行时插件。
+    """Sylanne-Embodiment 长期对话状态与行为运行时插件。
 
     继承 AstrBot Star 基类，作为 AstrBot 插件运行。
     通过事件钩子（on_llm_request/on_llm_response）在 LLM 管线中
-    注入情感状态上下文，实现「有身体感的 AI」。
+    注入对话状态上下文，为回复策略与行为调度提供运行时输入。
 
     核心子系统（在 __init__ 中初始化）：
     - _hosts: 会话→宿主映射（每个会话一个 SylanneAlphaHost）
@@ -450,12 +1273,26 @@ class EmotionalStatePlugin(Star):
         # trailing-edge：节流窗内被丢弃的变更标脏，由后续触发补落（防非优雅退出丢尾改）。
         self._rel_state_pending_dirty: bool = False
         self._meltdown_nonces: BoundedDict = BoundedDict(maxsize=50, ttl=300)
+        # v2.5.0 入站消息级幂等闸（issue43-repeat v2 修复）：以
+        # (unified_msg_origin, 入站 message_id) 为键去重，拦下"同一条入站消息
+        # 被处理两个 pass"（平台重投/重连 replay），阻止框架 _save_to_history
+        # 在第二 pass 把已悬挂的 user 轮再拼一次、烤成 [user:X, user:X]。
+        # 全局单表（非 SessionMap，不进 self._store._reg 清理表）：自身 LRU
+        # 有界即可，不按 session 生命周期清理。见 _inbound_dup_gate。
+        self._inbound_seen: BoundedDict = BoundedDict(maxsize=1024)
         # M8：主动发言反馈 audit（feedback_pressure 单一数据源）。按 session_key 索引，
         # 值为 deque（_record_dispatch_feedback 写、derive_dispatch_policy 读）。
         # BoundedDict LRU 防会话无限增长；每会话内 deque maxlen 防单会话条目无界。
         self._proactive_dispatch_audit: BoundedDict = BoundedDict(maxsize=100)
         # 社交场收集器：群聊氛围感知
         self._social_field = SocialFieldCollector(config=self._config)
+        # PR-Qzone：说说功能审计/频率闸状态 + HTTP session（initialize 时按需建立，
+        # terminate 时收；session 建立前 qzone_share._do_publish 会因 None 直接失败，
+        # 不阻塞其余子系统初始化）。
+        self._qzone_audit = None
+        self._qzone_audit_last_save_ts: float = 0.0
+        self._qzone_audit_dirty_in_flight: bool = False
+        self._qzone_http_session: Any = None
         # 后台投递队列已迁入 self._store（CP8-P2 批2）
         self._background_post_recovered_sessions: set[str] = set()
         self._internal_assessor_llm_inflight: int = 0
@@ -477,9 +1314,9 @@ class EmotionalStatePlugin(Star):
         self._llm_response_pipeline = LLMResponsePipeline(self)
         self._llm_request_pipeline = LLMRequestPipeline(self)
         self._public_api = PublicAPI(self)
-        # SelfCore 认知编排器：仅注册 LifeAgent（唯一保留的 AUTONOMOUS 时点 agent）。
-        self._self_core = SelfCore(self, llm_budget=3)
-        self._self_core.register(LifeAgent(self, self._self_core.bus))
+        # SelfCore 自主生命周期：仅注册 LifeAgent。
+        self._self_core = SelfCore(self)
+        self._self_core.register(LifeAgent(self))
         # 全局自驱心跳（CP8-P3b）：让她没人说话也演化。initialize 启动、terminate 回收。
         self._autonomy_scheduler = AutonomyScheduler(self, self._self_core)
         # 主动发言调度器：基于身体需求和节律决定是否主动发言
@@ -488,6 +1325,10 @@ class EmotionalStatePlugin(Star):
         self._proactive_bridge = ProactiveBridge(self)
         # emotion_spirit 适配桥（检测门控；未装即 no-op，对现有行为零影响）
         self._emotion_spirit_bridge = EmotionSpiritBridge(self)
+        # v3 shadow facade（plan Task 13）：纯构造、零 IO——仓库/线程池/epoch 全在
+        # initialize() 里拿。默认关（源码/stable 构建 V3_SHADOW_ENABLED=False），
+        # 只有 grey 打包生成的 build_flags 才翻开；不是用户可选项，故不进 _conf_schema。
+        self._v3_shadow = _V3ShadowFacade()
         self._register_web_apis(context)
 
         # AstrBot ConversationManager / PersonaManager 集成
@@ -711,9 +1552,9 @@ class EmotionalStatePlugin(Star):
         return await self._sylanne_memory_settings_page_payload()
 
     async def _memory_settings_post_handler(self) -> dict[str, Any]:
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        body = await quart_request.get_json(silent=True) or {}
+        body = await request.json() or {}
         return await self._update_sylanne_memory_settings_from_page(body)
 
     async def _lineage_observatory_handler(self) -> dict[str, Any]:
@@ -1027,7 +1868,7 @@ class EmotionalStatePlugin(Star):
             **kwargs,
         )
 
-    # Diagnostics / Export / Import / Control
+    # Diagnostics / Export / Control
     async def sylanne_diagnostics(self, *, session_key: str) -> dict[str, Any]:
         host = self._host(session_key)
         return host.diagnostics()
@@ -1037,18 +1878,6 @@ class EmotionalStatePlugin(Star):
         snapshot = host.snapshot()
         snapshot["session_key"] = session_key
         return snapshot
-
-    async def import_sylanne_legacy(
-        self, legacy: dict[str, Any], *, session_key: str
-    ) -> dict[str, Any]:
-        root = self._config.get("sylanne_alpha_root") or str(
-            Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_NAME
-        )
-        _host_obj = SylanneAlphaHost(
-            root=root, session_key=session_key, legacy=legacy
-        )
-        self._store.set_host(session_key, _host_obj)
-        return _host_obj.snapshot()
 
     async def pause_sylanne(self, *, session_key: str) -> dict[str, Any]:
         from sylanne_alpha.state_persistence import mark_dirty
@@ -1107,12 +1936,164 @@ class EmotionalStatePlugin(Star):
     # 消息事件监听：捕获所有消息（含未经 LLM 的），更新时间戳和节奏
     # -----------------------------------------------------------------------
 
-    @filter.event_message_type(filter.EventMessageType.ALL)
-    async def on_message(self, event: Any):
-        """监听所有消息事件，更新 proactive scheduler 时间戳和节奏学习器。"""
+    def _advance_inbound_delivery_epoch(self, event: Any, session_key: str) -> None:
+        """Register one real inbound message and interrupt an older delivery.
+
+        This hook runs before AstrBot enters its per-session agent lock. That is
+        the only point where a newly arrived user message can stop an older reply
+        that is still generating or sleeping between bubbles.
+        """
+
+        get_extra = getattr(event, "get_extra", None)
+        set_extra = getattr(event, "set_extra", None)
+        if callable(get_extra):
+            try:
+                if get_extra("_syl_inbound_registered", False):
+                    return
+            except Exception:
+                pass
+
+        duplicate = False
+        key = ""
+        seen: Any = None
+        registered_new = False
         try:
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            mid = getattr(getattr(event, "message_obj", None), "message_id", None)
+            key = (
+                umo + "\x00" + mid
+                if umo and isinstance(mid, str) and mid.strip()
+                else ""
+            )
+            seen = getattr(self, "_inbound_seen", None)
+            # Only pre-register when the event can carry ownership into
+            # on_llm_request. Otherwise the legacy gate below would mistake this
+            # first legitimate pass for a redelivery.
+            if key and seen is not None and callable(set_extra):
+                duplicate = key in seen
+                if not duplicate:
+                    seen[key] = time.time()
+                    registered_new = True
+        except Exception:
+            logger.warning(
+                "Sylanne inbound epoch registration failed open",
+                exc_info=True,
+            )
+
+        if callable(set_extra):
+            try:
+                set_extra("_syl_inbound_duplicate", duplicate)
+                # Commit marker last: _inbound_dup_gate only trusts the pair
+                # after both values have been written.
+                set_extra("_syl_inbound_registered", True)
+            except Exception:
+                registered = False
+                if callable(get_extra):
+                    try:
+                        registered = bool(
+                            get_extra("_syl_inbound_registered", False)
+                        )
+                    except Exception:
+                        pass
+                if registered_new and not registered and seen is not None:
+                    try:
+                        seen.pop(key, None)
+                    except Exception:
+                        pass
+
+        if duplicate:
+            return
+
+        epochs = getattr(self._store, "conversation_input_epoch", None)
+        input_epoch = 0
+        if epochs is not None:
+            try:
+                input_epoch = int(epochs.get(session_key, 0) or 0) + 1
+                epochs.set(session_key, input_epoch)
+            except Exception:
+                logger.warning(
+                    "Sylanne inbound epoch advance failed: session=%s",
+                    session_key,
+                    exc_info=True,
+                )
+                input_epoch = 0
+        if callable(set_extra):
+            try:
+                set_extra("_syl_input_epoch", input_epoch)
+            except Exception:
+                pass
+
+        active_turns = getattr(self._store, "segmented_delivery_turns", None)
+        if active_turns is None:
+            return
+        try:
+            turn = active_turns.get(session_key)
+            interrupt = getattr(turn, "interrupt", None)
+            if callable(interrupt):
+                interrupt()
+        except Exception:
+            logger.warning(
+                "Sylanne active delivery interrupt failed: session=%s",
+                session_key,
+                exc_info=True,
+            )
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def on_message(self, event: Any, *args: Any, **kwargs: Any):
+        """监听所有消息事件，更新 proactive scheduler 时间戳和节奏学习器。
+
+        *args/**kwargs：吸收 AstrBot 各版本给事件钩子多传的位置/关键字参数
+        （v4.26.x 起框架内部会多传若干上下文参数，见 context_utils.call_event_hook
+        `handler(event, *args, **kwargs)`）。签名固定为 (event) 会在这些版本上报
+        TypeError "takes 2 positional but N given"，故一律用 *args/**kwargs 兜住，
+        本插件只用 event。"""
+        try:
+            # M4a（realtime 完整重做 Model-D）：即时聊天接管开启时强制关闭本轮
+            # 流式，让响应侧走非流式档（on_decorating_result 才够得着、能抑制
+            # 框架重发）。此处（filter.event_message_type(ALL)，由 ProcessStage
+            # 内 star_request_sub_stage 触发）确定运行在 AgentRequestSubStage/
+            # InternalAgentSubStage 读取 event.get_extra("enable_streaming")
+            # （internal.py:169）之前——见 process_stage/stage.py 的调用顺序：
+            # star_request_sub_stage.process 先于 agent_sub_stage.process。
+            # 默认两开关皆关时这里零行为（不碰 enable_streaming，流式配置原样）。
+            try:
+                _realtime_enabled, _realtime_intercept = realtime_flags(self.config)
+                if _realtime_enabled and _realtime_intercept:
+                    set_extra = getattr(event, "set_extra", None)
+                    if callable(set_extra):
+                        set_extra("enable_streaming", False)
+            except Exception:
+                pass
             session_key = self._session_ctx.session_key(event)
+            # Call through the class so narrow plugin-host stubs that bind only
+            # on_message still exercise the real hook without needing to copy
+            # every private helper onto their namespace.
+            EmotionalStatePlugin._advance_inbound_delivery_epoch(
+                self,
+                event,
+                session_key,
+            )
             now = time.time()
+            # v2.5.0 slice-1b（design §8 BLOCKER B1，全矩阵扎实版修正）：主判据
+            # 消费——供三写点（货架写/profile 软同步/出生播种，本 slice 货架写
+            # 已接线）将来只读的"已认证身份记录"。on_message 覆盖
+            # EventMessageType.ALL（含未触发 LLM 的群聊噪音），比 on_llm_request
+            # 覆盖面更广。
+            # 取值改用 `SessionContext.resolve_authenticated_identity`——只用
+            # event 的公开方法（get_sender_id/get_message_type/get_group_id/
+            # session_id），不再复用 `raw_bucket_sender_id`（只读裸属性
+            # sender_id/user_id，真实 AstrBot 事件从不设这两个属性，在生产上
+            # 对**所有**事件恒返回空串，曾让本暂存层永久哑火——连本该天生
+            # per-user 的私聊都不例外，详见两个方法各自的文档字符串）。
+            # `stash_authenticated_identity` 内部叠加次判据（发言人一致性坍缩）
+            # 与"已坍缩 session_key 永久 SKIP"逻辑，本处只负责主判据求值 + 落地。
+            # 独立 try/except：本插桩失败绝不能连带吞掉本函数其余的 tempo/proactive
+            # 记录逻辑（与下方 rhythm_learner 支路同一收敛纪律）。
+            try:
+                identity = self._session_ctx.resolve_authenticated_identity(event)
+                self._store.stash_authenticated_identity(session_key, identity)
+            except Exception:
+                pass
             # 更新最后消息时间，供 proactive scheduler 计算沉默时长
             self._store.last_user_message_time.set(session_key, now)
             sched = getattr(self, "_proactive_scheduler", None)
@@ -1158,7 +2139,11 @@ class EmotionalStatePlugin(Star):
 
     # on_llm_request 钩子：在 LLM 请求发出前注入情感状态上下文
     @filter.on_llm_request(desc="注入 Sylanne 情感计算上下文到 LLM prompt")
-    async def on_llm_request(self, event: Any, request: Any) -> None:
+    async def on_llm_request(
+        self, event: Any, request: Any, *args: Any, **kwargs: Any
+    ) -> None:
+        # *args/**kwargs：兜住 AstrBot 各版本多传的钩子参数（req 仍固定为第 2 位，
+        # 见 4.26.5 文档 (event, req: ProviderRequest)）；否则新版报 TypeError。
         try:
             await self._on_llm_request_inner(event, request)
         except Exception as e:
@@ -1168,7 +2153,68 @@ class EmotionalStatePlugin(Star):
     def _session_lock(self, session_key: str) -> asyncio.Lock:
         return self._session_ctx.session_lock(session_key)
 
+    def _inbound_dup_gate(self, event: Any) -> bool:
+        """True = 本条入站消息是重复二次投递（同一 (umo, message_id) 已见过），
+        调用方应 stop_event 并早退。
+
+        判定"可去重 id"：仅当 unified_msg_origin 与 message_obj.message_id 都
+        是非空稳定串时才登记/比对；否则（None/空/非串——如 webchat 前端未带 id、
+        或任何适配器缺省）直接放行、不登记，宁可漏 dedup 也不误杀合法消息。
+
+        本闸只在 on_llm_request（main.py:_on_llm_request_inner 顶端）调用，该
+        钩子由框架 internal.py 在 per-session 锁（session_lock_manager）持有
+        窗口内触发；notice/request 等 message_str 为空的事件走不到这个钩子
+        （internal.py 的 has_valid_message/has_media_content 早退），故它们的
+        uuid4 型 message_id 天然不会进这张表——不需要额外甄别事件类型。
+
+        绝不对消息文本做任何比对去重——那会回归 state_persistence.py:2499
+        注释警告的"用户在 bot 沉默时连发相同文字被误杀"，本轮禁区。
+        """
+        try:
+            # on_message 已在 AstrBot 的 per-session agent 锁之前登记了这条入站
+            # 消息。复用事件级判定，避免合法 on_llm_request 被自己的登记误杀；
+            # 独立重投递事件则携带 duplicate=True，在这里正常 stop。
+            get_extra = getattr(event, "get_extra", None)
+            if callable(get_extra) and get_extra(
+                "_syl_inbound_registered", False
+            ):
+                return bool(get_extra("_syl_inbound_duplicate", False))
+
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            mid = getattr(getattr(event, "message_obj", None), "message_id", None)
+            if not umo or not isinstance(mid, str) or not mid.strip():
+                return False  # 豁免：无稳定 id，宁漏 dedup 不误杀
+            key = umo + "\x00" + mid
+            # check-then-set：中间无 await，单线程协作式原子；外层框架 per-session
+            # 锁（internal.py:209）再对同 umo 的重复 pass 做一层串行化保障。
+            if key in self._inbound_seen:
+                return True
+            self._inbound_seen[key] = time.time()
+            return False
+        except Exception:
+            # 闸自身异常绝不阻断正常请求（fail-safe 向放行）；但要留信号——
+            # 否则闸内潜在缺陷会让去重静默失效、退回重复 bug 而无人察觉。
+            logger.warning("Sylanne inbound dedup gate error (failing open)", exc_info=True)
+            return False
+
     async def _on_llm_request_inner(self, event: Any, request: Any) -> None:
+        # v2.5.0 入站消息级幂等闸：必须在任何早退（尤其 should_express 静默
+        # return）之前拦截，否则 SILENT 轮的 message_id 不会入集，漏掉最可能
+        # 触发悬挂重复的链路。命中即 stop_event + 早退，框架不再跑
+        # build/run_agent/_save_to_history，第二 pass 净写 0 条。
+        if self._inbound_dup_gate(event):
+            logger.info(
+                "Sylanne inbound dedup: dropped re-delivered message umo=%s mid=%s",
+                getattr(event, "unified_msg_origin", ""),
+                getattr(getattr(event, "message_obj", None), "message_id", None),
+            )
+            stop_event = getattr(event, "stop_event", None)
+            if callable(stop_event):
+                try:
+                    stop_event()
+                except Exception:
+                    pass
+            return
         # 2.4.1 err 轮兜底（三态标记，第一态）：标记"本轮确实发起了 LLM 请求"。
         # 三态语义（after_message_sent 侧消费，见 _on_after_message_sent_err_backfill）：
         #   None  = 本轮压根没走 LLM 请求（纯指令 / 被前置插件拦截）-> 绝不补写 user
@@ -1192,7 +2238,6 @@ class EmotionalStatePlugin(Star):
         message_text: str,
         session_key: str,
         realtime_enabled: bool,
-        hajide: bool,
         intercept: bool,
     ) -> None:
         return await self._llm_request_pipeline._process_llm_request_final(
@@ -1201,12 +2246,8 @@ class EmotionalStatePlugin(Star):
             message_text,
             session_key,
             realtime_enabled,
-            hajide,
             intercept,
         )
-
-    async def _get_model_hint(self, event: Any = None) -> str:
-        return await self._llm_request_pipeline._get_model_hint(event)
 
     def _schedule_buffer_persist(self, session_key: str) -> None:
         self._state_persistence.schedule_buffer_persist(session_key)
@@ -1294,24 +2335,188 @@ class EmotionalStatePlugin(Star):
 
     # on_llm_response 钩子：在 LLM 回复后提取信号、更新状态、触发分段回复
     @filter.on_llm_response(desc="处理 LLM 回复，更新情感状态和记忆")
-    async def on_llm_response(self, event: Any, response: Any) -> None:
+    async def on_llm_response(
+        self, event: Any, response: Any, *args: Any, **kwargs: Any
+    ) -> None:
+        # *args/**kwargs：兜住 AstrBot 各版本多传的钩子参数（resp 仍固定为第 2 位，
+        # 见 4.26.5 文档 (event, resp: LLMResponse)）；否则新版报 TypeError。
         try:
             await self._on_llm_response_inner(event, response)
         except Exception as e:
             logger.error(f"Sylanne on_llm_response error: {e}", exc_info=True)
             return
 
+    @_optional_agent_begin_filter()
+    async def on_agent_begin(
+        self,
+        event: Any,
+        run_context: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """在 provider 调用前建立不写穿透会话 DB 的临时历史视图。"""
+
+        try:
+            self._llm_response_pipeline.on_agent_begin(event, run_context)
+        except Exception as e:
+            logger.warning(
+                f"Sylanne on_agent_begin history projection failed: {e}",
+                exc_info=True,
+            )
+
+    # 必须先于可能 stop 的普通 hook 恢复 provider-only 历史。
+    @_optional_agent_done_filter(priority=1000)
+    async def on_agent_done(
+        self,
+        event: Any,
+        run_context: Any,
+        response: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """绑定本轮历史对象；已启动的分段投递则提交真实送达文本。"""
+
+        try:
+            self._llm_response_pipeline.on_agent_done(event, run_context, response)
+        except Exception as e:
+            logger.warning(f"Sylanne on_agent_done scrub failed: {e}", exc_info=True)
+
+        delivered_override: str | None = None
+        delivery_deferred = False
+        try:
+            bind_delivery = getattr(
+                self._llm_response_pipeline,
+                "bind_segmented_delivery_context",
+                None,
+            )
+            if callable(bind_delivery):
+                delivery_deferred = bool(
+                    bind_delivery(
+                        event,
+                        run_context,
+                        response,
+                    )
+                )
+            settle_delivery = getattr(
+                self._llm_response_pipeline,
+                "settle_segmented_delivery_history",
+                None,
+            )
+            if not delivery_deferred and callable(settle_delivery):
+                delivered_override = await settle_delivery(
+                    event,
+                    run_context,
+                    response,
+                )
+        except Exception as e:
+            # A ledger turn must fail closed. Keeping the provider's complete
+            # draft here would teach the next turn words that transport never sent.
+            event_extra = getattr(
+                self._llm_response_pipeline,
+                "_event_extra",
+                None,
+            )
+            turn = (
+                event_extra(
+                    event,
+                    getattr(
+                        self._llm_response_pipeline,
+                        "_DELIVERY_TURN_EXTRA",
+                        "_syl_segmented_delivery_turn",
+                    ),
+                    None,
+                )
+                if callable(event_extra)
+                else None
+            )
+            if turn is not None:
+                rewrite_assistant = getattr(
+                    self._llm_response_pipeline,
+                    "_rewrite_current_assistant",
+                    None,
+                )
+                if callable(rewrite_assistant):
+                    rewrite_assistant(run_context, "")
+                delivered_override = ""
+            logger.warning(
+                f"Sylanne on_agent_done delivery settlement failed: {e}",
+                exc_info=True,
+            )
+
+        try:
+            assistant_text = (
+                delivered_override
+                if delivered_override is not None
+                else self._canonical_assistant_text(run_context, response)
+            )
+            await self._backfill_turn_if_framework_skips(
+                event,
+                response,
+                assistant_override=assistant_text,
+            )
+        except Exception as e:
+            logger.warning(
+                f"Sylanne on_agent_done turn finalization failed: {e}",
+                exc_info=True,
+            )
+
     # 只对"把文本念出来/发出去"类工具清理 text 参数（白名单）。绝不碰 FileWrite/
     # FileEdit 的 content、execute_python 的 code 等——那些 strip/截断会静默写坏文件/代码。
-    _SPEECH_TOOL_NAMES = ("clone_tts", "tts", "send_message_to_user", "send_message")
+    _DIRECT_DELIVERY_TOOL_NAMES = (
+        "clone_tts",
+        "tts",
+        "send_message_to_user",
+        "send_message",
+    )
+    _DIRECT_DELIVERY_EXTRA = "_syl_direct_delivery"
 
-    @_optional_using_llm_tool_filter(desc="语音/发言类工具调用前清理 text（防 thinking 进 TTS）")
+    @staticmethod
+    def _visible_text(value: Any) -> str:
+        if not isinstance(value, str):
+            return ""
+        return value if any(c.isprintable() and not c.isspace() for c in value) else ""
+
+    def _assistant_content_text(self, content: Any) -> str:
+        if isinstance(content, str):
+            return self._visible_text(content)
+        if not isinstance(content, (list, tuple)):
+            return ""
+        parts: list[str] = []
+        for part in content:
+            value = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
+            if isinstance(value, str):
+                parts.append(value)
+        return self._visible_text("".join(parts))
+
+    def _canonical_assistant_text(self, run_context: Any, response: Any) -> str:
+        messages = getattr(run_context, "messages", None)
+        if isinstance(messages, (list, tuple)):
+            for message in reversed(messages):
+                if isinstance(message, dict):
+                    role = message.get("role", "")
+                    content = message.get("content", "")
+                else:
+                    role = getattr(message, "role", "")
+                    content = getattr(message, "content", "")
+                if role == "user":
+                    break
+                if role == "assistant" and (
+                    text := self._assistant_content_text(content)
+                ):
+                    return text
+
+        role = getattr(response, "role", "assistant") or "assistant"
+        if role != "assistant":
+            return ""
+        return self._visible_text(getattr(response, "completion_text", ""))
+
+    @_optional_tool_use_filter(desc="语音/发言类工具调用前清理 text（防 thinking 进 TTS）")
     async def on_using_llm_tool(self, event: Any, tool: Any, tool_args: Any) -> None:
         """path3 兜底：模型把要"说"的内容打包进【语音/发言类】工具参数（如 clone_tts 的
         text）时，绕过了 on_llm_response 的剥离。这里在工具执行【前】就地清理。tool_args 是
         executor 实际消费的同一 dict（tool_loop_agent_runner:1075/1083 验证），就地改即生效。
 
-        【白名单】只处理 _SPEECH_TOOL_NAMES——别的工具（文件写入/代码执行）的文本参数原样
+        【白名单】只处理 _DIRECT_DELIVERY_TOOL_NAMES——别的工具（文件写入/代码执行）的文本参数原样
         放过，否则 strip/截断会静默写坏文件（M3 审查）。
         - 剥 thinking/draft 块：核心安全项——别让内心独白被念成语音/发出去。
         - 极端超长才句末截断：TTS 只长度有害（数分钟音频）。strip 后为空则不写回（n1）。
@@ -1320,11 +2525,12 @@ class EmotionalStatePlugin(Star):
             if not isinstance(tool_args, dict) or not tool_args:
                 return
             tool_name = tool if isinstance(tool, str) else str(getattr(tool, "name", "") or "")
-            if tool_name not in self._SPEECH_TOOL_NAMES:
+            if tool_name not in self._DIRECT_DELIVERY_TOOL_NAMES:
                 return  # 非语音/发言类工具：一概不碰，避免误伤文件/代码参数
             from sylanne_alpha.message_dispatch import strip_draft_blocks, truncate_at_sentence
 
             _HARD_MAX = 1200  # 极端兜底；正常语音远不到
+            spoken_text = ""
             for key in ("text", "content", "message", "msg"):
                 val = tool_args.get(key)
                 if not isinstance(val, str) or not val.strip():
@@ -1344,22 +2550,70 @@ class EmotionalStatePlugin(Star):
                         "Sylanne tool-arg cleaned: tool=%s key=%s %d→%d chars",
                         tool_name, key, len(val), len(cleaned),
                     )
+                spoken_text = cleaned
+            set_extra = getattr(event, "set_extra", None)
+            if spoken_text and callable(set_extra):
+                set_extra(self._DIRECT_DELIVERY_EXTRA, (tool_name, spoken_text))
         except Exception as e:
             # 安全闸降级必须可见（m1）：不静默吞到 debug
             logger.warning(f"Sylanne on_using_llm_tool clean failed: {e}", exc_info=True)
 
-    @filter.on_decorating_result()
-    async def on_decorating_result(self, event: Any) -> None:
-        """Stage 8 兜底：strip thinking/draft 块，防止 tool loop 中间步骤泄露。
-
-        另：若该消息是 Sylanne 主动发言桥接登记的"待接管分段"，则清空 chain 阻止
-        大饼整段发送，改由 Sylanne 后台连发人格化分段。
-        """
+    @_optional_tool_respond_filter(
+        priority=1000,
+        desc="直接发言工具返回后终结本轮历史",
+    )
+    async def on_llm_tool_respond(
+        self,
+        event: Any,
+        tool: Any = None,
+        tool_args: Any = None,
+        tool_result: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """直接发言工具终结后，补齐框架不会保存的完整回合。"""
         try:
-            # 分段接管优先判定（大饼主动消息）
-            if await self._maybe_takeover_segments(event):
+            if tool_result is not None:
+                return
+            tool_name = (
+                tool if isinstance(tool, str) else str(getattr(tool, "name", "") or "")
+            )
+            if tool_name not in self._DIRECT_DELIVERY_TOOL_NAMES:
+                return
+            if self._agent_run_done(event) is not True:
                 return
 
+            get_extra = getattr(event, "get_extra", None)
+            delivery = (
+                get_extra(self._DIRECT_DELIVERY_EXTRA) if callable(get_extra) else None
+            )
+            if not (
+                isinstance(delivery, tuple)
+                and len(delivery) == 2
+                and delivery[0] == tool_name
+            ):
+                return
+            assistant_text = self._visible_text(delivery[1])
+            if not assistant_text:
+                return
+            await self._backfill_turn_if_framework_skips(
+                event,
+                None,
+                assistant_override=assistant_text,
+            )
+        except Exception as e:
+            logger.warning(
+                f"Sylanne on_llm_tool_respond turn finalization failed: {e}",
+                exc_info=True,
+            )
+
+    @filter.on_decorating_result(priority=1000)
+    async def on_decorating_result(self, event: Any, *args: Any, **kwargs: Any) -> None:
+        """Stage 8 前置清洗：在 TTS/图片装饰器消费文本前移除内部控制内容。
+
+        *args/**kwargs：兜住 AstrBot 各版本多传的钩子参数，避免新版 TypeError。
+        """
+        try:
             from sylanne_alpha.message_dispatch import strip_draft_blocks
 
             result = event.get_result()
@@ -1372,6 +2626,9 @@ class EmotionalStatePlugin(Star):
             for seg in chain:
                 if isinstance(seg, Plain):
                     text = strip_draft_blocks(seg.text)
+                    text = self._llm_response_pipeline.scrub_owned_semantic_markers(
+                        event, text
+                    )
                     if text:
                         seg.text = text
                         cleaned_chain.append(seg)
@@ -1388,8 +2645,68 @@ class EmotionalStatePlugin(Star):
                 f"Sylanne on_decorating_result strip failed: {e}", exc_info=True
             )
 
+    @filter.on_decorating_result(priority=-1000)
+    async def _on_final_output_arbitration(
+        self,
+        event: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """在普通装饰器完成后决定由框架 chain 还是 Sylanne 分段 transport 发送。"""
+
+        try:
+            # 主动消息和即时聊天都必须等 TTS/图片等装饰完成后再认领输出，
+            # 否则会先直发文字，稍后又由框架发送 Record/Image。
+            if await self._maybe_takeover_segments(event):
+                return
+            await self._maybe_suppress_realtime_takeover(event)
+        except Exception as e:
+            logger.warning(
+                f"Sylanne final output arbitration failed: {e}",
+                exc_info=True,
+            )
+
+    def _v3_settle_ordinary(self, event: Any) -> None:
+        """ordinary 输出的 v3 终端证据（默认关时是空操作）。
+
+        恒 UNKNOWN：AstrBot 4.26.5 的 after_message_sent 只证明"尝试发过"，不证明送达。
+        实时接管轮显式跳过——那条路由的证据由 _dispatch_segmented_parts 的全段成功回调
+        结算成 SPEAK，这里若抢先认领就会把它压成 UNKNOWN。
+        """
+
+        facade = getattr(self, "_v3_shadow", None)
+        if facade is None:
+            return
+        try:
+            get_extra = getattr(event, "get_extra", None)
+            if callable(get_extra) and get_extra("_syl_realtime_takeover", None) is True:
+                return
+            session_key = self._session_ctx.session_key(event)
+            # 让路①：主动轮。大饼的 check_and_chat 也走 RespondStage，本钩子照样会响；
+            # 若在这里认领，proactive_bridge 的 REACH 就永远落不到 —— 主动轮只能由它结算。
+            if facade.pending_is_proactive(session_key):
+                return
+            # 让路②：接管轮的兜底判据。上面那个 extra 标记是 best-effort 写的（写失败被
+            # 刻意吞掉），标记丢了就只剩这条：本会话有在飞的分段任务 = 投递证据归分段回调，
+            # 这里不能抢着记成 UNKNOWN。
+            task = self._store.segmented_tasks.get(session_key)
+            if task is not None and not task.done():
+                return
+        except Exception as e:  # noqa: BLE001 - 取不到会话只丢这一轮影子
+            logger.debug(f"Sylanne v3 shadow ordinary settle skipped: {e}")
+            return
+        facade.settle(
+            session_key=session_key,
+            route_kind="ORDINARY_TEXT",
+            reply_kind="SPEAK",
+            part_count=1,
+            after_message_sent=True,
+        )
+
     @filter.after_message_sent()
-    async def _on_after_message_sent_err_backfill(self, event: Any) -> None:
+    async def _on_after_message_sent_err_backfill(
+        self, event: Any, *args: Any, **kwargs: Any
+    ) -> None:
         """终结轮兜底：框架本轮不落库时把 user 补进会话历史（唯一能覆盖 provider
         全挂 err 轮的插件挂点——那条路径 step() 不调 on_agent_done，故 on_llm_response
         及其 finally 补写根本不触发，见 tool_loop_agent_runner.py:772-788 /
@@ -1416,6 +2733,16 @@ class EmotionalStatePlugin(Star):
         限制：仅非流式档成立（框架默认 streaming_response=False，用户实例已确认）；
         流式档 graceful err 走 STREAMING_FINISH，RespondStage 早退不触发本钩子。
         """
+        # v3 shadow：ordinary 输出的终端记账（design 14.2 + Task 2 钉住的 4.26.5 真源事实）。
+        # after_message_sent 【不是成功回执】——respond/stage.py 里 send 的异常被 except 吞掉
+        # 之后照样发这个事件，所以它只能收尾本轮生命周期，永远结算不出 SPEAK，恒 UNKNOWN。
+        # 放在本钩子最前、在下面那三道 backfill 门【之前】：那些门是为 err 轮补写设的，
+        # 正常 SPEAK 轮(_syl_resp_handled=True)会早退，记账挂它们后面就永远收不到证据。
+        # getattr 而非直调：本钩子被窄插件桩借去无绑定调用（见下方 backfill 的同款写法），
+        # 那些桩没有 v3 面；v3 缺席绝不能让这条 v2 兜底路径炸。
+        _v3_settle_ordinary = getattr(self, "_v3_settle_ordinary", None)
+        if callable(_v3_settle_ordinary):
+            _v3_settle_ordinary(event)
         try:
             get_extra = getattr(event, "get_extra", None)
             if not callable(get_extra):
@@ -1425,7 +2752,13 @@ class EmotionalStatePlugin(Star):
             if self._agent_run_done(event) is not True:
                 return  # 终态门：tool 循环中间步 runner 未 done，不在此补写
             # response=None -> 判据 role 腿判"框架不落库"；once-guard 保证本轮至多一次
-            await self._backfill_user_if_framework_skips(event, None)
+            backfill_turn = getattr(
+                self, "_backfill_turn_if_framework_skips", None
+            )
+            if callable(backfill_turn):
+                await backfill_turn(event, None)
+            else:  # compatibility for narrow legacy test/plugin stubs
+                await self._backfill_user_if_framework_skips(event, None)
         except Exception as e:
             logger.warning(f"Sylanne err-turn user backfill failed: {e}", exc_info=True)
 
@@ -1446,8 +2779,12 @@ class EmotionalStatePlugin(Star):
     # 同名钩子，跟随同一套约定读同一个 extra key（API 参考 §3 after_message_sent /
     # §4 event.get_extra）。
     @filter.after_message_sent()
-    async def on_after_message_sent_reset_ghost_cleanup(self, event: Any) -> None:
-        """AstrBot /reset 发生后清理本插件的幽灵记忆源（不触碰关系/人格状态）。"""
+    async def on_after_message_sent_reset_ghost_cleanup(
+        self, event: Any, *args: Any, **kwargs: Any
+    ) -> None:
+        """AstrBot /reset 发生后清理本插件的幽灵记忆源（不触碰关系/人格状态）。
+
+        *args/**kwargs：兜住 AstrBot 各版本多传的钩子参数，避免新版 TypeError。"""
         try:
             clean_session = False
             get_extra = getattr(event, "get_extra", None)
@@ -1582,10 +2919,98 @@ class EmotionalStatePlugin(Star):
             )
             return False
 
+    async def _maybe_suppress_realtime_takeover(self, event: Any) -> bool:
+        """即时聊天 LLM 响应接管的发送抑制（realtime 完整重做 Model-D 核心）。
+
+        ``_on_llm_response_inner`` 只登记分段候选，绝不启动 transport；
+        ``on_agent_done`` 只把 run_context/response 绑定到账本。此装饰器以低优先级
+        在常规 TTS/图片装饰器之后查看【最终】event.result.chain：
+
+        - 仍为纯 Plain：提交文本所有权、启动分段 transport、清空框架 chain，
+          等实际投递结算后把成功送达前缀写回历史；
+        - 已变为 Record/Image 等非 Plain（或被其他装饰器清空）：放弃文本所有权，
+          不启动 transport，完整交给框架发送。
+
+        AstrBot 只会在 run_agent 生成器（包含本装饰阶段）消费完成后覆盖写历史，
+        因此纯文本分支的送达结算仍发生在保存之前；非文本分支则保留 provider
+        assistant 文本作为语音/图片回合的上下文。这个最终链仲裁点消除了
+        “先发分段文字，稍后 CloneTTS 又发 Record”的竞态。
+
+        返回 True 表示本轮由本机制处理（调用方应 return，跳过后续通用
+        strip_draft_blocks 逻辑——分段发送前已经 sanitize/strip 过）。
+        """
+        pipeline = getattr(self, "_llm_response_pipeline", None)
+        has_candidate = getattr(
+            pipeline,
+            "has_pending_segmented_candidate",
+            None,
+        )
+        candidate_pending = bool(has_candidate(event)) if callable(has_candidate) else False
+        get_extra = getattr(event, "get_extra", None)
+        if not candidate_pending and (
+            not callable(get_extra)
+            or not get_extra("_syl_realtime_takeover", False)
+        ):
+            return False
+        try:
+            result = event.get_result()
+            chain = getattr(result, "chain", None) if result is not None else None
+            if candidate_pending:
+                if not chain or any(not isinstance(seg, Plain) for seg in chain):
+                    delegate = getattr(
+                        pipeline,
+                        "delegate_segmented_candidate_to_framework",
+                        None,
+                    )
+                    if callable(delegate):
+                        await delegate(event)
+                    logger.info(
+                        "Sylanne final output delegated to framework chain: "
+                        "non_plain=%s for %s",
+                        bool(
+                            chain
+                            and any(not isinstance(seg, Plain) for seg in chain)
+                        ),
+                        getattr(event, "unified_msg_origin", ""),
+                    )
+                    return False
+
+                activate = getattr(pipeline, "activate_segmented_delivery", None)
+                if not callable(activate) or not activate(event):
+                    return False
+
+            if chain and any(not isinstance(seg, Plain) for seg in chain):
+                logger.info(
+                    "Sylanne realtime takeover suppression skipped: chain 含非 "
+                    "Plain 组件，放行框架原样发送 for %s",
+                    getattr(event, "unified_msg_origin", ""),
+                )
+                # 不视为"已处理"：交回调用方走通用 strip_draft_blocks 清理
+                # （只清 Plain 段、非 Plain 原样放行），而不是完全零处理。
+                return False
+            if result is not None:
+                if isinstance(chain, list):
+                    chain[:] = []  # 切片清空，保留 list/MessageChain 子类身份
+                else:
+                    result.chain = []
+            if candidate_pending:
+                settle_delivery = getattr(
+                    pipeline,
+                    "settle_segmented_delivery_history",
+                    None,
+                )
+                if callable(settle_delivery):
+                    await settle_delivery(event, None, None)
+            return True
+        except Exception as e:
+            logger.warning(
+                f"Sylanne realtime takeover suppression failed: {e}", exc_info=True
+            )
+            return False
 
     async def _on_llm_response_inner(self, event: Any, response: Any) -> None:
         # 2.4.1 err 轮兜底（三态标记，第二态）：本钩子跑过即置 True。必须在【入口】置位，
-        # 这样即便下面 v2core/legacy 抛异常，finally 里的补写也已经执行过，
+        # 这样即便下面 v2 裁决/投递续接抛异常，finally 里的补写也已经执行过，
         # after_message_sent 侧就会早退，不会对同一轮重复补写 user。
         set_extra = getattr(event, "set_extra", None)
         if callable(set_extra):
@@ -1593,27 +3018,33 @@ class EmotionalStatePlugin(Star):
                 set_extra("_syl_resp_handled", True)
             except Exception:  # 标记失败绝不阻断回复
                 pass
-        # v2core 认知阶段二（默认开）：裁决草稿 + 学习。handled=True 仅 SILENT（终结本轮）；
-        # SPEAK/FALLBACK/异常 -> handled=False 落 legacy（sanitize/分段/观测是 legacy 的嘴）。
+        # v2core 认知阶段二：裁决草稿 + 学习。suppress_delivery=True 仅 SILENT；
+        # SPEAK/FALLBACK/异常均续接唯一投递管线，完成 sanitize、分段与观测。
         try:
-            handled = False
+            suppress_delivery = False
             try:
                 from sylanne_alpha.v2core.integration import apply_v2core_response
-                handled = await apply_v2core_response(self, event, response)
+                suppress_delivery = await apply_v2core_response(self, event, response)
             except Exception as exc:  # 桥接自身异常绝不阻断回复
                 logger.error(
-                    f"Sylanne v2core bridge error, fallback to legacy: {exc}",
+                    f"Sylanne v2core decision error; continuing delivery pipeline: {exc}",
                     exc_info=True,
                 )
-                handled = False
-            if not handled:
+                suppress_delivery = False
+            if not suppress_delivery:
                 await self._llm_response_pipeline._on_llm_response_inner(event, response)
         finally:
-            # 2.4.1 leg-3 双写根治：无论上面 v2core/legacy 走哪条、是否抛异常，都在此
+            # 2.4.1 leg-3 双写根治：无论上面抑制投递、续接投递或抛异常，都在此
             # 判定"框架本轮是否落库"，仅框架不落库时补写 user（放 finally 保证异常路径
             # 也不吞补写——这是 SILENT 不丢历史的红线）。
             try:
-                await self._backfill_user_if_framework_skips(event, response)
+                backfill_turn = getattr(
+                    self, "_backfill_turn_if_framework_skips", None
+                )
+                if callable(backfill_turn):
+                    await backfill_turn(event, response)
+                else:  # compatibility for narrow legacy test/plugin stubs
+                    await self._backfill_user_if_framework_skips(event, response)
             except Exception as exc:
                 logger.warning("Sylanne user backfill failed: %s", exc)
 
@@ -1636,10 +3067,17 @@ class EmotionalStatePlugin(Star):
 
     # Segmented dispatch
     async def _dispatch_segmented_parts(
-        self, origin: str, parts: list[dict[str, Any]], session_key: str = ""
+        self,
+        origin: str,
+        parts: list[dict[str, Any]],
+        session_key: str = "",
+        *,
+        settle_v3: bool = True,
     ) -> None:
+        # settle_v3 必须原样转发：这层只是兼容转发壳，把它吞掉的话，将来若有调用方
+        # 经这里走补刀式（复用 session_key 的延迟）投递，就会重新踩上"认领下一轮"的坑。
         await self._llm_response_pipeline._dispatch_segmented_parts(
-            origin, parts, session_key=session_key
+            origin, parts, session_key=session_key, settle_v3=settle_v3
         )
 
     # Memory prompt fragment
@@ -1685,34 +3123,13 @@ class EmotionalStatePlugin(Star):
     async def _observatory_route_handler(self) -> dict[str, Any]:
         return await self._public_api._observatory_route_handler()
 
-    # Claude/hajide compat stubs (minimal implementation)
+    # State injection budget
     def _state_injection_budget_for_request(
-        self, session_key: str, request: Any, model_hint: str = ""
+        self, session_key: str, request: Any
     ) -> _StateInjectionBudget:
         return self._llm_response_pipeline._state_injection_budget_for_request(
-            session_key, request, model_hint
+            session_key, request
         )
-
-    def _append_temp_text_part(
-        self,
-        request: Any,
-        text: str,
-        source: str = "",
-        budget: _StateInjectionBudget | None = None,
-    ) -> bool:
-        return self._llm_response_pipeline._append_temp_text_part(
-            request, text, source, budget
-        )
-
-    def _normalize_claude_request_payload(
-        self, request: Any, budget: _StateInjectionBudget | None = None
-    ) -> None:
-        self._llm_response_pipeline._normalize_claude_request_payload(request, budget)
-
-    def _prune_hajide_tools(
-        self, request: Any, budget: _StateInjectionBudget | None = None
-    ) -> None:
-        self._llm_response_pipeline._prune_hajide_tools(request, budget)
 
     # Text extraction from event
     def _text(self, event: Any) -> str:
@@ -2018,8 +3435,20 @@ class EmotionalStatePlugin(Star):
 
     async def _sync_message_to_conv_mgr(
         self, session_key: str, role: str, text: str
-    ) -> None:
-        await self._state_persistence.sync_message_to_conv_mgr(session_key, role, text)
+    ) -> bool:
+        return await self._state_persistence.sync_message_to_conv_mgr(
+            session_key, role, text
+        )
+
+    async def _sync_turn_to_conv_mgr(
+        self,
+        session_key: str,
+        user_text: str,
+        assistant_text: str = "",
+    ) -> bool:
+        return await self._state_persistence.sync_turn_to_conv_mgr(
+            session_key, user_text, assistant_text
+        )
 
     # ── 2.4.1：user 侧对齐 bot 侧 skip 哲学，仅框架不落库轮补写 user ──────────
     def _framework_will_persist_this_turn(self, event: Any, response: Any) -> bool:
@@ -2051,6 +3480,14 @@ class EmotionalStatePlugin(Star):
         req = get_extra("provider_request") if callable(get_extra) else None
         # internal.py:447 —— 无 conversation，框架直接 return，不落库
         if req is None or getattr(req, "conversation", None) is None:
+            return False
+        # Only the internal agent sub-stage owns AstrBot's `_save_to_history`.
+        # Third-party runners invoke on_agent_done hooks too, but do not run that
+        # sub-stage; absence from the active-runner registry therefore means the
+        # plugin must persist this turn itself. Partial legacy stubs without the
+        # probe retain the old predicate behavior.
+        runner_probe = getattr(self, "_agent_run_done", None)
+        if callable(runner_probe) and runner_probe(event) is None:
             return False
         aborted = self._agent_was_aborted(event)
         is_stopped = bool(event.is_stopped()) if hasattr(event, "is_stopped") else False
@@ -2109,51 +3546,70 @@ class EmotionalStatePlugin(Star):
             pass
         return None
 
-    async def _backfill_user_if_framework_skips(self, event: Any, response: Any) -> None:
-        """仅当框架本轮不落库时补写 user（对齐 bot 侧 skip_conv_sync 哲学）。
-
-        在 _on_llm_response_inner 的 finally 调用，且身处框架 on_agent_done 钩子内，
-        故整段跑在框架 per-umo session_lock（internal.py:209）持有期中，再叠一层
-        conv_sync_lock。两把锁分工【不同】，别混为一谈（真进程并发灰测实测所得）：
-          · 框架 session_lock：把「插件补写」与「框架 _save_to_history 的整表覆盖写」
-            隔开。这正是 2.4.1 所修 bug 的那条跨锁双写——旧 leg-3 是 fire-and-forget、
-            逃出此锁，才会在框架落库【之后】才 append，写出悬挂重复 user。
-          · conv_sync_lock：把【跨轮并发的多个补写】彼此隔开。同一 umo 上多轮并发且
-            各轮均 SILENT 时，多个补写确实会并发进入，靠它的读-改-写临界区串行化。
-        故"补写是该轮唯一 user 写者"只在【单轮内】成立（该轮框架不写）；跨轮并发的补写
-        并非不存在，而是被 conv_sync_lock 串起来。灰测：4 轮并发 SILENT，4 次补写全部
-        落在框架锁持有窗口内、经 conv_sync_lock 串行，4 条 user 各写一次，不丢不重；
-        对照组绕过 conv_sync_lock 立刻丢 3 条（经典 lost update）。
-
-        await（非 fire-and-forget）保证 SILENT 轮 user 落盘先于下一轮框架加载历史；
-        SILENT 不发消息，几毫秒写盘用户零可见。
-
-        每轮 once-guard（红线闸 Finding #1，本轮至多补一次）：本方法有两个调用者——
-        on_llm_response 的 finally 与 after_message_sent 兜底钩子；而 tool 循环带
-        preamble 文本时，after_message_sent 会在 on_agent_done 之前【多次】触发、且
-        每次 _syl_resp_handled 都还是 False。若最终步不落库（err / tool-no-return），
-        这些多次补写会在无框架整表覆盖收尾的历史里叠成 [U, U, …] 永久重复——正是
-        2.4.1 要杀的悬挂重复 user，而 user 侧无幂等去重守卫（state_persistence 豁免
-        role=="user"）兜不住。故这里用 event extra 做每轮 once-guard：整轮在框架
-        session_lock 内单协程顺序执行，check-then-set 无竞态；只在【真正写入后】置位，
-        谓词早退 / text 空的路径不消费守卫（不影响后续该补的轮次）。"""
+    async def _backfill_turn_if_framework_skips(
+        self,
+        event: Any,
+        response: Any,
+        *,
+        assistant_override: str | None = None,
+    ) -> None:
+        """Atomically persist the turn when AstrBot will not do so itself."""
         if not self._has_conversation_manager():
             return
         get_extra = getattr(event, "get_extra", None)
-        if callable(get_extra) and get_extra("_syl_user_backfilled", False):
-            return  # 本轮已补过 user，绝不再补（tool 循环多次触发 / finally+钩子双入口）
+        if callable(get_extra) and (
+            get_extra("_syl_turn_backfilled", False)
+            or get_extra("_syl_user_backfilled", False)
+        ):
+            return
         if self._framework_will_persist_this_turn(event, response):
-            return  # 框架是本轮 user 权威写者，插件绝不写（不消费 once-guard）
-        text = self._text(event)  # 响应期完整重建（v2core 已在 integration.py:1048 实证可行）
-        if not text:
-            return  # 不消费 once-guard
-        await self._sync_message_to_conv_mgr(self._session_key(event), "user", text)
+            return
+
+        user_text = self._text(event)
+        if not user_text:
+            return
+
+        stopped = bool(event.is_stopped()) if hasattr(event, "is_stopped") else False
+        assistant_text = assistant_override if assistant_override is not None else ""
+        if assistant_override is None and response is not None and not stopped:
+            role = getattr(response, "role", "assistant") or "assistant"
+            completion = getattr(response, "completion_text", "") or ""
+            if role == "assistant" and completion:
+                assistant_text = completion
+
+        sync_turn = getattr(self, "_sync_turn_to_conv_mgr", None)
+        if callable(sync_turn):
+            success = bool(
+                await sync_turn(
+                    self._session_key(event), user_text, assistant_text
+                )
+            )
+        else:
+            # Keep narrow legacy stubs working; the real plugin always uses the
+            # atomic turn delegate above.
+            result = await self._sync_message_to_conv_mgr(
+                self._session_key(event), "user", user_text
+            )
+            success = True if result is None else bool(result)
+
+        if not success:
+            return
+
         set_extra = getattr(event, "set_extra", None)
         if callable(set_extra):
-            try:
-                set_extra("_syl_user_backfilled", True)  # 仅写入成功后消费守卫
-            except Exception:  # 置位失败不回滚已写入；下次同轮触发靠上面 get 兜（读到旧值 False 会重写，但同一 event 内 set 已尝试，属极端降级，宁可偶尔重写也不阻断）
-                pass
+            for key in ("_syl_turn_backfilled", "_syl_user_backfilled"):
+                try:
+                    set_extra(key, True)
+                except Exception:
+                    pass
+
+    async def _backfill_user_if_framework_skips(
+        self, event: Any, response: Any
+    ) -> None:
+        """Compatibility wrapper for the grey.4 atomic turn backfill."""
+        await EmotionalStatePlugin._backfill_turn_if_framework_skips(
+            self, event, response
+        )
 
     def _init_persona_manager(self) -> Any:
         return self._state_persistence.init_persona_manager()
@@ -2300,14 +3756,6 @@ class EmotionalStatePlugin(Star):
         if cfg.get("benchmark_enable_simulated_time"):
             return time.time() + float(cfg.get("benchmark_time_offset_seconds", 0.0))
         return time.time()
-
-    def _request_model_hint_text(self, event: Any = None) -> str:
-        return ""
-
-    async def _request_model_hint_for_event(
-        self, event: Any = None, request: Any = None
-    ) -> str:
-        return await self._get_model_hint(event)
 
     def _request_to_text(self, request: Any) -> str:
         if request is None:
@@ -2665,6 +4113,27 @@ class EmotionalStatePlugin(Star):
         async for text in _rl.unbond_command(self, event):
             yield event.plain_result(text) if hasattr(event, "plain_result") else text
 
+    @filter.command("说说草稿")
+    async def qzone_status_command(self, event: Any = None, **kwargs: Any) -> Any:
+        """PR-Qzone：查看当前是否有等主人过目的说说草稿（仅主人可用）。"""
+        from sylanne_alpha import qzone_share as _qz
+        async for text in _qz.status_command(self, event):
+            yield event.plain_result(text) if hasattr(event, "plain_result") else text
+
+    @filter.command("说说确认")
+    async def qzone_confirm_command(self, event: Any = None, **kwargs: Any) -> Any:
+        """PR-Qzone：确认发出待确认的说说草稿（owner 过目门，唯一发布路径）。"""
+        from sylanne_alpha import qzone_share as _qz
+        async for text in _qz.confirm_command(self, event):
+            yield event.plain_result(text) if hasattr(event, "plain_result") else text
+
+    @filter.command("说说取消")
+    async def qzone_cancel_command(self, event: Any = None, **kwargs: Any) -> Any:
+        """PR-Qzone：放弃待确认的说说草稿（仅主人可用）。"""
+        from sylanne_alpha import qzone_share as _qz
+        async for text in _qz.cancel_command(self, event):
+            yield event.plain_result(text) if hasattr(event, "plain_result") else text
+
     async def get_bot_integrated_self_state_tool(
         self, event: Any = None, detail: str = "summary", **kwargs: Any
     ) -> Any:
@@ -2761,6 +4230,7 @@ class EmotionalStatePlugin(Star):
             memory_summary_getter=pipe._life_sim_memory_summary,
             countdown_callback=self._life_sim_adjust_countdown,
             state_dirty_callback=self._life_sim_throttled_save,
+            qzone_candidate_callback=pipe._qzone_candidate_handler,
         )
         # 启动全局自驱心跳（替代原 life_sim.start() 的后台循环）。
         # LifeSim 持久化状态恢复在 async initialize 里 await（KV 读为异步）。
@@ -2860,6 +4330,25 @@ class EmotionalStatePlugin(Star):
                     _rl.restore(self, rel_saved)
         except Exception as e:
             logger.debug(f"Sylanne relationship state restore skipped: {e}")
+        # PR-Qzone：恢复说说功能审计/频率闸状态（独立 KV key，重启不丢当日/当周计数，
+        # 否则重启即可绕过频率闸上限）。
+        try:
+            if self._has_kv_api():
+                from sylanne_alpha import qzone_share as _qz
+                qzone_saved = await self.get_kv_data(_qz._KV_KEY, None)
+                if qzone_saved and isinstance(qzone_saved, dict):
+                    self._qzone_audit = _qz.QzoneAuditState.from_dict(qzone_saved)
+        except Exception as e:
+            logger.debug(f"Sylanne qzone audit state restore skipped: {e}")
+        # PR-Qzone：建立说说发布用的 aiohttp session（terminate 时收）。建立失败
+        # （aiohttp 未装等极端情况）不阻断其余初始化——发布时 qzone_share._do_publish
+        # 会因 session 为 None 直接返回失败，走 owner 过目门的失败提示路径。
+        try:
+            import aiohttp
+            if self._qzone_http_session is None or self._qzone_http_session.closed:
+                self._qzone_http_session = aiohttp.ClientSession()
+        except Exception as e:
+            logger.debug(f"Sylanne qzone http session init skipped: {e}")
         # issue#43 Wave2：还原崩溃中断的主动发言桥接 override 基线（provenance 恢复，
         # 把用户自配 proactive_prompt 一起带回；无残留则 no-op，绝不盲删大饼配置）。
         try:
@@ -2875,14 +4364,12 @@ class EmotionalStatePlugin(Star):
         # emotion_spirit 适配桥：仅在配置开启且探测到 emotion_spirit 时激活（关它的 persona
         # 注入，让 Sylanne 当 system_prompt 唯一主）。未装 / 未开 → 完全 no-op，零影响。
         try:
-            from sylanne_alpha.v2core.integration import v2core_enabled as _v2core_enabled
             es_bridge = getattr(self, "_emotion_spirit_bridge", None)
             es_on = bool(
                 (self.config or {}).get("sylanne_alpha_emotion_spirit_bridge_enabled", False)
             )
-            # 额外门控 v2core：消费侧只在 v2core 请求阶段跑；v2core 关时若仍激活，会把 emotion_spirit
-            # 静音却无替代注入（红队 zero-behavior MINOR 不对称耦合）。故 v2core 关则不激活本桥。
-            if es_bridge is not None and es_on and _v2core_enabled(self) and es_bridge.available():
+            # v2core 请求阶段无条件运行；本桥只保留自身配置、存在性和可用性门控。
+            if es_bridge is not None and es_on and es_bridge.available():
                 res = es_bridge.activate()
                 if res.get("active"):
                     logger.info(
@@ -2898,6 +4385,12 @@ class EmotionalStatePlugin(Star):
             self._start_life_simulator()
         except Exception as e:
             logger.error(f"Sylanne initialize: autonomy start failed: {e}", exc_info=True)
+        # v3 shadow（plan Task 13）：默认关时 initialize() 直接 return False，零 IO 零线程。
+        # 开启时它内部先 acquire epoch 再起私有 worker；起不来只 fail-close v3，v2 照常。
+        # 放在最后：v3 只观察，绝不能挡住任何 v2 子系统的初始化。
+        await self._v3_shadow.initialize(
+            root=Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_NAME / "v3_shadow"
+        )
 
     async def _life_sim_adjust_countdown(self) -> None:
         """生命模拟 tick 回调：用 Sylanne 当前状态拨动大饼下一次主动发言倒计时。
@@ -2946,6 +4439,33 @@ class EmotionalStatePlugin(Star):
             logger.debug(f"Sylanne life sim throttled save skipped: {e}")
         finally:
             self._life_sim_dirty_in_flight = False
+
+    async def _qzone_audit_throttled_save(self) -> None:
+        """PR-Qzone：节流落盘说说审计/频率闸状态（镜像 _life_sim_throttled_save）。
+
+        由 qzone_share 模块每次记审计条目时派发，受 min-gap 节流；失败静默，
+        最后一次仍由 terminate 兜底。频率闸计数（daily/weekly post_timestamps）
+        重启不落盘会让频率闸失效，因此本方法与 initialize 的 KV 恢复是配套契约。
+        """
+        now = time.time()
+        if self._qzone_audit_dirty_in_flight:
+            return
+        if (now - self._qzone_audit_last_save_ts) < _QZONE_AUDIT_SAVE_MIN_GAP_SECONDS:
+            return
+        if not self._has_kv_api():
+            return
+        audit = getattr(self, "_qzone_audit", None)
+        if audit is None:
+            return
+        self._qzone_audit_dirty_in_flight = True
+        self._qzone_audit_last_save_ts = now
+        try:
+            from sylanne_alpha import qzone_share as _qz
+            await self.put_kv_data(_qz._KV_KEY, audit.to_dict())
+        except Exception as e:
+            logger.debug(f"Sylanne qzone audit throttled save skipped: {e}")
+        finally:
+            self._qzone_audit_dirty_in_flight = False
 
     async def _rhythm_learner_throttled_save(self) -> None:
         """T1-04②：节流落盘 RhythmLearner 状态（镜像 _life_sim_throttled_save）。
@@ -3040,6 +4560,10 @@ class EmotionalStatePlugin(Star):
 
     async def terminate(self) -> None:
         """插件卸载/更新前的清理：停止所有后台任务、关闭 WebUI、持久化状态。"""
+        # v3 shadow（plan Task 13）：先【同步】关闸，让接下来的 v2 收尾 save 排干期间
+        # 不再有新的影子轮进来。同步是关键——这里不能 await，否则 drain 之前就出让了
+        # 事件循环，还能被塞进新的 capture/settle。
+        self._v3_shadow.begin_shutdown()
         # v2core：先排干在途域状态落盘 + 终扫一遍（必须在 cancel 后台任务【之前】，
         # 否则最后一轮 fire-and-forget 存档会被反手 cancel——她的最近成长就丢了）
         try:
@@ -3064,6 +4588,10 @@ class EmotionalStatePlugin(Star):
                 es_bridge.deactivate()
         except Exception as e:
             logger.debug(f"Sylanne emotion_spirit bridge deactivate skipped: {e}")
+        # v3 shadow：v2 的 save 已经排干，这里给 v3 自己的有序关停一个有限窗口。正常时
+        # 它仍在下面那轮【通用 task 取消】之前完成；若 commit/fsync/线程退出永久卡住，facade
+        # 会保留清理 task 但按上限返回，绝不能把 v2 与整个插件退出一起拖死。
+        await self._v3_shadow.terminate()
         # 收集所有需要取消的任务
         tasks_to_cancel: list = []
         for task in list(self._background_tasks):
@@ -3141,6 +4669,21 @@ class EmotionalStatePlugin(Star):
                 await self.put_kv_data(_rl._KV_KEY, _rl.snapshot(self))
         except Exception as e:
             logger.debug(f"Sylanne relationship state persist skipped: {e}")
+        # PR-Qzone：说说审计/频率闸状态终扫落盘（独立 KV key，兜底节流漏窗）
+        try:
+            audit = getattr(self, "_qzone_audit", None)
+            if audit is not None and self._has_kv_api():
+                from sylanne_alpha import qzone_share as _qz
+                await self.put_kv_data(_qz._KV_KEY, audit.to_dict())
+        except Exception as e:
+            logger.debug(f"Sylanne qzone audit state persist skipped: {e}")
+        # PR-Qzone：关闭说说发布用的 aiohttp session
+        try:
+            session = getattr(self, "_qzone_http_session", None)
+            if session is not None and not session.closed:
+                await session.close()
+        except Exception as e:
+            logger.debug(f"Sylanne qzone http session close skipped: {e}")
         # 关闭独立 WebUI 服务器
         try:
             await stop_webui_server()
@@ -3282,7 +4825,7 @@ class EmotionalStatePlugin(Star):
         )
 
     # LLM Tool: query_agent_state
-    @filter.llm_tool(name="query_agent_state")
+    @_model_function_tool(name="query_agent_state")
     async def _llm_tool_query_agent_state(self, event: Any) -> Any:
         """查询 Sylanne 当前情感状态和计算脊柱摘要。"""
         return await self._public_api._llm_tool_query_agent_state(event)

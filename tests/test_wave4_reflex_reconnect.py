@@ -1,4 +1,4 @@
-"""Wave 4：重连 reflex_learn 到 RESPONSE_POST（apply_v2core_response）。
+"""回复结算阶段的 reflex_learn 接线契约。
 
 v1 清理后 reflex_learn 失去 caller（层次1 反应式学习名存实亡）。本文件钉死它在真出站
 回复轮（SPEAK/FALLBACK）被调一次、SILENT 轮不调（没有 bot 回复，不能污染续聊间隔推断），

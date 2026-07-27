@@ -1,124 +1,110 @@
-"""CP8-P3a 多智能体基础设施单元测试。"""
+"""AUTONOMOUS-only Agent 生命周期契约。"""
+
+from __future__ import annotations
 
 import asyncio
+import importlib.util
+import inspect
+from types import SimpleNamespace
 
+import sylanne_alpha.agents as agents
 from sylanne_alpha.agents import (
-    LLM,
+    AUTONOMOUS,
+    RULE,
     SKIP,
-    AgentIntent,
     CognitiveAgent,
-    EventBus,
-    ResponseObserved,
+    LifeAgent,
     SelfCore,
 )
+from sylanne_alpha.agents.autonomy_scheduler import AutonomyScheduler
 
 
 class _StubPlugin:
-    """最小 plugin 桩，满足 SelfCore/agent 构造。"""
-
-    def __init__(self):
+    def __init__(self, life_simulator=None):
         self.config = {}
+        self._life_simulator = life_simulator
 
 
-# ---------------------------------------------------------------------------
-# EventBus: fire-forget 广播
-# ---------------------------------------------------------------------------
-def test_eventbus_publish_delivers_to_subscribers():
-    bus = EventBus()
-    received = []
-    bus.subscribe(ResponseObserved, lambda e: received.append(e.text))
-    bus.publish(ResponseObserved(source="dialogue", session_key="s1", text="hi", confidence=0.8))
-    assert received == ["hi"]
+class _SpyAgent(CognitiveAgent):
+    name = "spy"
 
-
-def test_eventbus_handler_exception_isolated():
-    bus = EventBus()
-    hits = []
-    bus.subscribe(ResponseObserved, lambda e: (_ for _ in ()).throw(ValueError("boom")))
-    bus.subscribe(ResponseObserved, lambda e: hits.append("ok"))
-    # 第一个 handler 抛异常，不应阻断第二个，也不应冒泡
-    bus.publish(ResponseObserved(source="x", session_key="s1"))
-    assert hits == ["ok"]
-
-
-# ---------------------------------------------------------------------------
-# compose_inputs: 意图融合
-# ---------------------------------------------------------------------------
-def test_compose_filters_invalid_flags():
-    sc = SelfCore(_StubPlugin())
-    intents = [
-        AgentIntent(source="emotion", flags=["hurt", "NOT_A_FLAG", "boundary"]),
-    ]
-    out = sc.compose_inputs(intents)
-    assert "hurt" in out.flags and "boundary" in out.flags
-    assert "NOT_A_FLAG" not in out.flags  # 非法 flag 被过滤
-
-
-def test_compose_confidence_priority_weighted():
-    sc = SelfCore(_StubPlugin())
-    intents = [
-        AgentIntent(source="a", confidence_hint=1.0, priority=1.0),
-        AgentIntent(source="b", confidence_hint=0.0, priority=1.0),
-    ]
-    out = sc.compose_inputs(intents)
-    assert abs(out.confidence - 0.5) < 1e-9  # 等权重→0.5
-
-
-def test_compose_affect_dual_channel_and_group_heat():
-    sc = SelfCore(_StubPlugin())
-    intents = [
-        AgentIntent(source="emotion", affect={"valence": 0.4}, priority=1.0, group_heat=1.2),
-    ]
-    out = sc.compose_inputs(intents)
-    assert out.values.get("valence") == 0.4       # hot_pool 通道
-    assert out.assessment.get("valence") == 0.4   # Void-Scar 通道
-    assert out.values.get("group_heat") == 1.2
-
-
-def test_compose_carries_high_level_payload():
-    sc = SelfCore(_StubPlugin())
-    intents = [AgentIntent(source="memory", payload={"recall": "初遇那天"})]
-    out = sc.compose_inputs(intents)
-    assert out.carried["memory"]["recall"] == "初遇那天"
-
-
-def test_compose_empty_confidence_is_none():
-    sc = SelfCore(_StubPlugin())
-    out = sc.compose_inputs([AgentIntent(source="x")])
-    assert out.confidence is None  # 无贡献→None，调用方用既有默认
-
-
-# ---------------------------------------------------------------------------
-# run_cycle + LLM 预算闸
-# ---------------------------------------------------------------------------
-class _GateAgent(CognitiveAgent):
-    def __init__(self, plugin, bus, name, mode, intent_flags=None):
-        super().__init__(plugin, bus)
-        self.name = name
+    def __init__(self, plugin, *, mode=RULE, fail=False):
+        super().__init__(plugin)
         self._mode = mode
-        self._flags = intent_flags or []
+        self._fail = fail
+        self.calls = 0
 
     def gate(self, perceived):
         return self._mode
 
-    async def act(self, session_key, mode, perceived, phase="post"):
-        return AgentIntent(source=self.name, flags=self._flags)
+    async def act(self, session_key, mode, perceived):
+        self.calls += 1
+        if self._fail:
+            raise RuntimeError("boom")
 
 
-def test_run_cycle_skips_skip_agents():
-    sc = SelfCore(_StubPlugin())
-    sc.register(_GateAgent(sc._p, sc.bus, "emotion", LLM, ["hurt"]))
-    sc.register(_GateAgent(sc._p, sc.bus, "idle_one", SKIP))
-    intents = asyncio.run(sc.run_cycle("s1", {}))
-    sources = {i.source for i in intents}
-    assert sources == {"emotion"}  # SKIP 的不产意图
+def test_agent_package_exports_only_autonomous_contract() -> None:
+    for retired in (
+        "PRE",
+        "POST",
+        "RESPONSE_POST",
+        "AgentIntent",
+        "EventBus",
+        "ComposedInputs",
+    ):
+        assert not hasattr(agents, retired)
+    assert agents.AUTONOMOUS == "autonomous"
+    assert importlib.util.find_spec("sylanne_alpha.agents.event_bus") is None
 
 
-def test_llm_budget_downgrades_low_priority():
-    sc = SelfCore(_StubPlugin(), llm_budget=1)
-    # 两个都想要 LLM 档，预算只 1：dialogue 优先级高于 memory，memory 被降级
-    sc.register(_GateAgent(sc._p, sc.bus, "memory", LLM))
-    sc.register(_GateAgent(sc._p, sc.bus, "dialogue", LLM))
-    # act 仍会跑（降级只改 mode，不取消），两者都产意图
-    intents = asyncio.run(sc.run_cycle("s1", {}))
-    assert {i.source for i in intents} == {"memory", "dialogue"}
+def test_self_core_runs_only_active_autonomous_workers() -> None:
+    core = SelfCore(_StubPlugin())
+    active = _SpyAgent(core._p)
+    skipped = _SpyAgent(core._p, mode=SKIP)
+    core.register(active)
+    core.register(skipped)
+
+    result = asyncio.run(core.run_autonomous_cycle("s1", {}))
+
+    assert result is None
+    assert active.calls == 1
+    assert skipped.calls == 0
+
+
+def test_autonomous_worker_failure_is_isolated() -> None:
+    core = SelfCore(_StubPlugin())
+    broken = _SpyAgent(core._p, fail=True)
+    healthy = _SpyAgent(core._p)
+    core.register(broken)
+    core.register(healthy)
+
+    asyncio.run(core.run_autonomous_cycle("s1", {}))
+
+    assert broken.calls == 1
+    assert healthy.calls == 1
+
+
+def test_life_agent_has_no_reactive_phase_and_ticks_when_due() -> None:
+    class _LifeSimulator:
+        enabled = True
+        interval_seconds = 1.0
+        state = SimpleNamespace(last_simulation_time=0.0)
+
+        def __init__(self):
+            self.ticks = 0
+
+        async def simulate_tick(self):
+            self.ticks += 1
+
+    simulator = _LifeSimulator()
+    agent = LifeAgent(_StubPlugin(simulator))
+
+    assert agent.phases == (AUTONOMOUS,)
+    asyncio.run(agent.act("default", RULE, {"autonomy_due": True}))
+    assert simulator.ticks == 1
+
+
+def test_scheduler_calls_explicit_autonomous_cycle() -> None:
+    source = inspect.getsource(AutonomyScheduler)
+    assert "run_autonomous_cycle" in source
+    assert "run_cycle" not in source

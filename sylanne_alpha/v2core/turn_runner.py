@@ -222,10 +222,9 @@ class TurnRunner:
     def _assess_quality(ctx: BeatContext, reply: Reply) -> None:
         """CP8-P4 对话质量自评 → scratch["quality"]（review F3：接活死读）。
 
-        v1 退役交接：旧 DialogueAgent 在 RESPONSE_POST 用 self_score 三维均值发
-        dialogue_quality_high/low（DRIFT_SIGNALS 真实在表：质量高→表达欲+关系引力涨）。
-        v2core 启用即退役 v1 逐轮路径，这条"她从自己回复的质量里学"的闭环断粮——
-        本方法在 render 之后用同一把尺（self_score 零-LLM 启发式 + 同阈值 0.7/0.35，
+        旧逐轮对话路径曾用 self_score 三维均值发 dialogue_quality_high/low
+        （DRIFT_SIGNALS 真实在表：质量高→表达欲+关系引力涨）。本方法在 render
+        之后用同一把尺（self_score 零-LLM 启发式 + 同阈值 0.7/0.35，
         保守防自评噪声驱动激进漂移）补上。消费者：_drive_learning → learn(quality_signal)
         → feedback_quality（DRIFT_SIGNALS 通道）。
         已有外部预置 scratch["quality"]（如测试/将来更强判定源）→ 不覆盖。

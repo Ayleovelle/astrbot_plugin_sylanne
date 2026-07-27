@@ -472,6 +472,39 @@ class ProactiveBridge:
         ]
         return "".join(pt for pt in parts if pt)
 
+    def is_dispatch_inflight(self, session_key: str) -> bool:
+        """这个会话此刻是否正有一次主动发言在飞（跨 check_and_chat 的整个窗口）。
+
+        供请求边界把主动轮的上下文类别定成 PROACTIVE：大饼的主动发言同样走 LLM 管线、
+        同样触发 on_llm_request，不这样区分就会被当成普通点名轮。只读，绝不改状态。
+        """
+
+        if not session_key:
+            return False
+        try:
+            if session_key in self._inflight_dispatch:
+                return True
+            return self._resolve_origin(session_key) in self._inflight_dispatch
+        except Exception:  # noqa: BLE001 - 判不出来就按非主动轮走
+            return False
+
+    def _v3_settle_reach(self, sid: str, session_key: str) -> None:
+        """proactive dispatched=True 的 v3 终端证据（默认关时是空操作）。
+
+        键要挑对：捕获点用的是 `_session_ctx.session_key(event)`，而这里手上的 `sid` 是
+        `_resolve_origin(session_key)` 的产物，两者不保证相等。故按 (sid, session_key)
+        顺序找第一个真有待结算捕获的键；都没有就什么都不做（这轮没被 v3 捕获过）。
+        绝不对两个键各结算一次——那会把两个不同会话的轮一起误记成 REACH。
+        """
+
+        facade = getattr(self._p, "_v3_shadow", None)
+        if facade is None:
+            return
+        for key in (sid, session_key):
+            if key and facade.has_pending(key):
+                facade.settle(session_key=key, route_kind="PROACTIVE", proactive_dispatched=True)
+                return
+
     async def dispatch(self, session_key: str, motivation_text: str) -> dict[str, Any]:
         """触发一次大饼主动发言，注入 motivation_text 作为 proactive_prompt。
 
@@ -552,6 +585,10 @@ class ProactiveBridge:
                 # 30min 重试；并发触发由 in-flight 闸挡，不靠这个时间戳，故无需在 await 前抢记）。
                 self._last_bridge_dispatch[sid] = time.time()
                 dispatched = True
+                # v3 shadow（design 14.2；plan Task 13）：proactive dispatched=True 才确证
+                # REACH——这是唯一在此点成立的终端证据，且被上面每一条失败早退与下面的
+                # except 排除在外。默认关时是空操作，facade 内部保证不抛。
+                self._v3_settle_reach(sid, session_key)
             except Exception as e:
                 reason = f"error:{type(e).__name__}"
                 logger.warning(f"Sylanne proactive_bridge dispatch failed: {e}", exc_info=True)

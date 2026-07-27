@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from types import SimpleNamespace
 
 from sylanne_alpha.v2core import rel_register as R
 
@@ -108,23 +109,48 @@ class _FakeStore:
         self.relationship_register_state = _FakeReg()
 
 
-class _FakePipe:
-    def __init__(self):
+class _FakeProvider:
+    def __init__(self, provider_id="rel-model", response="romantic"):
+        self.provider_id = provider_id
+        self.response = response
         self.calls = []
 
-    async def _generic_llm_call(self, prompt, provider_config_keys, max_tokens=None, temperature=0.0):
-        self.calls.append((prompt, tuple(provider_config_keys)))
-        return "romantic"
+    async def text_chat(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        return SimpleNamespace(completion_text=self.response)
+
+
+class _FakeContext:
+    def __init__(self, providers):
+        self.providers = {p.provider_id: p for p in providers}
+        self.lookup_calls = []
+
+    def get_provider_by_id(self, provider_id):
+        self.lookup_calls.append(provider_id)
+        return self.providers.get(provider_id)
+
+    def get_all_providers(self):
+        return list(self.providers.values())
+
+    def get_using_provider(self, umo=None):
+        return next(iter(self.providers.values()), None)
 
 
 class _FakeEvent:
     sender_id = "owner-42"
+    unified_msg_origin = "qq:friend:owner-42"
 
 
 class _FakePlugin:
-    def __init__(self):
+    def __init__(self, *, rel_provider_id="rel-model", aux_provider_id=""):
         self._store = _FakeStore()
-        self._llm_response_pipeline = _FakePipe()
+        self.provider = _FakeProvider("rel-model")
+        self.context = _FakeContext([self.provider])
+        self.config = {
+            "sylanne_alpha_rel_register_provider_id": rel_provider_id,
+            "sylanne_alpha_aux_provider_id": aux_provider_id,
+        }
+        self._config = self.config
 
 
 def test_classify_and_store_writes_shell_register():
@@ -134,8 +160,11 @@ def test_classify_and_store_writes_shell_register():
     assert st is not None
     assert st["sender_id"] == "owner-42"
     assert st["romantic_count"] == 1
-    # 真用了专用 provider key 优先级
-    assert p._llm_response_pipeline.calls[0][1][0] == "sylanne_alpha_rel_register_provider_id"
+    # 直接经统一 router 命中关系专用 provider，不依赖 response pipeline 上不存在的方法。
+    assert p.context.lookup_calls == ["rel-model"]
+    assert len(p.provider.calls) == 1
+    assert p.provider.calls[0]["max_tokens"] == 8
+    assert p.provider.calls[0]["temperature"] == 0.0
 
 
 def test_classify_handles_missing_pipe_gracefully():
@@ -144,6 +173,16 @@ def test_classify_handles_missing_pipe_gracefully():
     # 无 _llm_response_pipeline → 不抛、不写
     asyncio.run(R.classify_and_store(_P(), "s", _FakeEvent(), "hi"))
     assert _P._store.relationship_register_state.get("s") is None
+
+
+def test_classify_invalid_explicit_provider_fails_closed_without_aux_call():
+    p = _FakePlugin(rel_provider_id="missing", aux_provider_id="rel-model")
+
+    asyncio.run(R.classify_and_store(p, "s", _FakeEvent(), "老公我们在一起"))
+
+    assert p.context.lookup_calls == ["missing"]
+    assert p.provider.calls == []
+    assert p._store.relationship_register_state.get("s") is None
 
 
 def test_classify_survives_braces_in_user_text():
@@ -156,3 +195,27 @@ def test_classify_survives_braces_in_user_text():
     st = p._store.relationship_register_state.get("sessB")
     assert st is not None
     assert st["romantic_count"] == 1
+
+
+def test_classify_provider_internal_typeerror_never_retries_paid_call():
+    """不能把 provider 内部 TypeError 误当成本地签名不兼容而再次付费调用。"""
+
+    class _InternalTypeErrorProvider:
+        provider_id = "rel-model"
+
+        def __init__(self):
+            self.calls = 0
+
+        async def text_chat(self, **kwargs):
+            self.calls += 1
+            raise TypeError("provider failed after dispatch")
+
+    p = _FakePlugin()
+    provider = _InternalTypeErrorProvider()
+    p.provider = provider
+    p.context = _FakeContext([provider])
+
+    asyncio.run(R.classify_and_store(p, "sess-error", _FakeEvent(), "老公我们在一起"))
+
+    assert provider.calls == 1
+    assert p._store.relationship_register_state.get("sess-error") is None

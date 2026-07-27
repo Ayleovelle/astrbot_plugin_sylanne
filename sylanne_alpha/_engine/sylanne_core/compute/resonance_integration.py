@@ -1,12 +1,12 @@
 """Resonance Integration — the default serving spine (kernel.py:48-53).
 
-ResonanceSpine exposes the ComputationSpine interface (process/feedback/express/
-to_dict/from_dict/apply_personality). The name is historical: the iterate-to-
-convergence "resonance field" it once wrapped is RETIRED (v2.5). The field is now
-``DeterministicFusion`` (a single deterministic coherence pass), and the emotion
-core is the predictive-coding ``PEL-Core`` (behind ``pel_core_enabled``). The 7
-modules each compute once and contribute to a single-pass result; nothing iterates
-to a fixed point. The result-dict contract is preserved for API compatibility.
+ResonanceSpine is the serving computation backend and exposes
+process/feedback/express/to_dict/from_dict/apply_personality. The name is
+historical: the iterate-to-convergence "resonance field" it once wrapped is
+retired in v2.5. The field is now ``DeterministicFusion`` (a single deterministic
+coherence pass), and the emotion core is the predictive-coding ``PEL-Core``
+(behind ``pel_core_enabled``). The seven modules each compute once and contribute
+to a single-pass result; nothing iterates to a fixed point.
 
 Module mapping (injection index → computation unit):
   0: HDCEncoder (perception)
@@ -54,19 +54,27 @@ if TYPE_CHECKING:
     from ..config import DimensionProfile
 
 _TIMING_WINDOW = 50
+_TIMING_LAYER_KEYS = (
+    "perception",
+    "gate",
+    "void_scar",
+    "sheaf",
+    "hgt",
+    "boundary",
+    "expression",
+)
 
 
 class ResonanceSpine:
-    """Drop-in replacement for ComputationSpine using resonance field dynamics.
+    """Serving computation spine using deterministic resonance dynamics.
 
     Same external interface: process(), feedback(), express(), to_dict(), from_dict().
     Internal mechanism: each real module computes its output, injects into the
     resonance field, field iterates until convergence, expression emerges from
     the converged state rather than being computed sequentially.
 
-    The key difference from ComputationSpine: modules don't feed forward into
-    each other — they all feed into the shared resonance field and influence
-    each other through simplicial coupling dynamics.
+    Modules contribute to a shared deterministic fusion field instead of a
+    sequential feed-forward chain.
     """
 
     __slots__ = (
@@ -82,6 +90,7 @@ class ResonanceSpine:
         "_route_counts",
         "_feedback_counts",
         "_timings",
+        "_layer_timings",
         "_expression_drive",
         "_expression_threshold",
         "_should_express",
@@ -99,7 +108,7 @@ class ResonanceSpine:
         "_last_surprise",
         # Expression policy (contextual bandit)
         "_expression_policy",
-        # Embodiment drift system (ported from ComputationSpine)
+        # Embodiment drift system
         "_drift_min_interval",
         "_embodiment_traits",
         "_signal_extractor",
@@ -136,7 +145,7 @@ class ResonanceSpine:
         self._field = create_deterministic_fusion(n_modules=7, tier=self._tier)
         self._emergence = EmergenceTracker(window=50)
 
-        # Real computation modules (same as ComputationSpine)
+        # Serving computation modules
         from .hdc import HDCEncoder
 
         self._encoder = HDCEncoder(dim=profile.hdc_dim)
@@ -182,6 +191,9 @@ class ResonanceSpine:
             "rejected": 0,
         }
         self._timings: deque[int] = deque(maxlen=_TIMING_WINDOW)
+        self._layer_timings: dict[str, deque[int]] = {
+            layer: deque(maxlen=_TIMING_WINDOW) for layer in _TIMING_LAYER_KEYS
+        }
         self._expression_drive = 0.0
         self._expression_threshold = 0.6
         self._should_express = False
@@ -198,7 +210,7 @@ class ResonanceSpine:
             personality_openness=0.5,
         )
 
-        # Embodiment personality drift system (ported from ComputationSpine)
+        # Embodiment personality drift system
         self._signal_extractor = DriftSignalExtractor()
         self._embodiment_traits: dict[str, TraitMemory] = {
             name: TraitMemory(0.5) for name in EMBODIMENT_TRAITS
@@ -254,7 +266,7 @@ class ResonanceSpine:
         # Openness → weaker residual decay (more receptive to new input)
         self._field._residual_decay = 0.6 + (1.0 - openness) * 0.2
 
-        # === Module-level personality (same as ComputationSpine) ===
+        # === Module-level personality ===
         self._expression.threshold = 0.9 - extraversion * 0.6
         self._engine.scar_state.wound_threshold = 0.3 + extraversion * 0.6
         # PEL-Core: derive the latent attractor prior pi / W_gen / precisions from
@@ -399,19 +411,26 @@ class ResonanceSpine:
         self._last_process_time = timestamp
 
         # === Module 0: HDC Perception ===
+        layer_started = time.perf_counter_ns()
         h = self._encoder.encode_text(text)
         self._last_hdc_vec = h
         hdc_signal = self._hdc_to_field_signal(h)
         self._field.inject(0, hdc_signal)
+        self._layer_timings["perception"].append(
+            time.perf_counter_ns() - layer_started
+        )
 
         # === Module 1: Predictive Coding Gate ===
+        layer_started = time.perf_counter_ns()
         surprise = self._gate.surprise(h)
         self._gate.update(h, surprise)
         self._last_surprise = surprise
         gate_signal = [surprise * 0.5] * self._field.state_dim
         self._field.inject(1, gate_signal)
+        self._layer_timings["gate"].append(time.perf_counter_ns() - layer_started)
 
         # === Module 2: VoidScar Engine ===
+        layer_started = time.perf_counter_ns()
         ssm_input = self._hdc_to_ssm_input(h, surprise)
         engine_result = self._engine.process(
             event_vec=bytes(h),
@@ -452,16 +471,22 @@ class ResonanceSpine:
         # Pad to state_dim
         void_signal += [0.0] * (self._field.state_dim - len(void_signal))
         self._field.inject(2, void_signal[: self._field.state_dim])
+        self._layer_timings["void_scar"].append(
+            time.perf_counter_ns() - layer_started
+        )
 
         # === Module 3: Relational Sheaf ===
+        layer_started = time.perf_counter_ns()
         sheaf_result = self._sheaf.tick(0, ssm_input, timestamp=timestamp)
         sheaf_energy = float(
             sheaf_result.get("energy", 0.0) if isinstance(sheaf_result, dict) else 0.0
         )
         sheaf_signal = [sheaf_energy * 0.3] * self._field.state_dim
         self._field.inject(3, sheaf_signal)
+        self._layer_timings["sheaf"].append(time.perf_counter_ns() - layer_started)
 
         # === Module 4: HGT Decision ===
+        layer_started = time.perf_counter_ns()
         hgt_tokens = self._hgt.build_tokens_from_spine(
             scar_state=self._engine.scar_state,
             void_space=self._engine.void_space,
@@ -474,8 +499,10 @@ class ResonanceSpine:
         hgt_decision = self._hgt.forward(hgt_tokens, self._personality)
         hgt_signal = list(hgt_decision) + [0.0] * (self._field.state_dim - len(hgt_decision))
         self._field.inject(4, hgt_signal[: self._field.state_dim])
+        self._layer_timings["hgt"].append(time.perf_counter_ns() - layer_started)
 
         # === Module 5: Autopoietic Boundary ===
+        layer_started = time.perf_counter_ns()
         force = self._emotion_to_boundary_force(emotion)
         boundary_result = self._boundary.perturb(force)
         self._boundary.self_repair()
@@ -484,8 +511,12 @@ class ResonanceSpine:
         if boundary_result.get("phase_transition"):
             boundary_signal[0] += 0.5
         self._field.inject(5, boundary_signal)
+        self._layer_timings["boundary"].append(
+            time.perf_counter_ns() - layer_started
+        )
 
         # === Module 6: Expression (pre-resonance drive) ===
+        layer_started = time.perf_counter_ns()
         drive = self._engine.expression_drive()
         drive = max(0.0, min(1.0, drive + hgt_decision[0] * 0.3))
         expr_signal = [drive * 0.5] * self._field.state_dim
@@ -506,8 +537,9 @@ class ResonanceSpine:
         # === Extract expression decision from converged field ===
         self._update_expression(resonance_meta, emergence, dt, hgt_decision)
 
-        elapsed = time.perf_counter_ns() - t0
-        self._timings.append(elapsed)
+        finished = time.perf_counter_ns()
+        self._layer_timings["expression"].append(finished - layer_started)
+        self._timings.append(finished - t0)
 
         result = self._build_result(text, timestamp, self._should_express, hgt_decision)
         if dialogue_quality is not None:
@@ -856,11 +888,11 @@ class ResonanceSpine:
         """
         if outcome in self._feedback_counts:
             self._feedback_counts[outcome] += 1
-        # Inject feedback into embodiment drift (parity with ComputationSpine.feedback).
+        # Inject feedback into embodiment drift.
         # 'ignored' is the real "expression got no response" signal (feedback_ignored ->
         # expression_drive_trait -0.2). ResonanceSpine previously omitted this, so being
         # persistently ignored could never drift expression drive on the resonance
-        # channel (SDK backlog gap-1). Mirrors ComputationSpine exactly (no dt = full step).
+        # channel (SDK backlog gap-1; no dt means a full step).
         signal_key = f"feedback_{outcome}"
         if signal_key in ("feedback_accepted", "feedback_ignored", "feedback_rejected"):
             compute_embodiment_drift(
@@ -1111,8 +1143,67 @@ class ResonanceSpine:
         """Public accessor for the expression module (used by prompt_surface)."""
         return self._expression
 
+    @property
+    def encoder(self) -> Any:
+        """Public accessor for the shared HDC encoder."""
+        return self._encoder
+
+    @property
+    def gate(self) -> PredictiveCodingGate:
+        """Public accessor for predictive-coding telemetry."""
+        return self._gate
+
+    @property
+    def sheaf(self) -> ScarSheaf:
+        """Public accessor for relational-sheaf telemetry."""
+        return self._sheaf
+
+    @property
+    def hgt(self) -> HeterogeneousGraphTransformer:
+        """Public accessor for HGT diagnostics."""
+        return self._hgt
+
+    @property
+    def boundary(self) -> AutopoieticBoundary:
+        """Public accessor for embodiment-boundary telemetry."""
+        return self._boundary
+
+    @property
+    def latest_timing_ns(self) -> int:
+        """Most recent end-to-end computation duration."""
+        return int(self._timings[-1]) if self._timings else 0
+
+    def timing_stats(self) -> dict[str, dict[str, float]]:
+        """Return rolling per-layer timing statistics in nanoseconds."""
+        stats: dict[str, dict[str, float]] = {}
+        for layer, samples in self._layer_timings.items():
+            if not samples:
+                stats[layer] = {
+                    "mean_ns": 0.0,
+                    "p50_ns": 0.0,
+                    "p95_ns": 0.0,
+                    "p99_ns": 0.0,
+                    "count": 0,
+                }
+                continue
+            ordered = sorted(samples)
+            count = len(ordered)
+
+            def percentile(fraction: float) -> float:
+                index = max(0, min(count - 1, math.ceil(count * fraction) - 1))
+                return float(ordered[index])
+
+            stats[layer] = {
+                "mean_ns": float(sum(ordered) / count),
+                "p50_ns": percentile(0.50),
+                "p95_ns": percentile(0.95),
+                "p99_ns": percentile(0.99),
+                "count": count,
+            }
+        return stats
+
     # ------------------------------------------------------------------
-    # Methods ported from ComputationSpine for full compatibility
+    # Public embodiment controls
     # ------------------------------------------------------------------
 
     def embodiment_bounds(self) -> dict[str, float] | None:

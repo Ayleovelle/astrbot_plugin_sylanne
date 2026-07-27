@@ -5,18 +5,18 @@
   on_llm_request（main.py 钩子）
     └→ apply_v2core_request：PERCEPT（只读）
          ├→ 心象片段 → request.system_prompt（她的认知影响她说什么——主动脉）
-         ├→ 评价 assessment 暂存 → legacy 请求管线在 host.on_request(assessment=…)
+         ├→ 评价 assessment 暂存 → 请求管线在 host.on_request(assessment=…)
          │   合并入体（consume_pending_assessment；SDK 唯一 assessment 入口，零额外 tick）
          └→ ctx 暂存，response 阶段续用
 
   on_llm_response（main.py 钩子）
     └→ apply_v2core_response：DELIBERATE+EVOLVE（持会话锁）
          ├→ SILENT：清空 completion_text + D8 强制日志 + 本层补 response tick → True
-         │   （跳过 legacy——它的 no-ghost 兜底会把刻意装死复活成兜底文案）
-         └→ SPEAK/FALLBACK：写回文本 → False【故意回落】——legacy 分发机条带着
-             sanitize（[sylanne_*] 注入防御）、realtime 分段打字节奏、观测/记忆缓冲
-             一起跑。v2core 是心智层，分发是 legacy 的嘴；接管心智不没收嘴。
-             response tick 归属：realtime 拦截开启时 legacy 的 observe_response 打
+         │   （抑制物理投递，防 no-ghost 兜底把刻意装死复活成文案）
+         └→ SPEAK/FALLBACK：写回文本 → False，进入 delivery continuation：
+             LLMResponsePipeline 继续 sanitize（[sylanne_*] 注入防御）、realtime 分段
+             打字节奏、观测/记忆缓冲。v2core 决定说什么，投递管线负责只发送一次。
+             response tick 归属：realtime 拦截开启时投递管线的 observe_response 打
              （不重复）；未开启时本层打。全局每轮恰好一拍。
 
   proactive（外部主动桥轮询 get_speech_decision）
@@ -31,10 +31,9 @@
 死线守护（铁律④）：域状态总键 sylanne_v2core_domains:{safe} 与旧档格式兼容；
 host/body 漂移仍走插件现有文件持久化，不另起炉灶。
 
-开关：sylanne_enable_v2core（**默认开——v2core 是唯一认知内核**）。v2core 即唯一认知
-内核（旧 SelfCore PRE/POST/RESPONSE_POST 与 AssessorAgent 逐轮 LLM 评估已退役、删除，
-intent=="撒娇" 硬编码路径自然断粮）。flag 置 false = 部署级紧急回退到 v1。
-任何异常 → 单轮回落旧管线，不阻断回复。
+v2core 是无条件运行的唯一逐轮认知内核；旧响应式 Agent 编排与逐轮 LLM 评价
+已退役、删除，intent=="撒娇" 硬编码路径自然断粮。
+任何异常 → 单轮继续下游投递管线，不阻断回复。
 """
 
 from __future__ import annotations
@@ -49,7 +48,6 @@ from typing import Any
 
 logger = logging.getLogger("astrbot_plugin_sylanne")
 
-_V2CORE_FLAG = "sylanne_enable_v2core"
 _DOMAIN_STATE_KEY_FMT = "sylanne_v2core_domains:{safe}"
 _DOMAIN_STATE_VERSION = 1
 _PENDING_CTX_TTL = 180.0      # request 阶段暂存 ctx 的有效期（秒）
@@ -68,15 +66,6 @@ _NIGHT_WAKE_CUE_PROB = 0.25   # T1-03③ 命中"首条夜间消息"时，附加"
 _PENDING_SAVES: set[Any] = set()
 
 
-def v2core_enabled(plugin: Any) -> bool:
-    """v2core 是否启用。默认【开】——v2core 是唯一认知内核（v1 已退役）。
-
-    flag 仅作部署级紧急回退口：显式置 false 才回到 v1 旧管线认知。
-    """
-    cfg = getattr(plugin, "_config", None) or getattr(plugin, "config", None) or {}
-    return bool(cfg.get(_V2CORE_FLAG, True))
-
-
 def _safe_session_key(session_key: str) -> str:
     return str(session_key).replace("/", "_").replace("\\", "_")
 
@@ -88,7 +77,7 @@ def _kv(plugin: Any) -> Any:
 
 
 def _session_lock(plugin: Any, session_key: str) -> Any:
-    """取会话锁（与 legacy 请求观测/自驱心跳同一把——S5 串行义务的落点）。
+    """取会话锁（与请求观测/自驱心跳同一把——S5 串行义务的落点）。
 
     插件桩没有锁工厂时退化为 null context（测试环境单线程）。
     """
@@ -300,7 +289,7 @@ def _runtime_for(plugin: Any, session_key: str) -> dict[str, Any]:
         "domains": domains,
         "body_port": bp,
         "pending": None,              # request 阶段暂存的 ctx
-        "pending_assessment": None,   # 待 legacy 请求 tick 合并的评价
+        "pending_assessment": None,   # 待请求 tick 合并的评价
         "pending_quality": None,      # 待下轮 request tick 注入的对话质量分(float, 滞后反馈)
         "loaded": False,
     }
@@ -315,7 +304,7 @@ async def _ensure_loaded(plugin: Any, session_key: str, rt: dict[str, Any]) -> N
 
 
 def _is_cron_event(event: Any) -> bool:
-    """定时任务（cron）的 LLM 回复是内部总结：v2core 不处理（与 legacy 同判据）——
+    """定时任务（cron）的 LLM 回复是内部总结：v2core 不处理（与请求管线同判据）——
     否则内部总结文本会污染用户模型/蒸馏的学习流。"""
     pm = getattr(event, "platform_meta", None)
     if pm is not None and str(getattr(pm, "name", "") or "") == "cron":
@@ -332,7 +321,7 @@ _MIN_HISTORY_TURNS_FOR_ANCHOR = 2
 def _history_present(request: Any) -> bool:
     """req.contexts 是否有 ≥阈值 条带非空文本的真实 user/assistant 轮（leg-2a）。
 
-    PERCEPT 跑在 Step 0（早于 legacy 清洗），看到的是原始 contexts——泄漏注入会让计数
+    PERCEPT 跑在 Step 0（早于请求管线清洗），看到的是原始 contexts——泄漏注入会让计数
     略偏高，即偏向"历史在场"、少压制，是安全方向（只在明显薄历史时才压幽灵）。
     """
     contexts = getattr(request, "contexts", None)
@@ -411,14 +400,14 @@ async def _percept_recall(
 def peek_percept_recalled_texts(plugin: Any, session_key: str) -> set[str]:
     """只读窥视本轮 PERCEPT 已召回的记忆原文集合（不新建/不触发 v2core 运行态）。
 
-    供 legacy [记忆参考] 格式化前做同轮跨路径去重：v2core_on 时 PERCEPT
-    （_percept_recall，本模块）与 legacy（llm_request_pipeline._prepare_memory_context）
+    供请求管线 [记忆参考] 格式化前做同轮跨路径去重：PERCEPT
+    （_percept_recall，本模块）与 llm_request_pipeline._prepare_memory_context
     两条召回路径在同一轮都会跑，同一条记忆可能被两边都命中，重复注入进同一个 prompt。
 
     只 peek 已存在的 `plugin._v2core_runtimes` 缓存条目——绝不调用 `_runtime_for`
-    新建（v2core 未开启/本轮 PERCEPT 未跑时缓存不存在，返回空集，legacy 行为不变）。
+    新建（本轮 PERCEPT 未跑时缓存不存在，返回空集，请求管线行为不变）。
     任何环节异常一律返回空集（fail-open：宁可不去重，也不能因为这个旁路影响
-    legacy 记忆注入这条主路径）。
+    请求管线的记忆注入主路径）。
     """
     try:
         cache = getattr(plugin, "_v2core_runtimes", None)
@@ -683,7 +672,7 @@ def _user_text(plugin: Any, event: Any) -> str:
 
 async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
     """LLM 请求前的认知阶段。只读（不 tick 不写域），任何异常吞掉不阻断请求。"""
-    if not v2core_enabled(plugin) or request is None or _is_cron_event(event):
+    if request is None or _is_cron_event(event):
         return
     try:
         session_key = plugin._session_key(event)
@@ -698,8 +687,8 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
             evo_delta=_evo_provider(plugin, session_key),
         )
         _apply_v2core_feature_flags(ctx, plugin)
-        # leg-2a：历史缺失/病态轮压制 PERCEPT 侧零相关近期召回（幽灵）——与 legacy 侧同门，
-        # 覆盖 v2core_on（业主实盘配置）这条主注入路径。
+        # leg-2a：历史缺失/病态轮压制 PERCEPT 侧零相关近期召回（幽灵）——与请求管线同门，
+        # 覆盖无条件运行的 v2core 主注入路径。
         await _percept_recall(
             plugin, ctx, rt["domains"], text,
             history_present=_history_present(request),
@@ -795,7 +784,7 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
             if _bsel:
                 ctx.scratch["behavior_directive"] = _bsel["directive"]
                 # T3-01：本轮点燃行为的派发力学调制，塞 scratch 供 apply_v2core_response
-                # 读出后经 rt 转手给 legacy 派发路径（llm_response_pipeline 没有 ctx）。
+                # 读出后经 rt 转手给投递路径（llm_response_pipeline 没有 ctx）。
                 ctx.scratch["behavior_modulators"] = _bsel.get("modulators") or {}
                 rt["last_behavior"] = {"id": _bsel["id"], "activation": _bsel["activation"],
                                        "ts": _now}   # 可观测留痕（WebUI 认知核页）
@@ -867,16 +856,14 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
         except Exception as _esx:  # noqa: BLE001 - emotion_spirit 消费失败绝不阻断请求
             logger.debug("Sylanne emotion_spirit consume skipped: %s", _esx)
     except Exception as exc:  # noqa: BLE001
-        logger.error("Sylanne v2core request stage failed（继续旧管线）: %s", exc, exc_info=True)
+        logger.error("Sylanne v2core request stage failed（继续请求管线）: %s", exc, exc_info=True)
 
 
 def consume_pending_assessment(plugin: Any, session_key: str) -> dict[str, Any] | None:
-    """legacy 请求管线在 host.on_request 前调用：取走本轮 v2core 评价（合并进 assessment）。
+    """请求管线在 host.on_request 前调用：取走本轮 v2core 评价（合并进 assessment）。
 
-    一次性语义（取走即清），同步零 IO。开关关/无暂存 → None（legacy 行为不变）。
+    一次性语义（取走即清），同步零 IO。无暂存 → None（请求管线行为不变）。
     """
-    if not v2core_enabled(plugin):
-        return None
     cache = getattr(plugin, "_v2core_runtimes", None)
     rt = cache.get(session_key) if isinstance(cache, dict) else None
     if not isinstance(rt, dict):
@@ -887,9 +874,9 @@ def consume_pending_assessment(plugin: Any, session_key: str) -> dict[str, Any] 
 
 
 def consume_pending_quality(plugin: Any, session_key: str) -> float | None:
-    """legacy 请求管线在构造 request tick event 前调用：取走上一轮自评的对话质量分。
+    """请求管线在构造 request tick event 前调用：取走上一轮自评的对话质量分。
 
-    一次性语义（取走即清），同步零 IO。开关关/无暂存/陈旧 → None。注入进 event.values
+    一次性语义（取走即清），同步零 IO。无暂存/陈旧 → None。注入进 event.values
     ["dialogue_quality"] → kernel.tick 透传 process → _drift_embodiment 自动漂移
     （canonical 滞后反馈：第 N 轮评分第 N+1 轮 request 拍生效）。
 
@@ -898,8 +885,6 @@ def consume_pending_quality(plugin: Any, session_key: str) -> float | None:
     新话题），陈旧分丢弃返 None——否则陈旧高质量分注入不相关新话题，且 _drift_embodiment 的
     dt 巨大会放大这次错漂移。裸 float（旧格式/测试直塞）向后兼容，视为不过期。
     """
-    if not v2core_enabled(plugin):
-        return None
     cache = getattr(plugin, "_v2core_runtimes", None)
     rt = cache.get(session_key) if isinstance(cache, dict) else None
     if not isinstance(rt, dict):
@@ -967,14 +952,12 @@ def _compose_dispatch_modulators(ctx: Any) -> dict[str, float]:
 
 
 def consume_dispatch_modulators(plugin: Any, session_key: str) -> dict[str, float] | None:
-    """legacy 派发管线（llm_response_pipeline，没有 ctx）取走本轮 T3-01 派发调制器。
+    """投递管线（llm_response_pipeline，没有 ctx）取走本轮 T3-01 派发调制器。
 
-    一次性语义（取走即清，同 consume_pending_quality）。开关关/无暂存/陈旧
+    一次性语义（取走即清，同 consume_pending_quality）。无暂存/陈旧
     （> _DISPATCH_MOD_TTL，防跨轮串味——rt 是跨轮持久字典）→ None，调用方按中性
     默认（1.0/1.0/0.0）处理，零力学变化。
     """
-    if not v2core_enabled(plugin):
-        return None
     cache = getattr(plugin, "_v2core_runtimes", None)
     rt = cache.get(session_key) if isinstance(cache, dict) else None
     if not isinstance(rt, dict):
@@ -1000,15 +983,35 @@ def consume_dispatch_modulators(plugin: Any, session_key: str) -> dict[str, floa
 # 阶段二：response 钩子（DELIBERATE+EVOLVE，持锁）
 # ===========================================================================
 
-async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
-    """LLM 回复后的裁决阶段。
+def _v3_settle_v2core_reply(plugin: Any, session_key: str, kind: Any, reply_kind_enum: Any) -> None:
+    """把 v2core 的权威 ReplyKind 决策交给 v3 shadow（默认关时是空操作）。
 
-    返回 True  = 本层已终结本轮（仅 SILENT；跳过 legacy 防 no-ghost 复活装死）。
-    返回 False = 回落 legacy 管线（SPEAK/FALLBACK 故意回落——sanitize/分段/观测
-                 都在那边；以及开关关/异常的绞杀式回退）。
+    只处理终局的两类：SILENT（这轮不说话，不会再有投递证据）与 FALLBACK（兜底文案，
+    v2 投影恒 UNKNOWN）。SPEAK 留给真投递面结算，绝不在此提前认领。facade 内部保证
+    不抛，故这里没有 try——v3 绝不能改 v2 的回复路径。
     """
-    if not v2core_enabled(plugin):
-        return False
+
+    facade = getattr(plugin, "_v3_shadow", None)
+    if facade is None or not session_key:
+        return
+    if kind is reply_kind_enum.SILENT:
+        facade.settle(session_key=session_key, route_kind="SILENT", reply_kind="SILENT")
+    elif kind is reply_kind_enum.FALLBACK:
+        facade.settle(
+            session_key=session_key,
+            route_kind="FALLBACK",
+            reply_kind="FALLBACK",
+            part_count=1,
+        )
+
+
+async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
+    """LLM 回复后的裁决阶段，返回是否抑制后续物理投递。
+
+    返回 True  = 仅 SILENT；本层终结本轮，防 no-ghost 兜底复活装死。
+    返回 False = delivery continuation；SPEAK/FALLBACK 继续进入唯一的
+                 LLMResponsePipeline，完成 sanitize、分段、投递与观测。
+    """
     if response is None or _is_cron_event(event):
         return False
     try:
@@ -1024,14 +1027,14 @@ async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
         rt = _runtime_for(plugin, session_key)
         # T3-01 防陈旧串味：先重置成中性，再往下走。若本轮后续步骤（_ensure_loaded/
         # percept 补跑/decision stage）中途抛异常触发下面的兜底 `except → return False`
-        # 回落 legacy，legacy 会去 consume_dispatch_modulators 取值——这里先清空，保证
+        # 继续投递管线时会 consume_dispatch_modulators——这里先清空，保证
         # 拿到的要么是本轮真算出来的调制器，要么是 None（中性），绝不是上一轮的陈旧值。
         rt["turn_dispatch_modulators"] = None
         await _ensure_loaded(plugin, session_key, rt)
 
-        # legacy realtime 拦截开启 = legacy 的 observe_response 会打 response tick
+        # realtime 投递接管开启时，投递管线的 observe_response 会打 response tick
         cfg = getattr(plugin, "_config", None) or getattr(plugin, "config", None) or {}
-        legacy_observes = bool(
+        delivery_observes_response = bool(
             (cfg.get("sylanne_alpha_realtime_chat_enabled") or cfg.get("enable_realtime_chat"))
             and (cfg.get("sylanne_alpha_realtime_intercept_llm_response")
                  or cfg.get("realtime_chat_intercept_llm_response"))
@@ -1053,7 +1056,7 @@ async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
                 _apply_v2core_feature_flags(ctx, plugin)
                 _apply_winddown_window_scratch(ctx, rt)
 
-            # T3-01：本轮派发调制器（行为力学 + 表达风格力学合成），供 legacy 派发路径
+            # T3-01：本轮派发调制器（行为力学 + 表达风格力学合成），供投递路径
             # 取走。每轮都重写（哪怕是 {}/中性）——覆盖上一轮陈旧值，不留串味风险。
             try:
                 rt["turn_dispatch_modulators"] = {
@@ -1065,10 +1068,10 @@ async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
 
             reply = rt["runner"].run_decision_stage(
                 ctx, draft=draft,
-                # SPEAK/FALLBACK 且 legacy 会观测 → 不打 tick（全局恰好一拍）；
-                # SILENT 轮 legacy 被跳过 → 必须本层打。先裁决再定，由 runner 内部
-                # 无法预知，故这里给"legacy 不观测"时恒打；SILENT 的修正见下。
-                do_response_tick=not legacy_observes,
+                # SPEAK/FALLBACK 且投递管线会观测 → 不打 tick（全局恰好一拍）；
+                # SILENT 轮抑制投递 → 必须本层打。先裁决再定，由 runner 内部
+                # 无法预知，故这里给"投递管线不观测"时恒打；SILENT 的修正见下。
+                do_response_tick=not delivery_observes_response,
             )
 
             # T2-01②③ + T2-03⑤：SILENT 落地前——DeliberateSilence 第二沉默源尝试软化
@@ -1138,8 +1141,9 @@ async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
             # 下一轮续聊间隔(强信号，compute_behavior 自动从 mark_bot_reply 时刻推断)微调可学习
             # 门控偏置。接 agents.SelfCore（plugin._self_core，持进化档案/reflex），非 v2core 运行态。
             #
-            # 出站判据（review wiring-correctness high）：SPEAK，或 FALLBACK 且有上游草稿（legacy
-            # 真发草稿）。绝不在 SILENT、或 FALLBACK-空草稿（legacy empty_completion 静默丢弃、
+            # 出站判据（review wiring-correctness high）：SPEAK，或 FALLBACK 且有上游草稿
+            # （投递管线真发草稿）。绝不在 SILENT、或 FALLBACK-空草稿（投递管线会将
+            # empty_completion 静默丢弃、
             # 没有 bot 回复）上触发——否则 mark_bot_reply 记下幽灵回复，下一轮把用户的新消息误读成
             # "秒回上一条回复"，灌进虚假 +1 续聊奖励。这正是 SILENT 闸的本意，只是闸窄了一格。
             _will_send = (reply.kind is ReplyKind.SPEAK) or (
@@ -1158,35 +1162,46 @@ async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
                 except Exception:  # noqa: BLE001
                     pass  # 学习失败绝不阻断回复
 
-            handled: bool
+            # v3 shadow 响应边界（design 14.2；plan Task 13）：这里是 v2 唯一带真 ReplyKind
+            # 的权威决策面，且已过 DeliberateSilence 软化（reply 可能在上面被改写），故只能在
+            # 这个点读。SILENT → HOLD（这轮到此为止，不会再有投递证据）；FALLBACK → 恒 UNKNOWN。
+            # SPEAK 【故意不结算】：SPEAK 要由真投递（分段全成功）证明，这里继续投递管线，
+            # 让 _dispatch_segmented_parts 那条终端证据来结算。默认关时 settle 是空操作。
+            _v3_settle_v2core_reply(plugin, session_key, reply.kind, ReplyKind)
+
+            suppress_delivery: bool
             if reply.kind is ReplyKind.SILENT:
                 response.completion_text = ""
-                # legacy 被跳过：若上面因 legacy_observes 没打 tick，这轮补打沉默知觉
-                if legacy_observes:
+                # 投递被抑制：若上面因投递管线负责观测而没打 tick，这轮补打沉默知觉
+                if delivery_observes_response:
                     rt["runner"].response_tick(ctx, reply)
                 logger.info(
                     "Sylanne v2core SILENT | session=%s | reason=%s",
                     session_key, str((reply.meta or {}).get("reason", "") or "unspecified"),
                 )
-                handled = True
+                suppress_delivery = True
             elif reply.kind is ReplyKind.SPEAK and reply.parts:
                 response.completion_text = "\n".join(p for p in reply.parts if p.strip())
-                handled = False    # 故意回落：legacy 负责 sanitize/分段/观测
+                suppress_delivery = False
             else:  # FALLBACK
                 if draft is not None:
                     response.completion_text = (
                         "\n".join(p for p in reply.parts if p.strip()) or draft_raw
                     )
-                handled = False    # 上游空草稿：legacy 自己的 no-ghost 兜底接手
+                suppress_delivery = False
 
         logger.info(
-            "Sylanne v2core turn: session=%s kind=%s handled=%s",
-            session_key, reply.kind.value, handled,
+            "Sylanne v2core turn: session=%s kind=%s suppress_delivery=%s",
+            session_key, reply.kind.value, suppress_delivery,
         )
         _schedule_domain_save(plugin, session_key, rt["domains"], rt.get("behavior_last_fired"))
-        return handled
+        return suppress_delivery
     except Exception as exc:  # noqa: BLE001
-        logger.error("Sylanne v2core bridge failed, 回落旧管线: %s", exc, exc_info=True)
+        logger.error(
+            "Sylanne v2core decision failed; continuing delivery pipeline: %s",
+            exc,
+            exc_info=True,
+        )
         return False
 
 
@@ -1215,11 +1230,9 @@ async def consult_idle_reach(plugin: Any, session_key: str) -> dict[str, Any]:
     """空闲轮咨询：reach 想不想赢？零写、零 tick、零 LLM——纯读决策。
 
     消费者：ProactiveScheduler.get_speech_decision（外部主动桥轮询它）。
-    返回 {"reach": bool, "g_reach": float, "action": str}；未启用/异常 → reach=False。
+    返回 {"reach": bool, "g_reach": float, "action": str}；异常 → reach=False。
     """
     out = {"reach": False, "g_reach": 0.0, "action": "hold"}
-    if not v2core_enabled(plugin):
-        return out
     try:
         rt = _runtime_for(plugin, session_key)
         await _ensure_loaded(plugin, session_key, rt)
@@ -1263,7 +1276,6 @@ async def consult_idle_reach(plugin: Any, session_key: str) -> dict[str, Any]:
 
 
 __all__ = [
-    "v2core_enabled",
     "apply_v2core_request",
     "apply_v2core_response",
     "consume_pending_assessment",

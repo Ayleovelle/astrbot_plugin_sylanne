@@ -7,7 +7,7 @@ withDefaults(defineProps<{ items: StatItem[]; cols?: number }>(), { cols: 2 })
 </script>
 
 <template>
-  <div class="stat-grid" :style="{ gridTemplateColumns: `repeat(${cols}, 1fr)` }">
+  <div class="stat-grid" :style="{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }">
     <div v-for="(it, i) in items" :key="i" class="stat-box">
       <div class="stat-val mono">{{ it.value }}</div>
       <div class="stat-lbl">{{ it.label }}</div>
@@ -21,6 +21,7 @@ withDefaults(defineProps<{ items: StatItem[]; cols?: number }>(), { cols: 2 })
   gap: var(--space-3);
 }
 .stat-box {
+  min-width: 0;
   text-align: center;
   padding: var(--space-5);
   background: var(--stat-bg);
@@ -38,5 +39,6 @@ withDefaults(defineProps<{ items: StatItem[]; cols?: number }>(), { cols: 2 })
   color: var(--text-muted);
   margin-top: var(--space-1);
   letter-spacing: 0.5px;
+  overflow-wrap: anywhere;
 }
 </style>

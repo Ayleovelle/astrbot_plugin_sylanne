@@ -1,5 +1,5 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
-import { getToken } from '../api/client'
+import { getToken, usesHostAuthentication } from '../api/client'
 import DashboardLayout from '../components/shell/DashboardLayout.vue'
 import LoginView from '../views/LoginView.vue'
 import MonitorView from '../views/MonitorView.vue'
@@ -38,6 +38,10 @@ const router = createRouter({
 })
 
 router.beforeEach((to) => {
+  if (usesHostAuthentication()) {
+    if (to.name === 'login') return { name: 'monitor' }
+    return true
+  }
   if (to.meta.public) return true
   if (!getToken()) return { name: 'login', query: { redirect: to.fullPath } }
   return true

@@ -75,7 +75,7 @@ class VoidScarEngine:
       - Φ 耦合（伤痕→虚空）：伤痕麻木的维度降低虚空检测阈值（更容易感知缺席）
 
     与其他组件的关系：
-      - 被 ComputationSpine.process() 在 L3 层调用
+      - 被 ResonanceSpine.process() 的情感核心阶段调用
       - 接收 L1 HDC 编码和 L2 惊讶度
       - 输出 8 维情感观测给 L5 HGT 和 L7 表达层
       - expression_drive() 输出给 L7 PhaseTransitionExpression

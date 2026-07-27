@@ -53,18 +53,16 @@ class AlphaRuntime:
         self._pel_enabled = pel_enabled
         self._save_count: int = 0
 
-    def load(self, session_key: str, legacy: dict[str, Any] | None = None) -> AlphaKernel:
+    def load(self, session_key: str) -> AlphaKernel:
         """加载指定 session 的 kernel 状态。
 
         加载逻辑：
-        1. 文件存在且 JSON 合法 → 检查 schema_version 决定 restore 或 boot(legacy)
+        1. 文件存在且 JSON 合法 → 当前 schema restore；其他 schema 只告警并全新 boot
         2. 文件存在但 JSON 损坏 → 重命名为 .damaged 后全新 boot
         3. 文件不存在 → 全新 boot
 
         Args:
             session_key: 会话标识。
-            legacy: 旧版数据，用于 schema 迁移时的兼容启动。
-
         Returns:
             恢复或新建的 AlphaKernel 实例。
         """
@@ -77,25 +75,30 @@ class AlphaRuntime:
                 path.replace(path.with_suffix(path.suffix + ".damaged"))
                 recovered = AlphaKernel.boot(
                     session_key=session_key,
-                    legacy=legacy,
                     profile=self._profile,
                     pel_enabled=self._pel_enabled,
                 )
                 self.save(recovered)
                 return recovered
-            if data.get("schema_version") == SCHEMA_VERSION:
+            if isinstance(data, dict) and data.get("schema_version") == SCHEMA_VERSION:
                 return AlphaKernel.restore(
                     data, profile=self._profile, pel_enabled=self._pel_enabled
                 )
+            schema = data.get("schema_version") if isinstance(data, dict) else type(data).__name__
+            logger.warning(
+                "Unsupported snapshot schema for session %s: %r; starting fresh without "
+                "modifying %s",
+                session_key,
+                schema,
+                path,
+            )
             return AlphaKernel.boot(
                 session_key=session_key,
-                legacy=data,
                 profile=self._profile,
                 pel_enabled=self._pel_enabled,
             )
         return AlphaKernel.boot(
             session_key=session_key,
-            legacy=legacy,
             profile=self._profile,
             pel_enabled=self._pel_enabled,
         )

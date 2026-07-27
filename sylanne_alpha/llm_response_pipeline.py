@@ -5,7 +5,7 @@
   2. 实现分段回复：将长回复拆分为多条消息，模拟人类打字节奏
   3. 流式首句快速发送：在流式输出中检测到第一句完成时立即发送
   4. 后台触发记忆写入和状态更新
-  5. Claude/哈基德兼容性处理：规范化请求格式、裁剪工具列表
+  5. 控制请求载荷大小并生成状态注入预算
 
 与其他组件的关系：
   - 与 llm_request_pipeline 配对：request 注入上下文，response 处理输出
@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
 import json
 import random
 import re
@@ -26,14 +28,29 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
-
+from sylanne_alpha.delivery_ledger import SegmentedDeliveryTurn
+from sylanne_alpha.llm_request_pipeline import (
+    _PROACTIVE_TEMPLATE_PLACEHOLDER,
+    _PROACTIVE_TEMPLATE_SIGNATURE,
+    _ctx_leading_text,
+    _ctx_role,
+    sanitize_tool_call_pairing,
+)
 from sylanne_alpha.utils import ensure_background_tasks_list, safe_ensure_future
 from sylanne_alpha.message_dispatch import (
     normalize_completion_text,
+    realtime_flags,
     realtime_plan,
     strip_draft_blocks,
 )
 from sylanne_alpha.proactive_bridge import is_night_fast_reply_exempt
+from sylanne_alpha.semantic_segmentation import (
+    SEMANTIC_BEAT_NONCE_EXTRA,
+    SemanticBeatPart,
+    parse_semantic_completion,
+    scrub_semantic_marker_candidates,
+    semantic_parts_from_visible_line_breaks,
+)
 from sylanne_alpha.variant_pool import (
     EMPTY_REPLY_FALLBACK_VARIANTS,
     LAST_RESORT_FALLBACK_TEXT,
@@ -50,6 +67,22 @@ except ImportError:
     import logging as _logging
 
     logger = _logging.getLogger("astrbot_plugin_sylanne")  # type: ignore
+
+try:
+    from astrbot.api.message_components import Plain as _RealtimePlainComponent  # type: ignore
+except ImportError:
+    _RealtimePlainComponent = None  # type: ignore
+
+
+def _is_non_plain_component(seg: Any) -> bool:
+    """M1 安全判定：判 seg 是否为【非 Plain】消息组件（Image/Record 等）。
+
+    astrbot 未安装（测试环境等）时 _RealtimePlainComponent 拿不到——保守返回
+    False（不触发放弃接管这条分支），不影响既有单测行为。
+    """
+    if _RealtimePlainComponent is None:
+        return False
+    return not isinstance(seg, _RealtimePlainComponent)
 
 # 中国时区常量
 _CHINA_TZ = timezone(timedelta(hours=8))
@@ -131,6 +164,9 @@ class LLMResponsePipeline:
     # ------------------------------------------------------------------
     # 匹配 LLM 伪造的 [sylanne_xxx] 系统标签
     _RE_SYLANNE_TAG = re.compile(r"\[sylanne_[^\]]*\]")
+    _SEMANTIC_CORRELATION_EXTRA = "_syl_semantic_beat_correlation"
+    _PROVIDER_HISTORY_TXN_EXTRA = "_syl_provider_history_txn"
+    _DELIVERY_TURN_EXTRA = "_syl_segmented_delivery_turn"
 
     def _sanitize_response(self, text: str) -> str:
         """过滤 LLM 返回中伪造的 [sylanne_*] 系统标签。
@@ -144,6 +180,682 @@ class LLMResponsePipeline:
                 len(self._RE_SYLANNE_TAG.findall(text)),
             )
         return cleaned
+
+    @staticmethod
+    def _text_digest(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _event_extra(event: Any, key: str, default: Any = None) -> Any:
+        getter = getattr(event, "get_extra", None)
+        if not callable(getter):
+            return default
+        try:
+            return getter(key, default)
+        except TypeError:
+            try:
+                value = getter(key)
+            except Exception:
+                return default
+            return default if value is None else value
+        except Exception:
+            return default
+
+    @staticmethod
+    def _request_has_current_message(request: Any) -> bool:
+        """Mirror AstrBot runner.reset()'s current-message append predicate."""
+
+        return bool(
+            getattr(request, "prompt", None) is not None
+            or getattr(request, "image_urls", None)
+            or getattr(request, "audio_urls", None)
+            or getattr(request, "extra_user_content_parts", None)
+        )
+
+    @staticmethod
+    def _message_content(message: Any) -> Any:
+        if isinstance(message, dict):
+            return message.get("content")
+        return getattr(message, "content", None)
+
+    @staticmethod
+    def _proactive_placeholder_copy(message: Any) -> Any:
+        clone = copy.deepcopy(message)
+        original_content = LLMResponsePipeline._message_content(message)
+        placeholder: Any = _PROACTIVE_TEMPLATE_PLACEHOLDER
+        if isinstance(original_content, list) and isinstance(clone, dict):
+            placeholder = [{"type": "text", "text": _PROACTIVE_TEMPLATE_PLACEHOLDER}]
+        if isinstance(clone, dict):
+            clone["content"] = placeholder
+        else:
+            setattr(clone, "content", placeholder)
+        return clone
+
+    def on_agent_begin(self, event: Any, run_context: Any) -> bool:
+        """Build a reversible provider-only history view before context processing.
+
+        AstrBot persists ``run_context.messages`` after the agent finishes. Request-time
+        edits to ``request.contexts`` therefore write through to the database. This hook
+        runs after ``runner.reset()`` has built Message objects, so the provider can see a
+        cleaned projection while the original objects remain available for restoration.
+        """
+
+        messages = getattr(run_context, "messages", None)
+        request = self._event_extra(event, "provider_request", None)
+        setter = getattr(event, "set_extra", None)
+        if (
+            not isinstance(messages, list)
+            or not messages
+            or request is None
+            or not callable(setter)
+            or isinstance(
+                self._event_extra(event, self._PROVIDER_HISTORY_TXN_EXTRA, None),
+                dict,
+            )
+        ):
+            return False
+
+        original_messages = tuple(messages)
+        history_end = len(messages) - int(self._request_has_current_message(request))
+        history_end = max(0, history_end)
+        history = list(messages[:history_end])
+        current_tail = list(messages[history_end:])
+
+        projected_history: list[Any] = []
+        replacements: list[tuple[Any, Any]] = []
+        inner_hidden = 0
+        proactive_replaced = 0
+        for message in history:
+            role = _ctx_role(message)
+            leading_text = _ctx_leading_text(self._message_content(message))
+            if role == "assistant" and "[inner_context]" in leading_text:
+                inner_hidden += 1
+                continue
+            if role == "user" and leading_text.startswith(
+                _PROACTIVE_TEMPLATE_SIGNATURE
+            ):
+                try:
+                    replacement = self._proactive_placeholder_copy(message)
+                except Exception:
+                    projected_history.append(message)
+                    continue
+                projected_history.append(replacement)
+                replacements.append((replacement, message))
+                proactive_replaced += 1
+                continue
+            projected_history.append(message)
+
+        sanitized = sanitize_tool_call_pairing(projected_history)
+        if not isinstance(sanitized, list):
+            sanitized = projected_history
+        orphan_hidden = len(projected_history) - len(sanitized)
+        if not (inner_hidden or proactive_replaced or orphan_hidden):
+            return False
+
+        replacement_origins = {id(replacement): original for replacement, original in replacements}
+        projected_messages = [*sanitized, *current_tail]
+        visible_originals = tuple(
+            replacement_origins.get(id(message), message)
+            for message in projected_messages
+        )
+        txn = {
+            "request": request,
+            "original_messages": original_messages,
+            "visible_originals": visible_originals,
+            "replacements": tuple(replacements),
+        }
+
+        try:
+            setter(self._PROVIDER_HISTORY_TXN_EXTRA, txn)
+            messages[:] = projected_messages
+            conversation = getattr(request, "conversation", None)
+            if conversation is not None:
+                # AstrBot treats a positive value as authoritative even though the
+                # provider view now contains different bytes. Re-estimate this turn.
+                conversation.token_usage = 0
+        except Exception:
+            messages[:] = list(original_messages)
+            try:
+                setter(self._PROVIDER_HISTORY_TXN_EXTRA, None)
+            except Exception:
+                pass
+            logger.warning("Sylanne provider history projection failed", exc_info=True)
+            return False
+
+        logger.info(
+            "Sylanne provider history projection: proactive=%d inner=%d orphan=%d",
+            proactive_replaced,
+            inner_hidden,
+            orphan_hidden,
+        )
+        return True
+
+    def _restore_provider_history(self, event: Any, run_context: Any) -> bool:
+        """Restore only projection changes that survived AstrBot context processing."""
+
+        txn = self._event_extra(event, self._PROVIDER_HISTORY_TXN_EXTRA, None)
+        if not isinstance(txn, dict):
+            return False
+        setter = getattr(event, "set_extra", None)
+        try:
+            messages = getattr(run_context, "messages", None)
+            request = self._event_extra(event, "provider_request", None)
+            if not isinstance(messages, list) or request is not txn.get("request"):
+                return False
+
+            changed = False
+            replacements = txn.get("replacements", ())
+            replacement_by_id = {
+                id(replacement): (replacement, original)
+                for replacement, original in replacements
+            }
+            for index, message in enumerate(messages):
+                pair = replacement_by_id.get(id(message))
+                if pair is not None and message is pair[0]:
+                    messages[index] = pair[1]
+                    changed = True
+
+            visible_originals = txn.get("visible_originals", ())
+            original_messages = txn.get("original_messages", ())
+            if not isinstance(visible_originals, tuple) or not isinstance(
+                original_messages, tuple
+            ):
+                return changed
+
+            # Hidden entries are restored only when the entire pre-agent visible
+            # prefix survived by identity and in place. If ContextManager really
+            # truncated/compressed anything, fail closed and do not resurrect it.
+            if visible_originals and len(messages) >= len(visible_originals):
+                prefix_intact = all(
+                    messages[index] is original
+                    for index, original in enumerate(visible_originals)
+                )
+                if prefix_intact and len(original_messages) > len(visible_originals):
+                    suffix = list(messages[len(visible_originals):])
+                    messages[:] = [*original_messages, *suffix]
+                    changed = True
+            return changed
+        finally:
+            if callable(setter):
+                try:
+                    setter(self._PROVIDER_HISTORY_TXN_EXTRA, None)
+                except Exception:
+                    pass
+
+    def _parse_semantic_response(
+        self,
+        event: Any,
+        *,
+        original_text: str,
+        sanitized_text: str,
+    ) -> tuple[str, tuple[SemanticBeatPart, ...] | None]:
+        """Scrub this turn's markers and return only a model-authored valid plan."""
+
+        nonce = str(self._event_extra(event, SEMANTIC_BEAT_NONCE_EXTRA, "") or "")
+        if not re.fullmatch(r"[0-9A-F]{6}", nonce):
+            cleaned = scrub_semantic_marker_candidates(sanitized_text)
+            fallback = semantic_parts_from_visible_line_breaks(cleaned)
+            return cleaned, fallback if len(fallback) > 1 else None
+
+        parsed = parse_semantic_completion(sanitized_text, nonce=nonce)
+        cleaned = parsed.clean_text
+        setter = getattr(event, "set_extra", None)
+        if callable(setter):
+            correlation = {
+                "nonce": nonce,
+                "raw_chars": len(original_text),
+                "raw_sha256": self._text_digest(original_text),
+                "clean_chars": len(cleaned),
+                "clean_sha256": self._text_digest(cleaned),
+            }
+            try:
+                setter(self._SEMANTIC_CORRELATION_EXTRA, correlation)
+            except Exception:
+                pass
+        if parsed.accepted:
+            return cleaned, parsed.parts
+        # A malformed/unscoped hidden marker loses all control authority, but it
+        # must not disable the model's still-visible paragraph boundaries.  This
+        # fallback never guesses punctuation boundaries and never trusts marker
+        # attributes; it only uses the scrubbed visible line structure.
+        fallback = semantic_parts_from_visible_line_breaks(cleaned)
+        return cleaned, fallback if len(fallback) > 1 else None
+
+    def scrub_owned_semantic_markers(self, event: Any, text: str) -> str:
+        """Final send-side guard: no raw semantic control marker may be visible."""
+
+        nonce = str(self._event_extra(event, SEMANTIC_BEAT_NONCE_EXTRA, "") or "")
+        if not re.fullmatch(r"[0-9A-F]{6}", nonce):
+            return scrub_semantic_marker_candidates(str(text or ""))
+        return parse_semantic_completion(str(text or ""), nonce=nonce).clean_text
+
+    @staticmethod
+    def _message_text_slots(message: Any) -> tuple[str, list[tuple[Any, str]]] | None:
+        content = (
+            message.get("content")
+            if isinstance(message, dict)
+            else getattr(message, "content", None)
+        )
+        if isinstance(content, str):
+            return content, [(message, "content")]
+        if not isinstance(content, list):
+            return None
+        slots: list[tuple[Any, str]] = []
+        chunks: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                if isinstance(part.get("text"), str):
+                    chunks.append(part["text"])
+                    slots.append((part, "text"))
+                continue
+            part_text = getattr(part, "text", None)
+            if isinstance(part_text, str):
+                chunks.append(part_text)
+                slots.append((part, "text"))
+        return ("".join(chunks), slots) if slots else None
+
+    @staticmethod
+    def _replace_text_slots(slots: list[tuple[Any, str]], cleaned: str) -> bool:
+        if not slots:
+            return False
+        try:
+            target, attribute = slots[0]
+            if isinstance(target, dict):
+                target[attribute] = cleaned
+            else:
+                setattr(target, attribute, cleaned)
+            for target, attribute in slots[1:]:
+                if isinstance(target, dict):
+                    target[attribute] = ""
+                else:
+                    setattr(target, attribute, "")
+        except Exception:
+            return False
+        return True
+
+    def on_agent_done(self, event: Any, run_context: Any, response: Any) -> bool:
+        """Restore provider-only history and scrub the final assistant before save."""
+
+        history_changed = self._restore_provider_history(event, run_context)
+        correlation = self._event_extra(event, self._SEMANTIC_CORRELATION_EXTRA, None)
+        if not isinstance(correlation, dict):
+            return history_changed
+        messages = getattr(run_context, "messages", None)
+        if not isinstance(messages, list):
+            return history_changed
+        for message in reversed(messages):
+            if str(getattr(message, "role", "") or "") != "assistant":
+                continue
+            extracted = self._message_text_slots(message)
+            if extracted is None:
+                return history_changed
+            raw_text, slots = extracted
+            if len(raw_text) != correlation.get("raw_chars"):
+                return history_changed
+            if self._text_digest(raw_text) != correlation.get("raw_sha256"):
+                return history_changed
+            cleaned = self.scrub_owned_semantic_markers(event, raw_text)
+            cleaned = strip_draft_blocks(cleaned)
+            cleaned = self._sanitize_response(cleaned)
+            if len(cleaned) != correlation.get("clean_chars"):
+                return history_changed
+            if self._text_digest(cleaned) != correlation.get("clean_sha256"):
+                return history_changed
+            changed = self._replace_text_slots(slots, cleaned)
+            if changed and response is not None:
+                try:
+                    response.completion_text = cleaned
+                except Exception:
+                    pass
+            return history_changed or changed
+        return history_changed
+
+    @staticmethod
+    def _rewrite_current_assistant(
+        run_context: Any,
+        transcript: str,
+    ) -> bool:
+        """Replace the current turn's assistant message with delivered truth."""
+
+        messages = getattr(run_context, "messages", None)
+        if not isinstance(messages, list):
+            return False
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            role = _ctx_role(message)
+            if role == "user":
+                break
+            if role != "assistant":
+                continue
+            if not transcript:
+                messages.pop(index)
+                return True
+            extracted = LLMResponsePipeline._message_text_slots(message)
+            if extracted is None:
+                # Unknown provider message shape: try the common content field
+                # once. If it is immutable, remove the draft fail-closed so an
+                # unsent tail can never survive as history.
+                try:
+                    if isinstance(message, dict):
+                        message["content"] = transcript
+                    else:
+                        setattr(message, "content", transcript)
+                    return True
+                except Exception:
+                    messages.pop(index)
+                return False
+            _text, slots = extracted
+            if LLMResponsePipeline._replace_text_slots(slots, transcript):
+                return True
+            messages.pop(index)
+            return False
+        return False
+
+    async def settle_segmented_delivery_history(
+        self,
+        event: Any,
+        run_context: Any,
+        response: Any,
+    ) -> str | None:
+        """Wait for transport, then make delivered bubbles the sole history truth.
+
+        ``None`` means this was not a realtime segmented turn.  A string (including
+        the empty string) is the exact successfully delivered transcript.
+        """
+
+        turn = self._event_extra(event, self._DELIVERY_TURN_EXTRA, None)
+        if not isinstance(turn, SegmentedDeliveryTurn):
+            return None
+        if self._event_extra(event, "_syl_realtime_takeover", False) is not True:
+            return None
+        if run_context is None:
+            run_context = turn.run_context
+        if response is None:
+            response = turn.response
+        if turn.history_settled:
+            return turn.transcript
+
+        task = turn.task
+        if task is not None and not task.done():
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning(
+                    "Sylanne segmented delivery failed before history commit: "
+                    "session=%s error=%s",
+                    turn.session_key,
+                    type(exc).__name__,
+                )
+        elif task is not None:
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning(
+                    "Sylanne segmented delivery failed before history commit: "
+                    "session=%s error=%s",
+                    turn.session_key,
+                    type(exc).__name__,
+                )
+
+        transcript = turn.transcript
+        changed = self._rewrite_current_assistant(run_context, transcript)
+        if not changed:
+            logger.warning(
+                "Sylanne could not reconcile current assistant history: session=%s",
+                turn.session_key,
+            )
+        elif transcript and response is not None:
+            # Non-empty delivered text remains the framework save-gate and trace text.
+            # For zero delivery keep the generated completion non-empty: AstrBot then
+            # saves the current user message while run_context contains no assistant.
+            try:
+                response.completion_text = transcript
+            except Exception:
+                pass
+
+        # The realtime path used to observe the full generated draft immediately.
+        # Observe only after transport settles so plugin memory cannot learn unsent
+        # tails such as "我想你" that the user never saw.
+        if transcript and not turn.observed:
+            try:
+                await self._background_observe_response(
+                    turn.session_key,
+                    transcript,
+                    skip_conv_sync=True,
+                )
+                turn.observed = True
+            except Exception:
+                # Body/memory observation is secondary. A failure here must never
+                # roll history back from delivered truth to the provider draft.
+                logger.warning(
+                    "Sylanne delivered transcript observation failed: session=%s",
+                    turn.session_key,
+                    exc_info=True,
+                )
+
+        self._p._store.unfinished_replies.pop(turn.session_key, None)
+        active_turns = getattr(self._p._store, "segmented_delivery_turns", None)
+        if active_turns is not None and active_turns.get(turn.session_key) is turn:
+            active_turns.pop(turn.session_key, None)
+        turn.history_settled = True
+        logger.info(
+            "Sylanne delivery history committed: session=%s delivered=%d/%d chars=%d",
+            turn.session_key,
+            len(turn.delivered_parts),
+            len(turn.planned_parts),
+            len(transcript),
+        )
+        return transcript
+
+    def bind_segmented_delivery_context(
+        self,
+        event: Any,
+        run_context: Any,
+        response: Any,
+    ) -> bool:
+        """Bind AstrBot history objects while final output ownership is unresolved."""
+
+        turn = self._event_extra(event, self._DELIVERY_TURN_EXTRA, None)
+        if not isinstance(turn, SegmentedDeliveryTurn):
+            return False
+        turn.run_context = run_context
+        turn.response = response
+        return turn.task is None and turn.status == "planned"
+
+    def has_pending_segmented_candidate(self, event: Any) -> bool:
+        """Whether this turn still awaits final-chain output arbitration."""
+
+        turn = self._event_extra(event, self._DELIVERY_TURN_EXTRA, None)
+        return (
+            isinstance(turn, SegmentedDeliveryTurn)
+            and turn.task is None
+            and turn.status == "planned"
+            and not turn.history_settled
+        )
+
+    def activate_segmented_delivery(self, event: Any) -> bool:
+        """Commit text ownership and start transport after decorators finalize the chain."""
+
+        turn = self._event_extra(event, self._DELIVERY_TURN_EXTRA, None)
+        if not isinstance(turn, SegmentedDeliveryTurn):
+            return False
+        if turn.task is not None:
+            return self._event_extra(event, "_syl_realtime_takeover", False) is True
+        if turn.status != "planned":
+            return False
+
+        set_extra = getattr(event, "set_extra", None)
+        if not callable(set_extra):
+            return False
+        parts = [dict(part) for part in turn.dispatch_parts]
+        if not parts:
+            return False
+
+        task: asyncio.Task[Any] | None = None
+        background_tasks: list[asyncio.Task[Any]] | None = None
+        dispatch_ready = asyncio.Event()
+
+        async def dispatch_after_commit() -> None:
+            await dispatch_ready.wait()
+            await self._dispatch_segmented_parts(
+                turn.origin,
+                parts,
+                session_key=turn.session_key,
+                delivery_turn=turn,
+            )
+
+        dispatch_coro = dispatch_after_commit()
+        try:
+            task = safe_ensure_future(
+                dispatch_coro,
+                name="dispatch_segmented_parts",
+            )
+            if task is None:
+                raise RuntimeError("dispatch task creation returned no task")
+            turn.task = task
+            turn.status = "queued"
+            background_tasks = ensure_background_tasks_list(self._p)
+            background_tasks.append(task)
+            task.add_done_callback(
+                lambda completed: (
+                    self._p._background_tasks.remove(completed)
+                    if completed in self._p._background_tasks
+                    else None
+                )
+            )
+            self._p._store.segmented_tasks.set(turn.session_key, task)
+            task.add_done_callback(
+                lambda completed: self._on_segment_dispatch_done_maybe_afterthought(
+                    completed,
+                    turn.session_key,
+                    turn.origin,
+                    turn.expression_drive,
+                    delivery_turn=turn,
+                )
+            )
+            # Commit ownership only after every cancellation handle is durable.
+            # The explicit gate also makes this safe under asyncio eager task
+            # factories, where create_task() may run a coroutine immediately.
+            set_extra("_syl_realtime_candidate", False)
+            set_extra("_syl_realtime_takeover", True)
+            if self._event_extra(event, "_syl_realtime_takeover", False) is not True:
+                raise RuntimeError("takeover extra did not round-trip")
+            dispatch_ready.set()
+        except Exception:
+            if task is not None:
+                try:
+                    task.cancel()
+                except Exception:
+                    pass
+            else:
+                try:
+                    dispatch_coro.close()
+                except Exception:
+                    pass
+            if (
+                background_tasks is not None
+                and task is not None
+            ):
+                try:
+                    background_tasks.remove(task)
+                except (ValueError, TypeError):
+                    pass
+            registry = getattr(self._p._store, "segmented_tasks", None)
+            if registry is not None and task is not None:
+                try:
+                    if registry.get(turn.session_key) is task:
+                        registry.pop(turn.session_key, None)
+                except Exception:
+                    pass
+            turn.task = None
+            turn.status = "failed"
+            active_turns = getattr(
+                self._p._store,
+                "segmented_delivery_turns",
+                None,
+            )
+            if active_turns is not None:
+                try:
+                    if active_turns.get(turn.session_key) is turn:
+                        active_turns.pop(turn.session_key, None)
+                except Exception:
+                    pass
+            for key, value in (
+                ("_syl_realtime_takeover", False),
+                ("_syl_realtime_candidate", False),
+                (self._DELIVERY_TURN_EXTRA, None),
+            ):
+                try:
+                    set_extra(key, value)
+                except Exception:
+                    pass
+            logger.warning(
+                "Sylanne realtime takeover abandoned (dispatch setup failed): "
+                "session=%s",
+                turn.session_key,
+                exc_info=True,
+            )
+            return False
+
+        logger.info(
+            "Sylanne segmented reply activated: session=%s parts=%d",
+            turn.session_key,
+            len(parts),
+        )
+        return True
+
+    async def delegate_segmented_candidate_to_framework(self, event: Any) -> bool:
+        """Give a transformed non-text chain sole ownership without sending text."""
+
+        turn = self._event_extra(event, self._DELIVERY_TURN_EXTRA, None)
+        if not isinstance(turn, SegmentedDeliveryTurn):
+            return False
+        if turn.task is not None or turn.status != "planned":
+            return False
+
+        try:
+            if turn.cleaned_text and not turn.observed:
+                await self._background_observe_response(
+                    turn.session_key,
+                    turn.cleaned_text,
+                    skip_conv_sync=True,
+                )
+                turn.observed = True
+        except Exception:
+            logger.warning(
+                "Sylanne framework-owned transcript observation failed: session=%s",
+                turn.session_key,
+                exc_info=True,
+            )
+        finally:
+            turn.status = "delegated"
+            turn.history_settled = True
+            self._p._store.unfinished_replies.pop(turn.session_key, None)
+            active_turns = getattr(
+                self._p._store,
+                "segmented_delivery_turns",
+                None,
+            )
+            if active_turns is not None and active_turns.get(turn.session_key) is turn:
+                active_turns.pop(turn.session_key, None)
+            set_extra = getattr(event, "set_extra", None)
+            if callable(set_extra):
+                try:
+                    set_extra(self._DELIVERY_TURN_EXTRA, None)
+                    set_extra("_syl_realtime_candidate", False)
+                    set_extra("_syl_realtime_takeover", False)
+                except Exception:
+                    pass
+
+        logger.info(
+            "Sylanne segmented candidate delegated to final framework chain: session=%s",
+            turn.session_key,
+        )
+        return True
 
     # ------------------------------------------------------------------
     # T1-02③ 身体驱动打字速度
@@ -411,6 +1123,15 @@ class LLMResponsePipeline:
     # ------------------------------------------------------------------
     # Main response handler
     # ------------------------------------------------------------------
+    @staticmethod
+    def _has_pending_tool_calls(response: Any) -> bool:
+        """Return whether this is an intermediate assistant tool-call response."""
+
+        return any(
+            bool(getattr(response, field, None))
+            for field in ("tools_call_args", "tools_call_name", "tools_call_ids")
+        )
+
     async def _on_llm_response_inner(self, event: Any, response: Any) -> None:
         """LLM 响应拦截的主入口。
 
@@ -428,14 +1149,40 @@ class LLMResponsePipeline:
         ensure_background_tasks_list(self._p)
         session_key = self._p._session_key(event)
         cfg = self._p._config or {}
-        realtime_enabled = bool(
-            cfg.get("sylanne_alpha_realtime_chat_enabled")
-            or cfg.get("enable_realtime_chat")
-        )
-        intercept = bool(
-            cfg.get("sylanne_alpha_realtime_intercept_llm_response")
-            or cfg.get("realtime_chat_intercept_llm_response")
-        )
+        # 次要修复②：统一走 realtime_flags（与请求侧同一口径，见该函数 docstring）。
+        realtime_enabled, intercept = realtime_flags(cfg)
+
+        if response is None:
+            return
+
+        # 工具循环的 assistant 响应不是最终用户回复。AstrBot 会继续执行工具，
+        # 再由工具本身或后续最终 assistant 响应决定交付。这里若提前分段直发，
+        # 会把 TTS/send_message 等自发送工具的参数或前置文本先发一遍，随后工具
+        # 再发一次，形成跨插件双交付。只做安全清理，绝不置接管旗标、调度分段
+        # 或把中间步骤写入对话观测；判据只看框架公开的 tool-call 字段，不识别
+        # 任何具体插件或工具名。
+        if self._has_pending_tool_calls(response):
+            text = normalize_completion_text(getattr(response, "completion_text", ""))
+            cleaned = strip_draft_blocks(text)
+            cleaned = self._sanitize_response(cleaned)
+            cleaned, _semantic_parts = self._parse_semantic_response(
+                event,
+                original_text=text,
+                sanitized_text=cleaned,
+            )
+            if cleaned != text:
+                response.completion_text = cleaned
+            logger.info(
+                "Sylanne segmented delivery skipped for intermediate tool call: "
+                "session=%s calls=%d",
+                session_key,
+                max(
+                    len(getattr(response, "tools_call_args", None) or ()),
+                    len(getattr(response, "tools_call_name", None) or ()),
+                    len(getattr(response, "tools_call_ids", None) or ()),
+                ),
+            )
+            return
 
         if not realtime_enabled or not intercept:
             # 未启用即时聊天拦截时，仅清理 thinking/draft 块 + 注入防御；
@@ -444,6 +1191,11 @@ class LLMResponsePipeline:
                 text = normalize_completion_text(getattr(response, "completion_text", ""))
                 cleaned = strip_draft_blocks(text)
                 cleaned = self._sanitize_response(cleaned)
+                cleaned, _semantic_parts = self._parse_semantic_response(
+                    event,
+                    original_text=text,
+                    sanitized_text=cleaned,
+                )
                 # 注：此分支 completion_text 整段直发 AstrBot（不分段）。曾在此加超长截断
                 # 兜底，经审查移除——单条长消息不是事故的 86 段轰炸，tagged thinking 已剥；
                 # 截断会丢内容、还撞 deliverable 契约"一次给全"，是治 speculative 问题反引入
@@ -462,8 +1214,10 @@ class LLMResponsePipeline:
                     )
                     if _resolved is None:
                         response.completion_text = ""
+                        self._v3_settle_empty(session_key, silent=True)
                         return
                     cleaned = _resolved
+                    self._v3_settle_empty(session_key, silent=False)
                 if cleaned != text:
                     response.completion_text = cleaned
                 if cleaned.strip():
@@ -480,7 +1234,7 @@ class LLMResponsePipeline:
                     # conversation_buffers/last_bot_texts 这些插件自身状态照常更新。
                     # round-3 纠偏：这个论证同样适用于下面拦截/分段发送分支——round-2
                     # 曾误以为那条分支是"插件唯一历史写入者"而不传 True，源码里那条
-                    # 分支在分段调度前同样显式保留了 response.completion_text = cleaned
+                    # 分支在候选登记前同样显式保留了 response.completion_text = cleaned
                     # （供 AstrBot 记录用），事件同样未被 stop，框架一样会保存，故那边
                     # 现在也已改成显式 skip_conv_sync=True（见
                     # _background_observe_response 调用点）。
@@ -500,15 +1254,57 @@ class LLMResponsePipeline:
                     )
             return
 
-        if response is None:
+        # M4b（realtime 完整重做 Model-D，响应侧第二层防御）：本轮若正走框架
+        # 原生流式发送（STREAMING_RESULT），彻底放弃接管。钩子触发时
+        # event.get_result() 已经是这个类型——框架在 internal.py 里
+        # event.set_result(...STREAMING_RESULT...set_async_stream(run_agent(...)))
+        # 发生在 run_agent() 生成器真正被消费（从而触发 on_agent_done/
+        # on_llm_response）之前。M4a（main.py on_message）已在请求侧尽量提前
+        # 强制关流，这里兜第三方 runner / Live Mode 等绕过该时序假设的情况——
+        # 不清 completion_text/result_chain、不分段调度，避免与框架自身流式
+        # 发送（及请求侧 wrapped_send_streaming 的首句抢发）并行造成双发。
+        try:
+            _result = event.get_result() if hasattr(event, "get_result") else None
+        except Exception:
+            _result = None
+        if _result is not None and getattr(
+            getattr(_result, "result_content_type", None), "name", ""
+        ) == "STREAMING_RESULT":
+            logger.info(
+                "Sylanne realtime takeover abandoned (streaming in flight): "
+                f"session={session_key}"
+            )
             return
 
         text = normalize_completion_text(getattr(response, "completion_text", ""))
         cleaned = strip_draft_blocks(text)
         cleaned = self._sanitize_response(cleaned)
+        cleaned, semantic_parts = self._parse_semantic_response(
+            event,
+            original_text=text,
+            sanitized_text=cleaned,
+        )
         logger.info(
             f"Sylanne on_llm_response: len={len(cleaned)} session={session_key}"
         )
+
+        # M1（issue26 同类根治，迁到 realtime 接管路径）：response.result_chain
+        # 若含非 Plain 组件（Image/Record 等，如工具调用产出的图片/语音），
+        # 彻底放弃接管——不清 completion_text/result_chain、不分段调度，让框架
+        # 原样发送 + 保存，图片/语音保全（main.py::on_decorating_result 侧的
+        # 既有 strip_draft_blocks 通用清理仍会对 Plain 段生效）。仅【纯 Plain】
+        # 的 result_chain（或压根没有 result_chain，只用 _completion_text 的
+        # provider，如 Anthropic）才继续走下面的接管分段。
+        _result_chain = getattr(response, "result_chain", None)
+        _rc_components = getattr(_result_chain, "chain", None) if _result_chain else None
+        if _rc_components and any(
+            _is_non_plain_component(seg) for seg in _rc_components
+        ):
+            logger.info(
+                "Sylanne realtime takeover abandoned (result_chain 含非 Plain "
+                f"组件/图片语音): session={session_key}"
+            )
+            return
 
         # 定时任务（cron）的 LLM 回复是内部总结，不应发送给用户
         _platform = ""
@@ -535,8 +1331,10 @@ class LLMResponsePipeline:
             )
             if _resolved is None:
                 response.completion_text = ""
+                self._v3_settle_empty(session_key, silent=True)
                 return
             cleaned = _resolved
+            self._v3_settle_empty(session_key, silent=False)
             # 落入下方正常分段发送流程（不 return）
 
         # 检查首句是否已通过流式发送
@@ -620,6 +1418,7 @@ class LLMResponsePipeline:
             max_part_chars=max_part_chars,
             chars_per_second=cps,
             first_delay=think_delay,
+            semantic_parts=semantic_parts,
         )
         parts = plan.get("message_parts", [])
 
@@ -627,74 +1426,103 @@ class LLMResponsePipeline:
             response.completion_text = cleaned
             return
 
-        # 保留 completion_text 供 AstrBot 上下文历史记录使用。
-        # 清空 result_chain 防止 AstrBot 发送完整消息（由分段调度代替）。
+        # M2/M3 修复（realtime 完整重做 Model-D，send/save 解耦核心）：
+        #
+        # 旧 hack 在此清空 result_chain/chain 来"压制框架发送"，同时把
+        # completion_text 设为 cleaned"保留供历史记录"——但框架落库判据
+        # （internal.py:_save_to_history:463-467）与发送判据（tool_loop_agent_
+        # runner.py:803-814）读的是【同一个】response 对象：result_chain 档
+        # provider（Gemini/OpenAI）清了 result_chain 后 completion_text getter
+        # 会跟着塌缩成空（entities.py:434-437，result_chain 为空则读
+        # _completion_text，而 setter 此前从未写过它），落库判据看到空
+        # completion_text 直接不存——这是 M2 渐进失忆的根因。_completion_text
+        # 档 provider（Anthropic）result_chain 本来就是 None，清空是空操作，
+        # completion_text 仍非空，框架发送判据的 elif 分支照样用它建链发送——
+        # 这是 M3 双发的根因（我们自己又后台分段发一遍）。
+        #
+        # 现在只设 completion_text，不再碰 result_chain/chain：
+        # 1) 保存不受影响——run_context.messages 里的 assistant TextPart 在
+        #    on_agent_done 钩子触发【之前】已用原始 completion_text 追加完毕
+        #    （tool_loop_agent_runner.py:193-197 早于 :200），这里赋值不会
+        #    重写已保存的历史内容；只用于让 :463-467 的落库判据读到非空值、
+        #    确保这条 turn 被保存（treat 为一次真实 assistant 回复）。
+        # 2) 发送抑制不再靠污染 llm_resp 字段，改在框架自己的装饰钩子
+        #    on_decorating_result（main.py）里清空【规范化后的 event.result.chain】。
+        #    "存"与"发"能解耦的真正原因是二者读【不同对象】，与 stage 先后无关：
+        #    框架发送判据读 event.result.chain（RespondStage），而 _save_to_history
+        #    读 llm_response.completion_text + run_context.messages（后者的 assistant
+        #    段已在 tool_loop_agent_runner.py:197 提交），从不读 event.result.chain。
+        #    故无论 decorate 与 save 谁先跑（真框架里 decorate 随 run_agent 消费先跑、
+        #    save 在 run_agent 抽干后才跑，见 internal.py:396），清空 chain 都不影响
+        #    落库内容。且与 provider 字段布局无关：result_chain 档和 _completion_text
+        #    档到这一步都已统一坍缩成同一种 event.result.chain（各自经 tool_loop_
+        #    agent_runner.py:803-814 的 if/elif 转成 MessageChain）。
+        # 先保留非空 completion_text 作为 AstrBot 的 turn 保存门，但真正写进
+        # run_context.messages 的 assistant 正文会在 on_agent_done 保存前屏障中，
+        # 由成功送达账本改写为可见前缀。
         response.completion_text = cleaned
-        if hasattr(response, "result_chain"):
-            response.result_chain = None
-        if hasattr(response, "chain"):
-            response.chain = None
+        set_extra = getattr(event, "set_extra", None)
+        if not callable(set_extra):
+            logger.warning(
+                "Sylanne realtime takeover abandoned (event extras unavailable): "
+                "session=%s",
+                session_key,
+            )
+            return
 
-        # 多段回复时存储未发送部分，供下轮续接
-        if len(parts) > 1:
-            sent_first = parts[0]["text"]
-            rest = cleaned
-            if rest.startswith(sent_first):
-                rest = rest[len(sent_first) :].strip()
-            self._p._store.unfinished_replies.set(session_key, rest)
+        epochs = getattr(self._p._store, "conversation_input_epoch", None)
+        current_epoch = int(epochs.get(session_key, 0) or 0) if epochs is not None else 0
+        event_epoch = self._event_extra(event, "_syl_input_epoch", current_epoch)
+        if not isinstance(event_epoch, int) or isinstance(event_epoch, bool):
+            event_epoch = current_epoch
+        turn = SegmentedDeliveryTurn(
+            session_key=session_key,
+            input_epoch=event_epoch,
+            planned_parts=tuple(str(part.get("text", "")) for part in parts),
+            origin=origin,
+            dispatch_parts=tuple(dict(part) for part in parts),
+            cleaned_text=cleaned,
+            expression_drive=expr_drive,
+        )
+        active_turns = None
+        try:
+            set_extra(self._DELIVERY_TURN_EXTRA, turn)
+            if self._event_extra(event, self._DELIVERY_TURN_EXTRA, None) is not turn:
+                raise RuntimeError("delivery turn extra did not round-trip")
+            active_turns = getattr(
+                self._p._store, "segmented_delivery_turns", None
+            )
+            if active_turns is not None:
+                active_turns.set(session_key, turn)
+            set_extra("_syl_realtime_candidate", True)
+            set_extra("_syl_realtime_takeover", False)
+        except Exception:
+            if active_turns is not None and active_turns.get(session_key) is turn:
+                active_turns.pop(session_key, None)
+            try:
+                set_extra(self._DELIVERY_TURN_EXTRA, None)
+                set_extra("_syl_realtime_candidate", False)
+                set_extra("_syl_realtime_takeover", False)
+            except Exception:
+                pass
+            logger.warning(
+                "Sylanne realtime takeover abandoned (delivery ledger unavailable): "
+                "session=%s",
+                session_key,
+                exc_info=True,
+            )
+            return
 
-        # 后台调度分段发送
         logger.info(
-            f"Sylanne segmented reply queued: session={session_key} parts={len(parts)}"
-        )
-        task = safe_ensure_future(
-            self._dispatch_segmented_parts(origin, parts, session_key=session_key),
-            name="dispatch_segmented_parts",
-        )
-        ensure_background_tasks_list(self._p).append(task)
-        task.add_done_callback(
-            lambda t: (
-                self._p._background_tasks.remove(t)
-                if t in self._p._background_tasks
-                else None
-            )
-        )
-        self._p._store.segmented_tasks.set(session_key, task)
-
-        # T2-02①：SPEAK 分段发送任务正常发完（未被打断/未炸）后，按表达驱动力
-        # 概率骰子决定要不要在 20~180s 后追发一句补刀/改口。config 关闭时
-        # 回调内部第一件事就是查 config 直接 return（零行为/零额外状态分配）。
-        task.add_done_callback(
-            lambda t: self._on_segment_dispatch_done_maybe_afterthought(
-                t, session_key, origin, expr_drive
-            )
+            "Sylanne segmented reply planned: session=%s parts=%d "
+            "(awaiting final-chain arbitration)",
+            session_key,
+            len(parts),
         )
 
-        # 将观测任务从热路径移出，后台异步执行
-        # fix/context-integrity round-3 纠偏：round-2 曾误判这条拦截/分段发送分支是
-        # "插件唯一历史写入者"，理由不成立——上面分段调度前显式保留了
-        # response.completion_text = cleaned（供 AstrBot 上下文使用），且本文件从未
-        # 调用 event.stop_event()。框架侧 _save_to_history 的落库条件只看
-        # completion_text 是否非空 + 事件是否被 stop，不关心走的是拦截分支还是非
-        # 拦截分支——两条分支这两个条件都成立，框架都会做一次全量覆盖写。故这里
-        # 必须和上面非拦截分支（~464 附近）同样传 skip_conv_sync=True，否则插件的
-        # 读-改-写与框架的全量覆盖写并发，产生 clobber / 重复 assistant 记录，与
-        # round-2 BLOCKER 是同一个 bug。conversation_buffers/last_bot_texts 等插件
-        # 自身状态不受影响，仍照常更新。
-        obs_task = safe_ensure_future(
-            self._background_observe_response(
-                session_key, cleaned, skip_conv_sync=True
-            ),
-            name="background_observe_response",
-        )
-        ensure_background_tasks_list(self._p).append(obs_task)
-        obs_task.add_done_callback(
-            lambda t: (
-                self._p._background_tasks.remove(t)
-                if t in self._p._background_tasks
-                else None
-            )
-        )
+        # 不在这里观测模型草稿。on_agent_done 只把 run_context/response 绑定到账本；
+        # 最终装饰阶段先完成 TTS/图片等 chain 变换，再由
+        # 单一仲裁点决定是启动文本 transport，还是把本轮完整交给框架非文本 chain。
 
     async def _append_bot_reply_buffer(
         self, session_key: str, text: str, *, skip_conv_sync: bool = False
@@ -934,7 +1762,13 @@ class LLMResponsePipeline:
     # Segmented dispatch
     # ------------------------------------------------------------------
     async def _dispatch_segmented_parts(
-        self, origin: str, parts: list[dict[str, Any]], session_key: str = ""
+        self,
+        origin: str,
+        parts: list[dict[str, Any]],
+        session_key: str = "",
+        *,
+        settle_v3: bool = True,
+        delivery_turn: SegmentedDeliveryTurn | None = None,
     ) -> None:
         """逐段发送分段回复，每段之间按计划延迟。
 
@@ -942,46 +1776,190 @@ class LLMResponsePipeline:
             origin: 消息发送目标（unified_msg_origin）。
             parts: 分段列表，每段包含 text 和 delay_before_seconds。
             session_key: 会话标识，发送完成后清除 unfinished 标记。
+            settle_v3: 这次投递是否算【本轮的】v3 终端证据。默认 True（正常回复）。
+                补刀/改口（_fire_afterthought）必须传 False：它复用同一个 session_key，
+                却在原轮结束后 20-180s 才发，那时 _pending[session_key] 要么已被本轮
+                结算掉、要么已经装着【下一轮】——按 True 走会把下一轮的 handle 认领成
+                本次补刀的 SPEAK（带错的 part_count），还把下一轮真正的终端证据挤掉。
+                v3 纯观察，对 v2 行为没有任何影响。
         """
+        total = len(parts)
+
+        def record_remaining(start_index: int) -> None:
+            if not session_key or delivery_turn is not None:
+                return
+            remaining_text = "".join(
+                str(part.get("text", "")) for part in parts[start_index:]
+            )
+            if remaining_text:
+                self._p._store.unfinished_replies.set(session_key, remaining_text)
+            else:
+                self._p._store.unfinished_replies.pop(session_key, None)
+
+        # Legacy direct callers retain their previous unfinished-reply behavior.
+        # Realtime takeover turns use delivery_turn instead: unsent text is a
+        # private draft and must never become conversational history.
+        record_remaining(0)
         context = self._p.context
         if not hasattr(context, "send_message"):
+            if delivery_turn is not None:
+                delivery_turn.status = "failed"
             return
-        total = len(parts)
+        # 栅栏令牌：在【任何 await 之前】同步取本轮的令牌。这条协程可能要跑好几秒
+        # （段间 sleep），期间同一 session_key 上可能已经换了下一轮；结算时带着这枚
+        # 令牌，v3 就能认出"我要结的那轮已经不在了"而放手，不会错结下一轮。
+        v3_token = self._v3_pending_token(session_key) if settle_v3 else None
+        sent_count = 0
+        interrupted = False
         try:
             for idx, part in enumerate(parts, 1):
+                if delivery_turn is not None:
+                    epochs = getattr(
+                        self._p._store, "conversation_input_epoch", None
+                    )
+                    current_epoch = (
+                        int(epochs.get(session_key, 0) or 0)
+                        if epochs is not None
+                        else delivery_turn.input_epoch
+                    )
+                    if delivery_turn.should_stop(current_epoch):
+                        interrupted = True
+                        break
                 delay = float(part.get("delay_before_seconds", 0))
                 if delay > 0:
-                    await asyncio.sleep(delay)
+                    if delivery_turn is None:
+                        await asyncio.sleep(delay)
+                    elif not await delivery_turn.wait_delay(delay):
+                        interrupted = True
+                        break
+                if delivery_turn is not None:
+                    epochs = getattr(
+                        self._p._store, "conversation_input_epoch", None
+                    )
+                    current_epoch = (
+                        int(epochs.get(session_key, 0) or 0)
+                        if epochs is not None
+                        else delivery_turn.input_epoch
+                    )
+                    if delivery_turn.should_stop(current_epoch):
+                        interrupted = True
+                        break
                 text = str(part.get("text", ""))
                 if not text:
+                    sent_count = idx
+                    record_remaining(sent_count)
                     continue
-                logger.info(
-                    f"Sylanne segmented reply part {idx}/{total}: {text[:60]}"
-                )
+                logger.info("Sylanne segmented reply part %d/%d", idx, total)
                 message = self._astrbot_message(text)
                 await context.send_message(origin, message)
-                # 每发送一段，更新 unfinished 为剩余未发内容（消除竞态）
-                if session_key and idx < total:
-                    remaining_text = "".join(
-                        str(p.get("text", "")) for p in parts[idx:]
-                    )
-                    if remaining_text:
-                        self._p._store.unfinished_replies.set(session_key, remaining_text)
-                    else:
-                        self._p._store.unfinished_replies.pop(session_key, None)
+                sent_count = idx
+                if delivery_turn is not None:
+                    delivery_turn.mark_delivered(text)
+                # 只有明确收到 send_message 成功返回，才从 unfinished 扣掉该段。
+                record_remaining(sent_count)
         except asyncio.CancelledError:
-            # 新请求 cancel 旧分段任务（llm_request_pipeline 主动 cancel segmented_tasks）：
-            # 不静默吞——留痕已发到第几段，unfinished 保留剩余供续接/下轮判断，然后重抛。
-            sent = locals().get("idx", 0)
+            # Legacy callers keep the old remainder contract. Realtime ledger
+            # callers preserve only the successful prefix; cancellation never
+            # promotes an unsent tail into the next prompt.
+            record_remaining(sent_count)
+            if delivery_turn is not None:
+                delivery_turn.status = "cancelled"
+                self._p._store.unfinished_replies.pop(session_key, None)
             logger.info(
-                "Sylanne segmented dispatch cancelled: session=%s sent=%d/%d "
-                "(剩余留在 unfinished 供续接)",
-                session_key, sent, total,
+                "Sylanne segmented dispatch cancelled: session=%s sent=%d/%d",
+                session_key, sent_count, total,
             )
+            # v3 shadow：段间取消 = 投递未完成 → UNKNOWN，绝不结算 SPEAK（design 14.2）。
+            if settle_v3:
+                self._v3_settle_segments(session_key, total, succeeded=False, token=v3_token)
             raise
+        except BaseException:
+            # 任意一段 send 失败（首段/次段皆然）：v2 行为完全不变——原样重抛，交给
+            # task.exception()/上游。这里只补一条 v3 终端证据：部分投递 → UNKNOWN。
+            record_remaining(sent_count)
+            if delivery_turn is not None:
+                delivery_turn.status = "failed"
+            if settle_v3:
+                self._v3_settle_segments(session_key, total, succeeded=False, token=v3_token)
+            raise
+        if interrupted:
+            if delivery_turn is not None:
+                delivery_turn.status = "interrupted"
+                self._p._store.unfinished_replies.pop(session_key, None)
+            if settle_v3:
+                self._v3_settle_segments(
+                    session_key, total, succeeded=False, token=v3_token
+                )
+            logger.info(
+                "Sylanne segmented dispatch interrupted: session=%s sent=%d/%d",
+                session_key,
+                sent_count,
+                total,
+            )
+            return
         # 所有段发送成功——清除未完成标记
         if session_key:
             self._p._store.unfinished_replies.pop(session_key, None)
+        if delivery_turn is not None:
+            delivery_turn.status = "completed"
+        # v3 shadow：唯一能证明 SPEAK 的地方——每一段都过了 send_message，无取消无异常。
+        if settle_v3:
+            self._v3_settle_segments(session_key, total, succeeded=True, token=v3_token)
+
+    def _v3_pending_token(self, session_key: str) -> int | None:
+        """取本轮的 v3 栅栏令牌（默认关 / 没捕获过时是 None）。"""
+
+        facade = getattr(self._p, "_v3_shadow", None)
+        getter = getattr(facade, "pending_token", None)
+        if not callable(getter) or not session_key:
+            return None
+        try:
+            return getter(session_key)
+        except Exception:  # noqa: BLE001 - 取不到令牌就退化成"结算当前那轮"
+            return None
+
+    def _v3_settle_segments(
+        self, session_key: str, total: int, *, succeeded: bool, token: int | None = None
+    ) -> None:
+        """把分段投递的终端证据交给 v3 shadow（默认关时是空操作）。
+
+        design 14.2：只有【完整结构化投递】才可以结算一次 SPEAK；部分投递、失败段、
+        取消一律 UNKNOWN。facade 内部保证不抛，故这里没有 try——它绝不能改 v2 行为。
+        """
+
+        facade = getattr(self._p, "_v3_shadow", None)
+        if facade is None or not session_key or total < 1:
+            return
+        facade.settle(
+            session_key=session_key,
+            route_kind="SEGMENTED_TEXT",
+            reply_kind="SPEAK",
+            part_count=total,
+            all_segments_succeeded=succeeded,
+            token=token,
+        )
+
+    def _v3_settle_empty(self, session_key: str, *, silent: bool) -> None:
+        """空草稿分治的 v3 终端证据（默认关时是空操作）。
+
+        - silent=True：投递管线判定这轮不说话 → SILENT 路由 → HOLD。
+        - silent=False：兜底一句 → FALLBACK 路由 → 恒 UNKNOWN（兜底文案不是她的决定）。
+          它先于下方分段发送结算，故这轮不会再被结算成 SPEAK——这正是"FALLBACK 在有效
+          候选之后仍是 UNKNOWN"的语义。
+        """
+
+        facade = getattr(self._p, "_v3_shadow", None)
+        if facade is None or not session_key:
+            return
+        if silent:
+            facade.settle(session_key=session_key, route_kind="SILENT", reply_kind="SILENT")
+        else:
+            facade.settle(
+                session_key=session_key,
+                route_kind="FALLBACK",
+                reply_kind="FALLBACK",
+                part_count=1,
+            )
 
     # ------------------------------------------------------------------
     # T2-02 补刀与改口
@@ -1021,6 +1999,7 @@ class LLMResponsePipeline:
         expression_drive: float,
         *,
         rng: random.Random | None = None,
+        delivery_turn: SegmentedDeliveryTurn | None = None,
     ) -> None:
         """T2-02①：一段 SPEAK 分段回复正常发完（未取消/未炸）后的挂钩。
 
@@ -1035,6 +2014,8 @@ class LLMResponsePipeline:
                 return
         except asyncio.CancelledError:
             return
+        if delivery_turn is not None and delivery_turn.status != "completed":
+            return
         cfg = self._p._config or {}
         if not bool(cfg.get("sylanne_alpha_afterthought_enabled")):
             return
@@ -1047,13 +2028,10 @@ class LLMResponsePipeline:
         probability = self._afterthought_probability(expression_drive)
         if not self._afterthought_roll(probability, rng=rng):
             return
-        # T2-02③ 取消判定：本想用 conversation_input_epoch，但排查发现它只在【消息
-        # 撤回】特殊路径才递增（见 public_api.py withdraw 处理），普通用户消息完全
-        # 不碰它——拿它当锚点等于取消判定永远命不中（epoch_at_dispatch 恒为 0，
-        # 之后也恒为 0，`>` 判断恒假）。改用 card 给的 fallback：
-        # last_user_message_time——main.py on_message 对【每条】消息都更新它，是
-        # 真正随用户插话推进的信号。锚定当前值，_fire_afterthought 醒来后一旦发现
-        # 该值前进了，说明用户在等待期间说了话，取消补刀。
+        # T2-02③ 继续用 last_user_message_time 作为补刀的独立取消锚。实时分段
+        # 现在另有 conversation_input_epoch + delivery ledger 的锁外中断协议；
+        # 补刀则是一个已经结算后的新发送任务，用消息时间戳判定更直接，也兼容
+        # 未走实时分段的普通轮。醒来后时间前进即说明用户插了话，取消补刀。
         anchor_last_user_at = self._p._store.last_user_message_time.get(
             session_key, 0.0
         )
@@ -1166,7 +2144,11 @@ class LLMResponsePipeline:
         logger.info(
             f"Sylanne afterthought queued: session={session_key} parts={len(parts)}"
         )
-        await self._dispatch_segmented_parts(origin, parts, session_key=session_key)
+        # settle_v3=False：补刀复用同一 session_key 但发生在本轮结算之后，绝不能
+        # 认领这个键上的（下一轮的）待结算捕获。见 _dispatch_segmented_parts 文档。
+        await self._dispatch_segmented_parts(
+            origin, parts, session_key=session_key, settle_v3=False
+        )
         state = self._afterthought_state(session_key)
         state["last_fired_at"] = state.get("exchange_count", 0)
 
@@ -1264,7 +2246,7 @@ class LLMResponsePipeline:
     def _cap_llm_request_payload(self, request: Any) -> None:
         """裁剪 LLM 请求载荷，确保序列化后不超过最大字符限制。
 
-        多轮渐进裁剪：先裁 extra_user_content_parts，再裁 contexts 和 messages。
+        多轮渐进裁剪：先裁 extra_user_content_parts，再裁 messages。
         """
         locked = self._p._config.get("sylanne_alpha_locked_persona_prompt")
         _locked_system = str(locked) if locked else None
@@ -1292,11 +2274,6 @@ class LLMResponsePipeline:
 
             if pass_num >= 2:
                 keep = max(4, 8 - pass_num * 2)
-                contexts = getattr(request, "contexts", None)
-                if isinstance(contexts, list) and contexts:
-                    request.contexts = self._trim_payload_list(
-                        contexts, keep_items=keep, text_limit=text_limit
-                    )
                 messages = getattr(request, "messages", None)
                 if isinstance(messages, list) and messages:
                     filtered = [m for m in messages if not isinstance(m, str)]
@@ -1379,18 +2356,12 @@ class LLMResponsePipeline:
         return {"role": "user", "content": "[sylanne_payload_context_trimmed]"}
 
     # ------------------------------------------------------------------
-    # Claude/hajide compat stubs (minimal implementation)
+    # State injection budget
     # ------------------------------------------------------------------
     def _state_injection_budget_for_request(
-        self, session_key: str, request: Any, model_hint: str = ""
+        self, session_key: str, request: Any
     ) -> Any:
-        """为请求创建状态注入预算对象。
-
-        根据模型类型决定兼容模式：
-          - claude_agent_owned_context: 哈基德模式，跳过额外注入
-          - claude_advisory: Claude 建议模式，以 advisory 标记注入
-          - 默认：正常注入到 extra_user_content_parts
-        """
+        """为请求创建通用状态注入预算对象。"""
         # Access _StateInjectionBudget from the plugin's module to avoid circular import
         import sys
 
@@ -1399,297 +2370,11 @@ class LLMResponsePipeline:
         if _StateInjectionBudget is None:
             from main import _StateInjectionBudget
 
-        budget = _StateInjectionBudget(session_key=session_key, model_hint=model_hint)
+        budget = _StateInjectionBudget(session_key=session_key)
         cfg = self._p.config or {}
         budget.max_added_chars = int(cfg.get("state_injection_max_added_chars", 2400))
         budget.max_parts = int(cfg.get("state_injection_max_parts", 8))
-        hajide = bool(cfg.get("sylanne_alpha_hajide_compat_mode"))
-        is_claude = (
-            "claude" in model_hint.lower()
-            or "anthropic" in model_hint.lower()
-            or "哈基德" in model_hint
-        )
-        if hajide and is_claude:
-            budget.compat_mode = "claude_agent_owned_context"
-        elif is_claude:
-            budget.compat_mode = "claude_advisory"
         return budget
-
-    def _append_temp_text_part(
-        self,
-        request: Any,
-        text: str,
-        source: str = "",
-        budget: Any | None = None,
-    ) -> bool:
-        if budget and budget.compat_mode == "claude_agent_owned_context":
-            budget.skipped.append(
-                {"source": source, "reason": "claude_agent_owned_context"}
-            )
-            return False
-        if budget and budget.compat_mode == "claude_advisory":
-            # Claude advisory: 注入到 system_prompt（不持久化）
-            # 手册明确：request.prompt 会持久化，system_prompt 不会
-            current_sys = str(getattr(request, "system_prompt", "") or "")
-            if "[claude_advisory_context]" not in current_sys:
-                request.system_prompt = f"{current_sys}\n[claude_advisory_context]\n{text}".strip()
-            else:
-                request.system_prompt = f"{current_sys}\n{text}".strip()
-            if budget:
-                budget.injected.append({"source": source})
-            return True
-        # Normal mode: 也注入到 system_prompt 避免历史污染
-        current_sys = str(getattr(request, "system_prompt", "") or "")
-        request.system_prompt = f"{current_sys}\n{text}".strip()
-        if budget:
-            budget.injected.append({"source": source})
-        return True
-
-    def _normalize_claude_request_payload(
-        self, request: Any, budget: Any | None = None
-    ) -> None:
-        """规范化请求格式以兼容 Claude/哈基德模式。
-
-        处理内容：
-          - 将 extra_user_content_parts 展平到 prompt
-          - 将 system role 的 contexts 合并到 system_prompt
-          - 清理非标准 role 的 messages
-          - 哈基德模式下裁剪 Sylanne 工具
-        """
-        hajide = bool(self._p._config.get("sylanne_alpha_hajide_compat_mode"))
-
-        # extra_user_content_parts: 仅哈基德模式展平到 system_prompt
-        # 普通模式保留原样，尊重其他插件的持久化语义
-        if hajide:
-            extra = getattr(request, "extra_user_content_parts", None)
-            if isinstance(extra, list) and extra:
-                texts = []
-                for part in extra:
-                    if hasattr(part, "text"):
-                        texts.append(str(part.text))
-                    elif isinstance(part, dict) and "text" in part:
-                        texts.append(str(part["text"]))
-                if texts:
-                    current = str(getattr(request, "system_prompt", "") or "")
-                    request.system_prompt = f"{current}\n" + "\n".join(texts) if current else "\n".join(texts)
-                request.extra_user_content_parts = []
-
-            # contents: 仅哈基德模式展平
-            contents = getattr(request, "contents", None)
-            if isinstance(contents, list) and contents:
-                texts = []
-                for item in contents:
-                    if isinstance(item, dict) and "text" in item:
-                        texts.append(str(item["text"]))
-                    elif hasattr(item, "text"):
-                        texts.append(str(item.text))
-                if texts:
-                    current = str(getattr(request, "system_prompt", "") or "")
-                    request.system_prompt = f"{current}\n" + "\n".join(texts) if current else "\n".join(texts)
-                request.contents = []
-
-        # Flatten contexts with system role into system_prompt
-        contexts = getattr(request, "contexts", None)
-        if isinstance(contexts, list) and contexts:
-            system_parts = []
-            remaining = []
-            for ctx in contexts:
-                role = (
-                    ctx.get("role", "")
-                    if isinstance(ctx, dict)
-                    else str(getattr(ctx, "role", ""))
-                )
-                content = (
-                    ctx.get("content", "")
-                    if isinstance(ctx, dict)
-                    else str(getattr(ctx, "content", ""))
-                )
-                if role == "system":
-                    system_parts.append(content)
-                elif hajide and role in ("tool", "function"):
-                    continue
-                elif hajide and role == "assistant" and (
-                    ctx.get("tool_calls")
-                    if isinstance(ctx, dict)
-                    else getattr(ctx, "tool_calls", None)
-                ):
-                    # 对称处理：hajide 下删除 tool 响应消息时，同时移除带 tool_calls
-                    # 的 assistant，否则会留下孤儿 tool_calls 触发严格 provider 400
-                    # （与下方 messages 清洗 :760-761 对齐，fixes #18）
-                    continue
-                else:
-                    remaining.append(ctx)
-            if system_parts:
-                sys_prompt = str(getattr(request, "system_prompt", "") or "")
-                request.system_prompt = (
-                    f"{sys_prompt}\n" + "\n".join(system_parts)
-                    if sys_prompt
-                    else "\n".join(system_parts)
-                )
-            request.contexts = remaining
-
-        # Sanitize messages
-        messages = getattr(request, "messages", None)
-        if isinstance(messages, list) and messages:
-            clean = []
-            for msg in messages:
-                if isinstance(msg, dict):
-                    role = msg.get("role", "")
-                    content = msg.get("content", "")
-                    if hajide:
-                        # In hajide mode, skip tool/function messages and assistant with tool_calls
-                        if role in ("tool", "function"):
-                            continue
-                        if role == "assistant" and "tool_calls" in msg:
-                            continue
-                    # Convert system to system_prompt
-                    if role == "system":
-                        sys_prompt = str(getattr(request, "system_prompt", "") or "")
-                        request.system_prompt = (
-                            f"{sys_prompt}\n{content}" if sys_prompt else content
-                        )
-                        continue
-                    # Normalize content
-                    if isinstance(content, list):
-                        text_parts = [
-                            str(p.get("text", ""))
-                            if isinstance(p, dict)
-                            else str(getattr(p, "text", ""))
-                            for p in content
-                        ]
-                        content = "\n".join(text_parts)
-                    # Map non-standard roles to user
-                    mapped_role = role if role in ("user", "assistant") else "user"
-                    clean.append({"role": mapped_role, "content": content})
-                elif hasattr(msg, "role"):
-                    role = str(getattr(msg, "role", ""))
-                    content = getattr(msg, "content", "")
-                    if hajide and role in ("tool", "function"):
-                        continue
-                    if isinstance(content, list):
-                        text_parts = [
-                            str(p.get("text", ""))
-                            if isinstance(p, dict)
-                            else str(getattr(p, "text", ""))
-                            for p in content
-                        ]
-                        content = "\n".join(text_parts)
-                    mapped_role = role if role in ("user", "assistant") else "user"
-                    clean.append({"role": mapped_role, "content": str(content)})
-            request.messages = clean
-
-        # Hajide mode: prune sylanne tools
-        if hajide:
-            self._prune_hajide_tools(request, budget)
-
-    def _prune_hajide_tools(self, request: Any, budget: Any | None = None) -> None:
-        """哈基德兼容模式：从请求中移除 Sylanne 专用工具。
-
-        防止 Claude 模型尝试调用不存在的 Sylanne 内部工具。
-        """
-        _SYLANNE_TOOL_PREFIXES = (
-            "query_agent_state",
-            "get_bot_emotion",
-            "get_bot_integrated",
-            "get_bot_humanlike",
-            "get_bot_lifelike",
-            "get_bot_personality",
-        )
-
-        def _is_sylanne_tool(name: str) -> bool:
-            return any(name.startswith(prefix) for prefix in _SYLANNE_TOOL_PREFIXES)
-
-        # Prune tools list
-        tools = getattr(request, "tools", None)
-        if isinstance(tools, list):
-            request.tools = [
-                t
-                for t in tools
-                if not (
-                    isinstance(t, dict)
-                    and _is_sylanne_tool(t.get("function", {}).get("name", ""))
-                )
-            ]
-            if budget:
-                budget.skipped.append(
-                    {"source": "sylanne_llm_tools", "reason": "hajide_compat"}
-                )
-
-        # Prune functions list
-        functions = getattr(request, "functions", None)
-        if isinstance(functions, list):
-            request.functions = [
-                f
-                for f in functions
-                if not (isinstance(f, dict) and _is_sylanne_tool(f.get("name", "")))
-            ]
-
-        # Reset tool_choice if it pointed to a pruned tool
-        tool_choice = getattr(request, "tool_choice", None)
-        if isinstance(tool_choice, dict):
-            name = (
-                tool_choice.get("function", {}).get("name", "")
-                if isinstance(tool_choice.get("function"), dict)
-                else ""
-            )
-            if _is_sylanne_tool(name):
-                request.tool_choice = "auto"
-        elif tool_choice == "required":
-            request.tool_choice = "auto"
-
-        # Reset function_call
-        function_call = getattr(request, "function_call", None)
-        if isinstance(function_call, dict):
-            request.function_call = "auto"
-
-        # Handle nested params.extra_body
-        params = getattr(request, "params", None)
-        if isinstance(params, dict) and "extra_body" in params:
-            extra_body = params["extra_body"]
-            if isinstance(extra_body, dict):
-                if "tools" in extra_body and isinstance(extra_body["tools"], list):
-                    extra_body["tools"] = [
-                        t
-                        for t in extra_body["tools"]
-                        if not (
-                            isinstance(t, dict)
-                            and _is_sylanne_tool(t.get("function", {}).get("name", ""))
-                        )
-                    ]
-                if "tool_choice" in extra_body and isinstance(
-                    extra_body["tool_choice"], dict
-                ):
-                    extra_body["tool_choice"] = "auto"
-
-        # Handle metadata.tool_choice
-        metadata = getattr(request, "metadata", None)
-        if isinstance(metadata, dict) and "tool_choice" in metadata:
-            if isinstance(metadata["tool_choice"], dict):
-                metadata["tool_choice"] = "auto"
-
-        # Handle provider_settings.function_call
-        provider_settings = getattr(request, "provider_settings", None)
-        if isinstance(provider_settings, dict) and "function_call" in provider_settings:
-            if isinstance(provider_settings["function_call"], dict):
-                provider_settings["function_call"] = "auto"
-
-        # Disable func_tool
-        func_tool = getattr(request, "func_tool", None)
-        if func_tool is not None:
-            # Check if it has sylanne tools
-            names = []
-            if hasattr(func_tool, "names"):
-                names = func_tool.names()
-            elif hasattr(func_tool, "funcs") and isinstance(func_tool.funcs, dict):
-                names = list(func_tool.funcs.keys())
-            if names and any(_is_sylanne_tool(n) for n in names):
-                request.func_tool = None
-                if hasattr(request, "tool_choice"):
-                    request.tool_choice = "auto"
-                if budget:
-                    budget.skipped.append(
-                        {"source": "sylanne_func_tool", "reason": "hajide_compat"}
-                    )
 
     # ------------------------------------------------------------------
     # Text extraction from event

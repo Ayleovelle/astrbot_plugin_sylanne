@@ -33,6 +33,14 @@ from urllib.parse import parse_qs, urlparse
 
 from pathlib import Path
 
+from sylanne_alpha.webui_routes import (
+    _comp_boundary_dict,
+    _comp_gate_dict,
+    _comp_route_stats,
+    _webui_session_items,
+    build_model_routing_payload,
+)
+
 
 def _get_plugin_version() -> str:
     """从 metadata.yaml 读取版本号（缓存结果）。"""
@@ -93,8 +101,8 @@ _csrf_token: str = ""
 # 线程安全锁：stdlib HTTP server 的多线程 handler 访问插件状态时使用
 _plugin_access_lock = threading.Lock()
 
-# S1/S2: 敏感配置键保护
-_SENSITIVE_KEYS = frozenset({"token", "password", "secret", "api_key", "access_token", "auth_token", "bearer", "credential"})
+# S1/S2: 敏感配置键保护（子串匹配；"cookie" 覆盖 sylanne_alpha_qzone_cookie 登录凭据）
+_SENSITIVE_KEYS = frozenset({"token", "password", "secret", "api_key", "access_token", "auth_token", "bearer", "credential", "cookie"})
 
 
 def _is_sensitive_key(key: str) -> bool:
@@ -561,24 +569,7 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
 
     async def handle_settings_get(request: web.Request) -> web.Response:
         current_plugin = _plugin(plugin)
-        schema = _load_schema(current_plugin)
-        config = dict(getattr(current_plugin, "_config", {}) or {})
-        # Ensure every schema key is present in values (use default if unconfigured)
-        # 敏感字段(token/密钥等)的值掩码，避免明文回传给前端泄露
-        values = {}
-        for key, meta in schema.items():
-            raw = config.get(key, meta.get("default"))
-            if _is_sensitive_key(key) and raw:
-                values[key] = "********"
-            else:
-                values[key] = raw
-        return web.json_response(
-            {
-                "schema": schema,
-                "values": values,
-                "providers": await _provider_items(current_plugin),
-            }
-        )
+        return web.json_response(await _settings_payload(current_plugin))
 
     async def handle_settings_post(request: web.Request) -> web.Response:
         try:
@@ -1929,18 +1920,7 @@ def start_webui_thread_server(
                 elif path == "/api/settings":
                     with _plugin_access_lock:
                         current_plugin = _plugin(plugin)
-                        schema = _load_schema(current_plugin)
-                        config = dict(getattr(current_plugin, "_config", {}) or {})
-                        values = {}
-                        for key, meta in schema.items():
-                            raw = config.get(key, meta.get("default"))
-                            if _is_sensitive_key(key) and raw:
-                                values[key] = "********"
-                            else:
-                                values[key] = raw
-                    self._send_json(
-                        {"schema": schema, "values": values, "providers": []}
-                    )
+                    self._send_json(asyncio.run(_settings_payload(current_plugin)))
                 elif path == "/api/computation_logs":
                     _last_diag_request = time.time()
                     with _plugin_access_lock:
@@ -2553,10 +2533,13 @@ async def _provider_items(plugin: Any) -> list[dict[str, Any]]:
             }
         )
 
+    # Dedicated registries must win deduplication.  AstrBot's generic registry
+    # may include embedding providers; visiting it first would mislabel them as
+    # text models and make the compact embedding selector appear empty.
     for method_name, provider_type in (
-        ("get_all_providers", "llm"),
-        ("get_all_llm_providers", "llm"),
         ("get_all_embedding_providers", "embedding"),
+        ("get_all_llm_providers", "llm"),
+        ("get_all_providers", "llm"),
     ):
         getter = getattr(context, method_name, None)
         if not callable(getter):
@@ -2573,6 +2556,24 @@ async def _provider_items(plugin: Any) -> list[dict[str, Any]]:
         for provider in iterable:
             add(provider, provider_type)
     return items
+
+
+async def _settings_payload(plugin: Any) -> dict[str, Any]:
+    """Build the identical settings response for aiohttp and stdlib modes."""
+
+    schema = _load_schema(plugin)
+    config = dict(getattr(plugin, "_config", {}) or {})
+    values: dict[str, Any] = {}
+    for key, meta in schema.items():
+        raw = config.get(key, meta.get("default"))
+        values[key] = "********" if _is_sensitive_key(key) and raw else raw
+    providers = await _provider_items(plugin)
+    return {
+        "schema": schema,
+        "values": values,
+        "providers": providers,
+        "model_routing": build_model_routing_payload(config, schema, providers),
+    }
 
 
 def _known_sessions(plugin: Any, *, requested: str = "") -> list[str]:
@@ -3194,9 +3195,16 @@ def _frontend_spine_layers(timing_raw: dict, comp_diag: dict) -> list[dict[str, 
         stats = timing_raw.get(internal_key, timing_raw.get(lid, {}))
         if not isinstance(stats, dict):
             stats = {}
-        avg_ms = round(stats.get("mean_ns", stats.get("p50_ns", 0)) / 1_000_000, 1)
-        p50_ms = round(stats.get("p50_ns", 0) / 1_000_000, 1)
-        p99_ms = round(stats.get("p99_ns", stats.get("p95_ns", 0)) / 1_000_000, 1)
+        avg_ms = round(
+            stats.get("mean_ns", stats.get("p50_ns", 0)) / 1_000_000, 6
+        )
+        p50_ms = round(stats.get("p50_ns", 0) / 1_000_000, 6)
+        p95_ms = round(
+            stats.get("p95_ns", stats.get("p99_ns", 0)) / 1_000_000, 6
+        )
+        p99_ms = round(
+            stats.get("p99_ns", stats.get("p95_ns", 0)) / 1_000_000, 6
+        )
         count = int(stats.get("count", 0))
         result.append(
             {
@@ -3205,6 +3213,7 @@ def _frontend_spine_layers(timing_raw: dict, comp_diag: dict) -> list[dict[str, 
                 "status": "active" if count > 0 else "idle",
                 "avg": avg_ms,
                 "p50": p50_ms,
+                "p95": p95_ms,
                 "p99": p99_ms,
                 "count": count,
                 "desc": desc,
@@ -3223,12 +3232,13 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
     all_sessions = _known_sessions(plugin, requested=session)
     if not all_sessions:
         return {
-            "schema_version": "sylanne.webui.state.v1",
+            "schema_version": "sylanne.webui.state.v2",
             "runtime": _runtime_info(plugin),
             "current_session": "default",
             "emotion": {},
             "gate": {},
-            "route_stats": {"fast": 0, "normal": 0, "full": 0, "skip": 0},
+            "route_stats": {"resonance": 0, "skip": 0},
+            "route_distribution": {"RESONANCE": 0, "SKIP": 0},
             "boundary": {},
             "expression": {},
             "timing": {},
@@ -3245,7 +3255,7 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
 
     # 如果没有指定 session，自动选择最活跃的（tick_count 最高的 host）
     # 避免选到从未处理过消息的 "default" 空 host
-    if not session or session not in all_sessions:
+    if not session or session == "default" or session not in all_sessions:
         best_key = all_sessions[0]
         best_ticks = -1
         for sk in all_sessions:
@@ -3267,28 +3277,16 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
         if host is None:
             raise KeyError(session_key)
         comp = host.kernel.computation
-        gate = (lambda g: g.to_dict() if g is not None and hasattr(g, "to_dict") else {})(
-            getattr(comp, "gate", None) or getattr(comp, "_gate", None)
-        )
+        gate = _comp_gate_dict(comp)
         # Route stats from computation spine counters
         comp_diag = comp.diagnostics() if hasattr(comp, "diagnostics") else {}
-        route_counts = (
-            comp_diag.get("route_counts", {}) if isinstance(comp_diag, dict) else {}
-        )
-        route_stats = {
-            "fast": int(route_counts.get("fast", 0)),
-            "normal": int(route_counts.get("normal", 0)),
-            "full": int(route_counts.get("full", 0)),
-            "skip": int(route_counts.get("skip", 0)),
-        }
+        route_stats, route_distribution = _comp_route_stats(comp)
         comp_result = getattr(host.kernel, "_last_computation_result", None) or {}
         layers = dict(comp_result.get("layers", {}))
         if not isinstance(layers, dict):
             layers = {}
         # Boundary: map internal field names to frontend-expected names
-        boundary_raw = (lambda b: b.to_dict() if b is not None and hasattr(b, "to_dict") else {})(
-            getattr(comp, "boundary", None) or getattr(comp, "_boundary", None)
-        )
+        boundary_raw = _comp_boundary_dict(comp)
         boundary = {
             "integrity": boundary_raw.get("boundary_integrity", 1.0),
             "entropy": boundary_raw.get("internal_entropy", 0.0),
@@ -3333,7 +3331,10 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
                 }
             )
         # Ensure L1_HDC layer has all fields from computation result + sample_bits
-        sample_bits = comp.last_hdc_sample if hasattr(comp, "last_hdc_sample") else []
+        sample_bits = list(
+            (comp.last_hdc_sample if hasattr(comp, "last_hdc_sample") else None)
+            or []
+        )
         comp_l1 = comp_result.get("layers", {}).get("L1_HDC", {})
         if comp_l1:
             layers["L1_HDC"] = {**layers.get("L1_HDC", {}), **comp_l1}
@@ -3397,19 +3398,19 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
         except Exception:
             pass
         return {
-            "schema_version": "sylanne.webui.state.v1",
+            "schema_version": "sylanne.webui.state.v2",
             "tick_count": comp._tick_count,
             "runtime": _runtime_info(plugin),
             "current_session": session_key,
             "emotion": {
                 **_EMOTION_DEFAULTS,
                 **comp.engine.observe(),
-                **_assessment_overlay(comp._last_assessment),
+                **_assessment_overlay(getattr(comp, "_last_assessment", None)),
             },
             "gate": {
                 **gate,
                 "history": gate.get("surprise_history", [])[-60:],
-                "route": comp_result.get("route", "NORMAL"),
+                "route": comp_result.get("route", "RESONANCE"),
             },
             "route_stats": route_stats,
             "boundary": boundary,
@@ -3441,30 +3442,27 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
             },
             "theme": {"base": "#F3A7C8", "source": "emotion", "mode": "soft"},
             "feedback": feedback,
-            "sessions": all_sessions,
+            "sessions": _webui_session_items(plugin, all_sessions),
             "social_field": social_field_state,
             "life_simulation": getattr(plugin, "_life_simulator", None)
             and plugin._life_simulator.to_dict()
             or {},
             # --- 新前端兼容字段 ---
             "session_id": session_key,
-            "route_distribution": {
-                "FAST": route_stats["fast"],
-                "NORMAL": route_stats["normal"],
-                "FULL": route_stats["full"],
-                "SKIP": route_stats["skip"],
-            },
+            "route_distribution": route_distribution,
             "personality": _frontend_personality(personality),
             "spine_layers": _frontend_spine_layers(timing_raw, comp_diag),
         }
     except Exception:
+        logger.exception("Sylanne WebUI state build failed: session=%s", session_key)
         return {
-            "schema_version": "sylanne.webui.state.v1",
+            "schema_version": "sylanne.webui.state.v2",
             "runtime": _runtime_info(plugin),
             "current_session": session_key,
             "emotion": {},
             "gate": {},
-            "route_stats": {"fast": 0, "normal": 0, "full": 0, "skip": 0},
+            "route_stats": {"resonance": 0, "skip": 0},
+            "route_distribution": {"RESONANCE": 0, "SKIP": 0},
             "boundary": {},
             "expression": {},
             "timing": {},
@@ -3473,7 +3471,7 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
             "persona": {},
             "theme": {"base": "#F3A7C8", "source": "emotion", "mode": "soft"},
             "feedback": {"accepted": 0, "ignored": 0, "rejected": 0},
-            "sessions": all_sessions,
+            "sessions": _webui_session_items(plugin, all_sessions),
             "life_simulation": {},
         }
 
@@ -4007,7 +4005,9 @@ class WebUILifecycle:
         webui_host = str(self._p._cfg("sylanne_webui_host", "127.0.0.1") or "127.0.0.1")
         webui_port = self._p._cfg_int("sylanne_webui_port", 2718)
         token = _ensure_token(self._p._config or {})
-        self._p.logger.info(f"Sylanne WebUI token: {token}")
+        # 不把 bearer token 明文写进日志(日志常被收集/转发/共享=凭据泄露);token 已由
+        # _ensure_token 持久化进配置,运维需要时从配置取。这里只记"已就绪 + 长度"。
+        self._p.logger.info("Sylanne WebUI auth token ready (redacted, %d chars)", len(token))
         try:
             start_webui_background(self._p, host=webui_host, port=webui_port)
             self._p.logger.info(

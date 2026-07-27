@@ -9,6 +9,27 @@ from typing import Any
 REALTIME_PLAN_SCHEMA_VERSION = "sylanne.alpha.realtime_plan.v1"
 
 
+def realtime_flags(cfg: dict[str, Any] | None) -> tuple[bool, bool]:
+    """即时聊天两开关的单一读取入口：(realtime_enabled, intercept)。
+
+    次要修复②（realtime 完整重做设计）：此前请求侧（llm_request_pipeline）只认
+    正规键 sylanne_alpha_realtime_chat_enabled / sylanne_alpha_realtime_intercept_
+    llm_response，响应侧（llm_response_pipeline）额外兼容旧别名
+    enable_realtime_chat / realtime_chat_intercept_llm_response——两侧口径不一致，
+    若只设别名键，请求侧会误判两开关都关（M4a 请求侧强制关流因此漏触发）。
+    现在两侧统一走这一个函数，别名与正规键任一为真即算开启。
+    """
+    _cfg = cfg or {}
+    enabled = bool(
+        _cfg.get("sylanne_alpha_realtime_chat_enabled") or _cfg.get("enable_realtime_chat")
+    )
+    intercept = bool(
+        _cfg.get("sylanne_alpha_realtime_intercept_llm_response")
+        or _cfg.get("realtime_chat_intercept_llm_response")
+    )
+    return enabled, intercept
+
+
 def strip_draft_blocks(text: str) -> str:
     cleaned = str(text or "")
     for tag in ("draft_notes", "thinking", "think"):
@@ -78,6 +99,14 @@ _DISTRACTED_PAUSE_PROBABILITY = 0.05
 _DISTRACTED_PAUSE_MIN = 5.0
 _DISTRACTED_PAUSE_MAX = 9.0
 
+# Model-authored pause classes describe intent only; local code merely maps that
+# intent to a bounded delivery delay.  It never decides where a semantic break is.
+_SEMANTIC_PAUSE_RANGES: dict[str, tuple[float, float]] = {
+    "soft": (0.45, 1.25),
+    "normal": (1.25, 2.75),
+    "deep": (2.75, 4.8),
+}
+
 
 def _cap_parts(parts: list[str], *, max_parts: int) -> list[str]:
     """把分段数压到 max_parts 以内：保留前 max_parts-1 段，其余合并成最后一段。"""
@@ -85,10 +114,27 @@ def _cap_parts(parts: list[str], *, max_parts: int) -> list[str]:
         return parts
     head = parts[: max_parts - 1]
     tail = [p for p in parts[max_parts - 1 :] if p]
-    merged_tail = "\n".join(tail).strip()
+    # Parts are exact slices of the clean completion.  Adding a newline here
+    # would mutate both visible output and persisted history.
+    merged_tail = "".join(tail)
     if merged_tail:
         head.append(merged_tail)
     return head
+
+
+def _trim_semantic_delivery_boundaries(parts: list[str]) -> list[str]:
+    """Remove transport-only whitespace around separately sent semantic beats.
+
+    The parser keeps every authored character so persisted history remains
+    lossless.  Once those slices become separate IM messages, however, leading
+    or trailing line breaks render as empty rows inside a bubble.  Trim only
+    multi-part semantic delivery; ordinary and oversized single-message text
+    keeps its exact bytes.
+    """
+
+    if len(parts) <= 1:
+        return parts
+    return [part.strip() for part in parts]
 
 
 def realtime_plan(
@@ -100,11 +146,35 @@ def realtime_plan(
     max_parts: int = _DEFAULT_MAX_PARTS,
     rng: random.Random | None = None,
     first_delay: float = 0.0,
+    semantic_parts: Any | None = None,
+    oversize_safety_chars: int = 1200,
 ) -> dict[str, Any]:
     raw = str(text or "")
-    visible = strip_draft_blocks(raw)
-    parts = _split_text(visible, max_part_chars=max_part_chars)
+    visible = (
+        strip_draft_blocks(raw)
+        if re.search(r"(?is)</?(?:draft_notes|thinking|think)\b", raw)
+        else raw
+    )
+    semantic = _coerce_semantic_parts(semantic_parts, expected_text=visible)
+    if semantic is not None:
+        parts, pause_classes = semantic
+        segmentation_source = "model_semantic_beats"
+    elif visible and len(visible) > max(0, int(oversize_safety_chars)):
+        parts = _split_text_preserving(visible, max_part_chars=max_part_chars)
+        pause_classes = None
+        segmentation_source = "oversize_safety"
+    else:
+        parts = [visible] if visible else []
+        pause_classes = None
+        segmentation_source = "single_fallback"
     capped = _cap_parts(parts, max_parts=max_parts)
+    if pause_classes is not None and len(capped) != len(parts):
+        pause_classes = pause_classes[: len(capped)]
+    delivery_parts = (
+        _trim_semantic_delivery_boundaries(capped)
+        if semantic is not None
+        else capped
+    )
     return {
         "schema_version": REALTIME_PLAN_SCHEMA_VERSION,
         "kind": "realtime_chat_plan",
@@ -113,12 +183,14 @@ def realtime_plan(
         "max_parts": max_parts,
         "capped": len(capped) != len(parts),
         "uncapped_count": len(parts),
-        "message_count": len(capped),
+        "message_count": len(delivery_parts),
+        "segmentation_source": segmentation_source,
         "message_parts": _message_parts(
-            capped,
+            delivery_parts,
             chars_per_second=chars_per_second,
             rng=rng,
             first_delay=first_delay,
+            pause_classes=pause_classes,
         ),
         "source_text_chars": len(raw),
     }
@@ -130,6 +202,7 @@ def _message_parts(
     chars_per_second: float = 7.5,
     rng: random.Random | None = None,
     first_delay: float = 0.0,
+    pause_classes: list[str | None] | None = None,
 ) -> list[dict[str, Any]]:
     picker = rng if rng is not None else random
     raw_delays = [
@@ -143,7 +216,11 @@ def _message_parts(
     # 走神：整条回复只掷一次骰子（不是每段掷），命中则挑一个非首段（index>=1）
     # 走神；无非首段（单段回复）时天然掷不到。
     distracted_index: int | None = None
-    if len(parts) > 1 and picker.random() < _DISTRACTED_PAUSE_PROBABILITY:
+    if (
+        pause_classes is None
+        and len(parts) > 1
+        and picker.random() < _DISTRACTED_PAUSE_PROBABILITY
+    ):
         distracted_index = picker.randrange(1, len(parts))
 
     message_parts: list[dict[str, Any]] = []
@@ -153,6 +230,10 @@ def _message_parts(
             # 隔久重逢都比裸 0 更真实），不再走原本恒为 0 的首段起手式。不吃抖动/
             # 走神——那两个效应是段内打字节奏，首段前的这段是完全不同的"读"阶段。
             final_delay = first_delay
+        elif pause_classes is not None and index > 0:
+            pause_class = pause_classes[index]
+            low, high = _SEMANTIC_PAUSE_RANGES[pause_class or "normal"]
+            final_delay = picker.uniform(low, high)
         elif index == distracted_index:
             final_delay = picker.uniform(_DISTRACTED_PAUSE_MIN, _DISTRACTED_PAUSE_MAX)
         else:
@@ -166,6 +247,71 @@ def _message_parts(
             }
         )
     return message_parts
+
+
+def _coerce_semantic_parts(
+    semantic_parts: Any | None,
+    *,
+    expected_text: str,
+) -> tuple[list[str], list[str | None]] | None:
+    """Validate parser output without inferring or repairing semantic boundaries."""
+
+    if semantic_parts is None or isinstance(semantic_parts, (str, bytes, dict)):
+        return None
+    try:
+        candidates = list(semantic_parts)
+    except TypeError:
+        return None
+    if not candidates:
+        return None
+
+    texts: list[str] = []
+    pauses: list[str | None] = []
+    for index, item in enumerate(candidates):
+        if isinstance(item, dict):
+            part_text = item.get("text")
+            pause = item.get("pause_before")
+        else:
+            part_text = getattr(item, "text", None)
+            pause = getattr(item, "pause_before", None)
+        if not isinstance(part_text, str) or not part_text:
+            return None
+        if hasattr(pause, "value"):
+            pause = getattr(pause, "value")
+        if pause is not None:
+            pause = str(pause).strip().lower()
+        if index == 0:
+            if pause not in (None, ""):
+                return None
+            pause = None
+        elif pause not in _SEMANTIC_PAUSE_RANGES:
+            return None
+        texts.append(part_text)
+        pauses.append(pause)
+    if "".join(texts) != expected_text:
+        return None
+    return texts, pauses
+
+
+def _split_text_preserving(text: str, *, max_part_chars: int) -> list[str]:
+    """Deterministic oversized anti-flood splitter that conserves every character."""
+
+    if not text:
+        return []
+    limit = max(1, int(max_part_chars))
+    remaining = text
+    parts: list[str] = []
+    while len(remaining) > limit:
+        split_at = _split_index(remaining, max_part_chars=limit)
+        if _would_split_protected_ascii_token(remaining, split_at):
+            while split_at < len(remaining) and _is_ascii_token_char(remaining[split_at]):
+                split_at += 1
+        split_at = min(len(remaining), max(1, split_at))
+        parts.append(remaining[:split_at])
+        remaining = remaining[split_at:]
+    if remaining:
+        parts.append(remaining)
+    return parts
 
 
 def _previous_and_current(parts: list[str]) -> list[tuple[str, str]]:

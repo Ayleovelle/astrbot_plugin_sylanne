@@ -1,15 +1,23 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { apiFetch, setToken, clearToken, getToken, ApiError } from '../api/client'
+import {
+  apiFetch,
+  setToken,
+  clearToken,
+  getToken,
+  ApiError,
+  usesHostAuthentication,
+} from '../api/client'
 
 export type AuthStatus = 'anon' | 'authing' | 'ok' | 'error'
 
 export const useAuthStore = defineStore('auth', () => {
-  const status = ref<AuthStatus>(getToken() ? 'ok' : 'anon')
+  const status = ref<AuthStatus>(usesHostAuthentication() || getToken() ? 'ok' : 'anon')
   const error = ref('')
 
   // Validate a token by hitting the authenticated /api/state (matches old verifyToken).
   async function login(token: string): Promise<boolean> {
+    if (usesHostAuthentication()) return verifyExisting()
     status.value = 'authing'
     error.value = ''
     setToken(token)
@@ -29,7 +37,8 @@ export const useAuthStore = defineStore('auth', () => {
   // Only a real 401 invalidates the token; a transient network/5xx failure
   // must NOT log the user out (the dashboard surfaces its own offline state).
   async function verifyExisting(): Promise<boolean> {
-    if (!getToken()) {
+    const hostAuth = usesHostAuthentication()
+    if (!hostAuth && !getToken()) {
       status.value = 'anon'
       return false
     }
@@ -38,6 +47,11 @@ export const useAuthStore = defineStore('auth', () => {
       status.value = 'ok'
       return true
     } catch (e) {
+      if (hostAuth) {
+        status.value = 'error'
+        error.value = e instanceof Error ? e.message : 'host auth failed'
+        return false
+      }
       if (e instanceof ApiError && e.status === 401) {
         // apiFetch already cleared the token on 401; mirror the state here.
         clearToken()
@@ -50,6 +64,11 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   function logout(): void {
+    if (usesHostAuthentication()) {
+      status.value = 'ok'
+      error.value = ''
+      return
+    }
     clearToken()
     status.value = 'anon'
     error.value = ''

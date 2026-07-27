@@ -1,47 +1,165 @@
 """v1 逐轮认知全面退役测试（2026-06-12 拍板：推翻重构，单脑运行）。
 
 退役语义：
-- sylanne_enable_v2core 默认【开】（缺省键=开）——v2core 是唯一认知内核。
-- v1 逐轮认知已退役并删除：旧 9-agent SelfCore 的 PRE/POST（请求管线）与
-  RESPONSE_POST（回复管线）调用点已从源码移除；AssessorAgent 逐轮 LLM 评估随之消失；
+- v2core 是无条件运行的唯一认知内核，不再暴露运行时关闭开关。
+- v1 逐轮认知已退役并删除：旧响应式 SelfCore 请求/回复阶段调用点已从源码移除；
+  AssessorAgent 逐轮 LLM 评估随之消失；
   assessment 唯一来源是 v2core 评价（不含 intent 键 → SDK intent=="撒娇"
   硬编码路径断粮）。
 - 保留范围：自主生命基础设施（AutonomyScheduler 作息演化/深睡巩固/反思/
   进化档案）不属逐轮认知，照常运行。
-- flag 显式置 false = 部署级紧急回退（绞杀式安全口，非缝补）。
 """
 
 from __future__ import annotations
 
+import importlib.util
 import inspect
+import json
+import logging
+from pathlib import Path
 
-from sylanne_alpha.v2core.integration import v2core_enabled
-
-
-class _P:
-    def __init__(self, cfg: dict | None = None) -> None:
-        self._config = cfg if cfg is not None else {}
-
-
-# ---- 默认语义 ----
-
-def test_v2core_default_on() -> None:
-    """缺省键 = 开（v2core 是唯一认知内核，不再是灰度旁路）。"""
-    assert v2core_enabled(_P({})) is True
-    assert v2core_enabled(_P(None)) is True
-
-
-def test_explicit_false_is_emergency_rollback() -> None:
-    assert v2core_enabled(_P({"sylanne_enable_v2core": False})) is False
-
-
-def test_schema_default_flipped() -> None:
-    """部署 schema 的默认值同步为 true（真退役，不是只改代码缺省）。"""
-    import json
-    from pathlib import Path
-
+def test_v2core_switch_is_absent_from_schema() -> None:
     schema = json.loads(Path("_conf_schema.json").read_text(encoding="utf-8"))
-    assert schema["sylanne_enable_v2core"]["default"] is True
+    assert "sylanne_enable_v2core" not in schema
+
+
+def test_v2core_integration_has_no_runtime_disable_helper() -> None:
+    import sylanne_alpha.v2core.integration as integration
+
+    assert not hasattr(integration, "v2core_enabled")
+    assert "sylanne_enable_v2core" not in inspect.getsource(integration)
+
+
+def test_v2_speak_continues_to_delivery_without_v1_fallback_language() -> None:
+    import sylanne_alpha.v2core.integration as integration
+
+    source = inspect.getsource(integration)
+    assert "回退到 v1" not in source
+    assert "legacy 的嘴" not in source
+    assert "delivery continuation" in source
+
+
+def test_main_routes_unsuppressed_reply_to_delivery_once() -> None:
+    from main import EmotionalStatePlugin
+
+    source = inspect.getsource(EmotionalStatePlugin._on_llm_response_inner)
+    assert "suppress_delivery = await apply_v2core_response" in source
+    assert "if not suppress_delivery:" in source
+    assert source.count(
+        "await self._llm_response_pipeline._on_llm_response_inner(event, response)"
+    ) == 1
+
+
+def test_dead_v1_migration_modules_are_absent() -> None:
+    assert importlib.util.find_spec("sylanne_alpha.v2core.migration") is None
+    assert importlib.util.find_spec("sylanne_alpha.v2core.session_store") is None
+
+
+def test_v2core_package_does_not_export_deleted_scaffolding() -> None:
+    import sylanne_alpha.v2core as v2core
+
+    assert "migration" not in v2core.__all__
+    assert "session_store" not in v2core.__all__
+
+
+def test_engine_adapter_has_no_unused_facade() -> None:
+    import sylanne_alpha.engine_adapter as adapter
+
+    assert not hasattr(adapter, "EngineFacade")
+    assert adapter.derive_should_send({"action": "reach_out"}, {"allowed": True})
+
+
+def test_legacy_snapshot_import_api_is_absent() -> None:
+    import sylanne_alpha
+    from main import EmotionalStatePlugin
+
+    assert importlib.util.find_spec(
+        "sylanne_alpha._engine.sylanne_core.compute.importer"
+    ) is None
+    assert not hasattr(sylanne_alpha, "import_legacy_body")
+    assert not hasattr(EmotionalStatePlugin, "import_sylanne_legacy")
+
+
+def test_current_runtime_has_no_legacy_constructor_surface() -> None:
+    from sylanne_alpha._engine.sylanne_core.compute.host import SylanneAlphaHost
+    from sylanne_alpha._engine.sylanne_core.compute.kernel import AlphaKernel
+    from sylanne_alpha._engine.sylanne_core.compute.runtime import AlphaRuntime
+
+    assert "legacy" not in inspect.signature(AlphaKernel.boot).parameters
+    assert "legacy" not in inspect.signature(AlphaRuntime.load).parameters
+    assert "legacy" not in inspect.signature(SylanneAlphaHost).parameters
+
+
+def test_runtime_restores_only_current_schema(tmp_path: Path) -> None:
+    from sylanne_alpha._engine.sylanne_core.compute.body import SCHEMA_VERSION
+    from sylanne_alpha._engine.sylanne_core.compute.kernel import AlphaKernel
+    from sylanne_alpha._engine.sylanne_core.compute.runtime import AlphaRuntime
+
+    runtime = AlphaRuntime(tmp_path)
+    current = AlphaKernel.boot("s")
+    current.turns = 7
+    current.body.temperature.warmth = 0.73
+    runtime.save(current)
+
+    restored = runtime.load("s")
+    assert restored.snapshot()["schema_version"] == SCHEMA_VERSION
+    assert restored.turns == 7
+    assert restored.body.temperature.warmth == 0.73
+
+
+def test_runtime_ignores_schema_mismatch_without_migrating(
+    tmp_path: Path, caplog
+) -> None:
+    from sylanne_alpha._engine.sylanne_core.compute.runtime import AlphaRuntime
+
+    runtime = AlphaRuntime(tmp_path)
+    path = runtime._path("s")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    original = '{"schema_version":"sylanne.legacy.v1","emotion":{"turns":99}}'
+    path.write_text(original, encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="sylanne_core"):
+        kernel = runtime.load("s")
+
+    assert kernel.turns == 0
+    assert path.read_text(encoding="utf-8") == original
+    assert "unsupported snapshot schema" in caplog.text.lower()
+
+
+def test_runtime_quarantines_malformed_json(tmp_path: Path) -> None:
+    from sylanne_alpha._engine.sylanne_core.compute.body import SCHEMA_VERSION
+    from sylanne_alpha._engine.sylanne_core.compute.runtime import AlphaRuntime
+
+    runtime = AlphaRuntime(tmp_path)
+    path = runtime._path("s")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    original = "{broken json"
+    path.write_text(original, encoding="utf-8")
+
+    kernel = runtime.load("s")
+    damaged = path.with_suffix(path.suffix + ".damaged")
+    assert kernel.turns == 0
+    assert damaged.read_text(encoding="utf-8") == original
+    assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == SCHEMA_VERSION
+
+
+def test_resonance_is_the_only_computation_backend() -> None:
+    from sylanne_alpha._engine.sylanne_core.compute.kernel import AlphaKernel
+    from sylanne_alpha._engine.sylanne_core.compute.resonance_integration import (
+        ResonanceSpine,
+    )
+
+    kernel = AlphaKernel.boot("s")
+    source = inspect.getsource(
+        importlib.import_module("sylanne_alpha._engine.sylanne_core.compute.kernel")
+    )
+
+    assert type(kernel.computation) is ResonanceSpine
+    assert importlib.util.find_spec(
+        "sylanne_alpha._engine.sylanne_core.compute.computation_spine"
+    ) is None
+    assert "ComputationSpine" not in source
+    assert "except ImportError" not in source
 
 
 # ---- 两条管线的 v1 逐轮认知调用点已彻底删除（源级证明，仿 repo 既有手法）----
@@ -56,7 +174,7 @@ def test_request_pipeline_has_no_v1_run_cycle() -> None:
 
 
 def test_response_pipeline_has_no_v1_run_cycle() -> None:
-    """回复管线：SelfCore RESPONSE_POST 的 run_cycle 调用点已删除。"""
+    """回复管线：SelfCore 旧响应阶段的 run_cycle 调用点已删除。"""
     from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline
 
     src = inspect.getsource(LLMResponsePipeline._background_observe_response)
@@ -80,10 +198,10 @@ def test_v2_assessment_has_no_intent_key() -> None:
 
 
 def test_autonomy_infrastructure_not_retired() -> None:
-    """自主生命基础设施保留：AutonomyScheduler 仍然驱动 run_cycle(AUTONOMOUS)
-    （作息/巩固/反思不属逐轮认知，退役范围之外）。"""
+    """自主生命基础设施保留：AutonomyScheduler 仍驱动显式自主周期。"""
     from sylanne_alpha.agents.autonomy_scheduler import AutonomyScheduler
 
     src = inspect.getsource(AutonomyScheduler)
-    assert "run_cycle" in src        # 自主演化仍在
-    assert "v1_turn_cognition_retired" not in src   # 不被退役闸误伤
+    assert "run_autonomous_cycle" in src
+    assert "run_cycle" not in src
+    assert "v1_turn_cognition_retired" not in src

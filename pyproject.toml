@@ -11,8 +11,6 @@ select = ["E9", "F63", "F7", "F82", "ASYNC"]
 ignore = []
 
 [tool.ruff.lint.per-file-ignores]
-"experiments/*" = ["ALL"]
-"theory/*" = ["ALL"]
 # vendored 第三方 SDK：mirror 上游 sylanne_core，不由本仓 lint（改它=偏离上游）。
 # 例：_sharing.py 的 ASYNC240（async 里 Path().resolve()）是上游代码的事，我们不改 vendored。
 "sylanne_alpha/_engine/*" = ["ALL"]
@@ -31,5 +29,5 @@ reportMissingImports = false   # SDK 部分类型缺失，避免噪声
 # 不硬编码版本号（避免与 metadata.yaml 漂移）；cz bump 经 version_files 同步写回 metadata.yaml。
 name = "cz_conventional_commits"
 version_provider = "scm"
-tag_format = "v$version"
+tag_format = "Embodiment-$version"
 version_files = ["metadata.yaml:version"]

@@ -4,14 +4,14 @@
 "去调查用户到底要啥"，钻进 execute_python 连调 6 次翻历史/SQLite，一次出错后把
 整段英文推理草稿当正文吐出，86 段群发。
 
-这里【不靠关键词表】（"改写/换掉"那种一换措辞/语种就失效、还跟 v2core「不产 intent
-标签」的设计相悖），而是用对话的【结构信号】判定"用户正在反复纠正同一份产出"这个
-高置信场景，命中时：
-  ① 摘掉代码执行逃生舱工具（execute_python/ipython/shell），让它进不了 thrash 循环
-     —— 保留 TTS/搜索/发消息等正常工具（选择性，非一刀切 func_tool=None）；
-  ② 注入交付契约，覆盖底层人设的"不是接活办任务"取向，让她直接给可粘贴的成品。
+这里分两层结构信号，不靠易碎关键词表：
+  ① 纯文本轮摘掉代码执行逃生舱工具（execute_python/ipython/shell），让它进不了
+     thrash 循环；同时摘掉会绕过统一投递链、自己直发且无返回值的批量搜索工具。
+     保留 TTS、返回结果给模型的搜索和发消息等正常工具，附件轮全部放行。
+  ② 只有结构上确认"用户正在反复纠正同一份产出"时才注入交付契约，覆盖底层人设的
+     "不是接活办任务"取向，让她直接给可粘贴的成品。
 
-保守默认：拿不准一律不动（保留全部工具 + 不注契约）。只在高置信时硬闸。
+保守默认：宽门控只减少高风险工具；拿不准是否为纠正链时绝不注入契约。
 """
 
 from __future__ import annotations
@@ -27,6 +27,12 @@ _ESCAPE_HATCH_TOOLS = (
     "astrbot_execute_ipython",
     "astrbot_execute_shell",
     "query_agent_state",
+)
+
+# 工具自己 event.send、成功时无返回值；平台 timeout 后无法判断是否实际送达，既不能
+# 安全重试，也不能让 LLM 获得检索结果。纯文本轮在请求前摘除，附件轮沿用既有放行规则。
+_DIRECT_SEND_TOOLS = (
+    "anysearch_batch_search",
 )
 
 # 交付契约：命中"反复纠正成品"时追加到 system_prompt 末尾。
@@ -110,10 +116,10 @@ def detect(event: Any, buffer: Any) -> dict[str, Any]:
 
 
 def gate_tools(request: Any) -> list[str]:
-    """从本请求的 func_tool 里选择性摘除代码执行逃生舱工具。返回被摘掉的名字。
+    """从本请求的 func_tool 摘除逃生舱与 direct-send 工具。返回被摘掉的名字。
 
     func_tool 每请求新建（get_full_tool_set/_plugin_tool_fix），remove_tool 只改本
-    请求副本，不污染全局 registry、不影响别的会话。保留 TTS/搜索/发消息等。
+    请求副本，不污染全局 registry、不影响别的会话。保留 TTS、返回值搜索和发消息等。
     """
     removed: list[str] = []
     func_tool = getattr(request, "func_tool", None)
@@ -121,7 +127,7 @@ def gate_tools(request: Any) -> list[str]:
         return removed
     names = getattr(func_tool, "names", None)
     have = set(names()) if callable(names) else set()
-    for name in _ESCAPE_HATCH_TOOLS:
+    for name in (*_ESCAPE_HATCH_TOOLS, *_DIRECT_SEND_TOOLS):
         if name in have and hasattr(func_tool, "remove_tool"):
             func_tool.remove_tool(name)
             removed.append(name)

@@ -2,7 +2,19 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { apiFetch, ApiError } from '../api/client'
 import { useI18n } from '../composables/useI18n'
-import type { ProviderInfo, SettingsResponse, SettingsSchemaEntry } from '../api/types'
+import type { ProviderInfo, SettingsSchemaEntry } from '../api/types'
+import type { ModelRoutingState, SettingsResponseWithModelRouting } from '../types'
+import {
+  AUXILIARY_PROVIDER_KEY,
+  EMBEDDING_ENABLED_KEY,
+  EMBEDDING_PROVIDER_KEY,
+  MANUAL_PROVIDER_VALUE,
+  buildDirtySettingsPayload,
+  buildModelRoutingViewModel,
+  buildProviderOptions,
+  partitionSettingsSchema,
+  type ModelRoutingLabels,
+} from '../config/modelRouting'
 import Card from '../components/ui/Card.vue'
 import Badge from '../components/ui/Badge.vue'
 import Button from '../components/ui/Button.vue'
@@ -38,7 +50,6 @@ const CONFIG_GROUP_PREFIXES: GroupRule[] = [
   { prefix: 'sylanne_alpha_intercept_', groupKey: 'config.realtime' },
   { prefix: 'sylanne_alpha_embedding_', groupKey: 'config.memory' },
   { prefix: 'sylanne_alpha_main_assessor_', groupKey: 'config.memory' },
-  { prefix: 'sylanne_alpha_fast_assessor_', groupKey: 'config.memory' },
   { prefix: 'sylanne_alpha_background_', groupKey: 'config.memory' },
   { prefix: 'sylanne_alpha_life_simulation_', groupKey: 'config.life' },
   { prefix: 'sylanne_alpha_transcription_', groupKey: 'config.advanced' },
@@ -65,8 +76,10 @@ function classifyConfigKey(key: string): string {
 // ── Data ──
 const schema = ref<Record<string, SettingsSchemaEntry>>({})
 const providers = ref<ProviderInfo[]>([])
+const routingMetadata = ref<ModelRoutingState>({})
 const loaded = ref(false)
 const loadError = ref(false)
+const advancedOverridesOpen = ref(false)
 
 // Dirty-tracked local values, seeded from values[key] ?? schema[key].default.
 const values = reactive<Record<string, unknown>>({})
@@ -96,9 +109,10 @@ async function load(): Promise<void> {
   loaded.value = false
   loadError.value = false
   try {
-    const resp = await apiFetch<SettingsResponse>('/api/settings')
+    const resp = await apiFetch<SettingsResponseWithModelRouting>('/api/settings')
     schema.value = resp.schema || {}
     providers.value = resp.providers || []
+    routingMetadata.value = resp.model_routing || {}
     const respValues = resp.values || {}
     for (const key of Object.keys(values)) delete values[key]
     dirtyKeys.clear()
@@ -132,41 +146,44 @@ interface ConfigItem {
   numberStep?: number
 }
 
+function configItem(key: string, meta: SettingsSchemaEntry): ConfigItem {
+  const isProvider = key.indexOf('provider_id') !== -1
+  let control: ConfigItem['control']
+  let options: SelectOption[] | undefined
+  let numberStep: number | undefined
+  if (maskedKeys.has(key)) {
+    control = 'masked'
+  } else if (meta.type === 'bool') {
+    control = 'toggle'
+  } else if (meta.type === 'int' || meta.type === 'float') {
+    control = 'number'
+    numberStep = meta.type === 'float' ? 0.01 : 1
+  } else if (meta.options && meta.options.length) {
+    control = 'select'
+    options = meta.options.map((option) => ({ label: option, value: option }))
+  } else if (isProvider) {
+    control = 'provider'
+  } else {
+    control = 'text'
+  }
+
+  return {
+    key,
+    label: meta.description || key,
+    control,
+    options,
+    numberStep,
+  }
+}
+
+const schemaPartition = computed(() => partitionSettingsSchema(schema.value))
+
 const groups = computed(() => {
   const byGroup: Record<string, ConfigItem[]> = {}
-  for (const key of Object.keys(schema.value)) {
-    const meta = schema.value[key]
-    if (meta.invisible) continue
+  for (const [key, meta] of Object.entries(schemaPartition.value.normal)) {
     const groupKey = classifyConfigKey(key)
     if (!byGroup[groupKey]) byGroup[groupKey] = []
-
-    const isProvider = key.indexOf('provider_id') !== -1
-    let control: ConfigItem['control']
-    let options: SelectOption[] | undefined
-    let numberStep: number | undefined
-    if (maskedKeys.has(key)) {
-      control = 'masked'
-    } else if (meta.type === 'bool') {
-      control = 'toggle'
-    } else if (meta.type === 'int' || meta.type === 'float') {
-      control = 'number'
-      numberStep = meta.type === 'float' ? 0.01 : 1
-    } else if (meta.options && meta.options.length) {
-      control = 'select'
-      options = meta.options.map((o) => ({ label: o, value: o }))
-    } else if (isProvider) {
-      control = 'provider'
-    } else {
-      control = 'text'
-    }
-
-    byGroup[groupKey].push({
-      key,
-      label: meta.description || key,
-      control,
-      options,
-      numberStep,
-    })
+    byGroup[groupKey].push(configItem(key, meta))
   }
   return GROUP_ORDER.filter((g) => byGroup[g] && byGroup[g].length).map((g) => ({
     groupKey: g,
@@ -180,15 +197,47 @@ const groups = computed(() => {
 // end of the right pane — never spanning the seam.
 const leftGroups = computed(() => groups.value.slice(0, 3))
 const rightGroups = computed(() => groups.value.slice(3))
+const advancedProviderItems = computed(() =>
+  Object.entries(schemaPartition.value.advancedProviders).map(([key, meta]) =>
+    configItem(key, meta),
+  ),
+)
+
+const routingLabels = computed<ModelRoutingLabels>(() => ({
+  currentConversation: t('config.current_conversation'),
+  followCurrentChat: t('config.follow_current_chat'),
+  automaticMultimodal: t('config.automatic_multimodal'),
+  automaticEmbedding: t('config.automatic_embedding'),
+  selectEmbedding: t('config.select_embedding'),
+  embeddingUnavailable: t('config.embedding_unavailable'),
+  embeddingDisabled: t('config.embedding_disabled'),
+  manualInput: t('config.manual_input'),
+}))
+
+const modelRouting = computed(() =>
+  buildModelRoutingViewModel(
+    {
+      schema: schema.value,
+      values,
+      providers: providers.value,
+      model_routing: routingMetadata.value,
+    },
+    routingLabels.value,
+  ),
+)
 
 function providerOptions(key: string): SelectOption[] {
   let list = providers.value
   if (key.indexOf('embedding') !== -1) {
-    list = list.filter((p) => !p.type || p.type === 'embedding')
+    list = list.filter((provider) => provider.type === 'embedding')
+  } else {
+    list = list.filter((provider) => provider.type !== 'embedding')
   }
-  const opts: SelectOption[] = list.map((p) => ({ label: p.name || p.id || '', value: p.id || '' }))
-  opts.push({ label: MANUAL_INPUT_LABEL.value, value: '__manual__' })
-  return opts
+  return buildProviderOptions(list, {
+    kind: key.indexOf('embedding') !== -1 ? 'embedding' : 'text',
+    automaticLabel: t('config.automatic_inherit'),
+    manualLabel: MANUAL_INPUT_LABEL.value,
+  })
 }
 
 function providerSelectValue(key: string): string {
@@ -197,7 +246,10 @@ function providerSelectValue(key: string): string {
 }
 
 function onProviderSelect(key: string, val: string): void {
-  if (val === '__manual__') {
+  if (val === MANUAL_PROVIDER_VALUE) {
+    const current = strValue(key)
+    const isKnown = providers.value.some((provider) => provider.id === current)
+    if (isKnown) setValue(key, '')
     manualProviderKeys.add(key)
     return
   }
@@ -249,8 +301,7 @@ async function save(): Promise<void> {
   if (!dirtyKeys.size) return
   saving.value = true
   saveError.value = ''
-  const payload: Record<string, unknown> = {}
-  for (const key of dirtyKeys) payload[key] = values[key]
+  const payload = buildDirtySettingsPayload(values, dirtyKeys)
   try {
     await apiFetch('/api/settings', { method: 'POST', body: payload })
     dirtyKeys.clear()
@@ -339,6 +390,136 @@ async function save(): Promise<void> {
 
     <div class="pane-right">
       <template v-if="loaded && !loadError">
+        <Card data-testid="model-strategy" :title="t('config.model_strategy')">
+          <template #action>
+            <Badge
+              v-if="modelRouting.advancedOverrideCount"
+              variant="neutral"
+            >
+              {{ modelRouting.advancedOverrideCount }} {{ t('config.overrides_active') }}
+            </Badge>
+          </template>
+
+          <p class="strategy-intro">{{ t('config.model_strategy_hint') }}</p>
+
+          <div class="config-row">
+            <div class="routing-copy">
+              <span class="config-label">{{ t('config.chat_model') }}</span>
+              <span class="routing-note">{{ t('config.chat_model_hint') }}</span>
+            </div>
+            <span class="routing-value mono">{{ modelRouting.chat.label }}</span>
+          </div>
+
+          <div class="config-row">
+            <div class="routing-copy">
+              <span class="config-label">{{ t('config.auxiliary_model') }}</span>
+              <span class="routing-note">{{ t('config.auxiliary_model_hint') }}</span>
+            </div>
+            <div class="config-control control-stack">
+              <Select
+                :model-value="providerSelectValue(AUXILIARY_PROVIDER_KEY)"
+                :options="modelRouting.auxiliary.options"
+                @update:model-value="(value) => onProviderSelect(AUXILIARY_PROVIDER_KEY, value)"
+              />
+              <TextInput
+                v-if="manualProviderKeys.has(AUXILIARY_PROVIDER_KEY)"
+                :model-value="strValue(AUXILIARY_PROVIDER_KEY)"
+                :placeholder="MANUAL_INPUT_LABEL"
+                @update:model-value="(value) => setValue(AUXILIARY_PROVIDER_KEY, value)"
+              />
+            </div>
+          </div>
+
+          <div class="config-row">
+            <div class="routing-copy">
+              <span class="config-label">{{ t('config.image_understanding') }}</span>
+              <span class="routing-note">{{ t('config.image_understanding_hint') }}</span>
+            </div>
+            <span class="routing-value mono">{{ modelRouting.transcription.label }}</span>
+          </div>
+
+          <div class="config-row">
+            <div class="routing-copy">
+              <span class="config-label">{{ t('config.embedding_memory') }}</span>
+              <span class="routing-note">{{ t('config.embedding_memory_hint') }}</span>
+            </div>
+            <div class="config-control control-stack">
+              <div class="inline-control">
+                <Toggle
+                  :model-value="modelRouting.embedding.enabled"
+                  @update:model-value="(value) => setValue(EMBEDDING_ENABLED_KEY, value)"
+                />
+                <Badge
+                  v-if="modelRouting.embedding.required"
+                  variant="red"
+                >
+                  {{ t('config.selection_required') }}
+                </Badge>
+                <span
+                  v-else-if="!modelRouting.embedding.enabled || modelRouting.embedding.mode === 'unavailable'"
+                  class="routing-note mono"
+                >
+                  {{ modelRouting.embedding.label }}
+                </span>
+              </div>
+              <template
+                v-if="modelRouting.embedding.enabled && modelRouting.embedding.mode !== 'unavailable'"
+              >
+                <Select
+                  :model-value="providerSelectValue(EMBEDDING_PROVIDER_KEY)"
+                  :options="modelRouting.embedding.options"
+                  @update:model-value="(value) => onProviderSelect(EMBEDDING_PROVIDER_KEY, value)"
+                />
+                <TextInput
+                  v-if="manualProviderKeys.has(EMBEDDING_PROVIDER_KEY)"
+                  :model-value="strValue(EMBEDDING_PROVIDER_KEY)"
+                  :placeholder="MANUAL_INPUT_LABEL"
+                  @update:model-value="(value) => setValue(EMBEDDING_PROVIDER_KEY, value)"
+                />
+              </template>
+            </div>
+          </div>
+
+          <div class="config-row advanced-toggle-row">
+            <div class="routing-copy">
+              <span class="config-label">{{ t('config.advanced_overrides') }}</span>
+              <span class="routing-note">{{ t('config.advanced_overrides_hint') }}</span>
+            </div>
+            <div class="inline-control">
+              <Badge variant="neutral">
+                {{ modelRouting.advancedOverrideCount }} {{ t('config.overrides_active') }}
+              </Badge>
+              <Toggle v-model="advancedOverridesOpen" />
+            </div>
+          </div>
+
+          <div v-if="advancedOverridesOpen" class="advanced-overrides">
+            <p v-if="!advancedProviderItems.length" class="routing-note">
+              {{ t('config.no_advanced_overrides') }}
+            </p>
+            <div
+              v-for="item in advancedProviderItems"
+              :key="item.key"
+              class="config-row"
+            >
+              <span class="config-label">{{ item.label }}</span>
+              <div class="config-control control-stack">
+                <Select
+                  :model-value="providerSelectValue(item.key)"
+                  :options="providerOptions(item.key)"
+                  @update:model-value="(value) => onProviderSelect(item.key, value)"
+                />
+                <TextInput
+                  v-if="manualProviderKeys.has(item.key)"
+                  :model-value="strValue(item.key)"
+                  :placeholder="MANUAL_INPUT_LABEL"
+                  @update:model-value="(value) => setValue(item.key, value)"
+                />
+              </div>
+            </div>
+          </div>
+        </Card>
+
         <Card v-for="group in rightGroups" :key="group.groupKey" :title="t(group.groupKey)">
           <div
             v-for="item in group.items"
@@ -437,10 +618,63 @@ async function save(): Promise<void> {
   min-width: 0;
 }
 
+.strategy-intro {
+  margin: 0 0 var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--font-sm);
+  line-height: 1.6;
+}
+
+.routing-copy {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.routing-note {
+  color: var(--text-muted);
+  font-size: var(--font-xs);
+  line-height: 1.45;
+}
+
+.routing-value {
+  max-width: 48%;
+  color: var(--text-muted);
+  font-size: var(--font-xs);
+  line-height: 1.45;
+  text-align: right;
+}
+
 .config-control {
   flex: 0 0 auto;
   width: 200px;
   max-width: 45%;
+}
+
+.control-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.inline-control {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-4);
+}
+
+.advanced-toggle-row {
+  border-bottom: none;
+}
+
+.advanced-overrides {
+  padding: 0 var(--space-5);
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-sm);
+  background: var(--input-bg);
 }
 
 .loading-state {
@@ -477,6 +711,25 @@ async function save(): Promise<void> {
 @media (max-width: 900px) {
   .config-control {
     max-width: 55%;
+  }
+}
+
+@media (max-width: 620px) {
+  .config-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .config-control,
+  .routing-value {
+    width: 100%;
+    max-width: none;
+    text-align: left;
+  }
+
+  .inline-control {
+    justify-content: flex-start;
   }
 }
 </style>

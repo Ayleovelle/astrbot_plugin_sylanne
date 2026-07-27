@@ -24,9 +24,7 @@ export interface EmotionState {
 }
 
 export interface RouteDistribution {
-  FAST?: number
-  NORMAL?: number
-  FULL?: number
+  RESONANCE?: number
   SKIP?: number
   [k: string]: number | undefined
 }
@@ -58,7 +56,7 @@ export interface GateState {
   threshold?: number
   route?: string
   history_len?: number
-  history?: number[]
+  history?: unknown[]
   [k: string]: unknown
 }
 
@@ -80,6 +78,26 @@ export interface TimingLayer {
   count?: number
 }
 
+export interface TimingEntry {
+  layer?: string
+  avg?: number | string
+  p95?: number | string
+  p99?: number | string
+  count?: number
+}
+
+export interface SpineLayer {
+  id: string
+  name?: string
+  status?: string
+  avg?: number
+  p50?: number
+  p95?: number
+  p99?: number
+  count?: number
+  desc?: string
+}
+
 export interface PersonalitySixItem {
   name?: string
   value?: number
@@ -99,8 +117,8 @@ export interface PersonalityState {
 }
 
 export interface StateResponse {
-  schema_version?: number
-  runtime?: string
+  schema_version?: string
+  runtime?: unknown
   current_session?: string
   session_id?: string
   emotion?: EmotionState
@@ -109,8 +127,9 @@ export interface StateResponse {
   route_distribution?: RouteDistribution
   boundary?: BoundaryState
   expression?: ExpressionState
-  timing?: Record<string, number>
+  timing?: Record<string, number> | TimingEntry[]
   layers?: Record<string, TimingLayer>
+  spine_layers?: SpineLayer[]
   personality?: PersonalityState
   feedback?: FeedbackState
   sessions?: SessionInfo[]

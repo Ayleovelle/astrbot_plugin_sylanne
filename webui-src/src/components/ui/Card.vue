@@ -25,6 +25,7 @@ const slots = useSlots()
   box-shadow: 0 2px 20px rgba(0, 0, 0, 0.22);
   transition: border-color var(--dur-mid) ease, box-shadow var(--dur-mid) ease;
   animation: fadeUp 0.5s var(--ease-snap) both;
+  min-width: 0;
 }
 /* glowing "tissue slice" top edge — a constant faint version of the hover tint */
 .card::before {
@@ -65,5 +66,11 @@ const slots = useSlots()
   border-radius: 1px;
   background: var(--accent);
   box-shadow: var(--glow-accent);
+}
+
+@media (max-width: 620px) {
+  .card {
+    padding: var(--space-7);
+  }
 }
 </style>

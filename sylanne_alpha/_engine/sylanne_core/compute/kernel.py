@@ -17,7 +17,7 @@ AlphaKernel 是 Sylanne-Embodiment 的中枢调度器，驱动 7 层计算管线
 
 与其他组件的关系：
 - SylanneAlphaHost 持有一个 AlphaKernel 实例
-- ComputationSpine 负责 Void-Scar Engine / HDC / HGT 等底层计算
+- ResonanceSpine 负责 Void-Scar Engine / HDC / HGT 等底层计算
 - prompt_surface 模块负责将 kernel 状态渲染为 prompt fragment
 - personality 模块负责人格特质的初始化和漂移
 """
@@ -32,9 +32,7 @@ from typing import TYPE_CHECKING, Any
 
 from .attention import focus_information_flood
 from .body import SCHEMA_VERSION, AlphaBodyState
-from .computation_spine import ComputationSpine
 from .hot_pool import HotPool
-from .importer import import_legacy_body
 from .personality import drift_sylanne_traits, initial_personality
 from .prompt_surface import (
     render_diagnostics,
@@ -43,14 +41,7 @@ from .prompt_surface import (
     render_prompt_fragment,
 )
 from .workset import build_fragment_workset
-
-try:
-    from .resonance_integration import ResonanceSpine
-
-    _DEFAULT_SPINE: type = ResonanceSpine
-except ImportError:
-    ResonanceSpine = ComputationSpine  # type: ignore[assignment, misc]
-    _DEFAULT_SPINE = ComputationSpine
+from .resonance_integration import ResonanceSpine
 
 if TYPE_CHECKING:
     from ..config import DimensionProfile
@@ -121,7 +112,7 @@ class AlphaKernel:
     personality: dict[str, Any] = field(default_factory=dict)
     moral_repair: dict[str, Any] = field(default_factory=dict)
     fallibility: dict[str, Any] = field(default_factory=dict)
-    computation: ComputationSpine | ResonanceSpine = field(default_factory=_DEFAULT_SPINE)
+    computation: ResonanceSpine = field(default_factory=ResonanceSpine)
     hot_pool: HotPool = field(default_factory=HotPool)
     _last_computation_result: dict[str, Any] = field(default_factory=dict)
     _cached_vector_summary: dict[str, float] | None = field(default=None, repr=False)
@@ -140,19 +131,14 @@ class AlphaKernel:
     def boot(
         cls,
         session_key: str,
-        legacy: dict[str, Any] | None = None,
         profile: DimensionProfile | None = None,
         *,
         pel_enabled: bool = False,
     ) -> AlphaKernel:
-        """从零创建或从旧版数据迁移创建 kernel。"""
-        if legacy is None:
-            kernel = cls(session_key=session_key)
-        else:
-            body, audit, turns = import_legacy_body(legacy)
-            kernel = cls(session_key=session_key, body=body, audit=audit, turns=turns)
+        """从当前配置创建全新 kernel。"""
+        kernel = cls(session_key=session_key)
         if profile is not None:
-            kernel.computation = _DEFAULT_SPINE(profile=profile, pel_enabled=pel_enabled)
+            kernel.computation = ResonanceSpine(profile=profile, pel_enabled=pel_enabled)
             kernel.hot_pool = HotPool(n_dims=profile.emotion_dim, mode=profile.mode)
         return kernel
 
@@ -180,7 +166,7 @@ class AlphaKernel:
             fallibility=_as_dict(snapshot.get("fallibility")),
         )
         if profile is not None:
-            kernel.computation = _DEFAULT_SPINE(profile=profile, pel_enabled=pel_enabled)
+            kernel.computation = ResonanceSpine(profile=profile, pel_enabled=pel_enabled)
             kernel.hot_pool = HotPool(n_dims=profile.emotion_dim, mode=profile.mode)
         if "computation" in snapshot and isinstance(snapshot["computation"], dict):
             kernel.computation.from_dict(snapshot["computation"])

@@ -5,12 +5,6 @@
     "default": "Sylanne",
     "hint": "填写当前会话中使用的人格/角色名字。"
   },
-  "sylanne_enable_v2core": {
-    "description": "v2core 认知内核（唯一认知核；关闭=紧急回退 v1 旧认知）",
-    "type": "bool",
-    "default": true,
-    "hint": "默认开。v2core 双层 agent（PERCEPT@请求注入心象/评价 + DELIBERATE/EVOLVE@回复裁决学习）是唯一认知内核；启用即退役 v1 逐轮认知（旧 9-agent SelfCore PRE/POST/RESPONSE_POST 与逐轮 LLM 评估不再运行，省每轮评估开销）。存档无损复用同一引擎；任何异常单轮回落旧管线不阻断回复。置 false 仅作部署级紧急回退。"
-  },
   "sylanne_no_ghost_reply": {
     "description": "空回复兜底（按成因分治）",
     "type": "bool",
@@ -154,7 +148,9 @@
     "description": "Embedding 记忆使用的 Provider ID",
     "type": "string",
     "default": "",
-    "hint": "填写 AstrBot 中配置的 embedding provider ID；留空则不启用向量召回。"
+    "_special": "select_provider",
+    "ui_tier": "primary",
+    "hint": "启用 embedding 记忆后：只有一个 embedding provider 时自动选择；有多个时在“模型策略”中选择。"
   },
   "sylanne_alpha_embedding_memory_top_k": {
     "description": "Embedding 召回 top-K 条数",
@@ -162,24 +158,25 @@
     "default": 3,
     "hint": "每次召回最多返回的相似记忆条数。"
   },
-  "sylanne_alpha_fast_assessor_enabled": {
-    "description": "启用即时判断 LLM",
-    "type": "bool",
-    "default": true,
-    "hint": "默认开启；前台同步等待（2s），即时情绪直接注入当前轮回复。"
-  },
-  "sylanne_alpha_fast_assessor_provider_id": {
-    "description": "即时判断 LLM Provider（前台同步）",
+  "sylanne_alpha_aux_provider_id": {
+    "description": "共享辅助文本模型 Provider（可选）",
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "前台同步等待 2s，需要响应快的小模型。即时情绪直接影响当前轮回复语气。推荐设置：温度 0，top-p 0.1，Max Tokens 无需设置（插件已接管）。"
+    "ui_tier": "primary",
+    "hint": "留空时跟随当前会话或 AstrBot 默认聊天模型；选择后供评估、记忆整理、生活模拟、关系分类与说说草稿共享。"
+  },
+  "sylanne_alpha_assessor_llm_enabled": {
+    "description": "启用辅助语义评估",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。开启后，未单独指定模型的后台记忆与关系语义任务可跟随共享辅助模型或当前聊天模型，并可能产生额外 LLM 调用。前台即时判断始终由 v2core 本地完成。"
   },
   "sylanne_alpha_assessor_max_tokens": {
     "description": "语义评估 LLM 最大输出 token",
     "type": "int",
     "default": 1024,
-    "hint": "快速/主语义评估的输出上限。推理模型（如 deepseek-v4 等带隐藏思考的模型）会先把 token 花在推理上，过低（旧版写死 50/100）会让正文为空、情感读数恒落中性，越情绪化的消息越严重；故默认 1024 留足余量。非推理模型解完即停、不会多花。"
+    "hint": "后台辅助/主语义评估的输出上限。推理模型（如 deepseek-v4 等带隐藏思考的模型）会先把 token 花在推理上，过低会让正文为空、情感读数恒落中性；默认 1024 留足余量。非推理模型解完即停、不会多花。"
   },
   "sylanne_alpha_background_workers_enabled": {
     "description": "启用后台工作队列",
@@ -216,7 +213,8 @@
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "用于模拟 Sylanne 生活的 LLM；建议用便宜的小模型。启用生活模拟时必填，留空会静默失效（生活状态冻结、主动消息可能复读）。"
+    "ui_tier": "advanced_provider",
+    "hint": "高级覆盖：留空时使用共享辅助模型，再跟随 AstrBot 默认聊天模型；无需为生活模拟单独配置。"
   },
   "sylanne_alpha_life_simulation_interval_seconds": {
     "description": "生活模拟间隔（秒）",
@@ -255,24 +253,20 @@
     "default": true,
     "hint": "默认开启。当 AstrBot 自带的群聊上下文感知功能已启用时，自动跳过 Sylanne 的 shadow buffer 注入以避免重复上下文。社交场计算不受影响。"
   },
-  "sylanne_alpha_hajide_compat_mode": {
-    "description": "哈基德模型兼容（影响 prompt 构建和响应处理）",
-    "type": "bool",
-    "default": false,
-    "hint": "仅在使用 Hajide 前端时开启；会调整 system prompt 格式和响应后处理逻辑。"
-  },
   "sylanne_alpha_main_assessor_enabled": {
     "description": "启用主评估器（深度情感分析，后台异步）",
     "type": "bool",
     "default": false,
-    "hint": "默认关闭；开启后情绪估计使用独立 provider，不占用主聊天模型。后台深度语义分析结果喂给长期状态引擎。"
+    "invisible": true,
+    "hint": "旧版未接入生产路径的兼容键；后台任务仍由各自的记忆/调度功能开关控制。"
   },
   "sylanne_alpha_main_assessor_provider_id": {
     "description": "主评估器 LLM Provider ID（后台异步）",
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "后台深度语义分析，不阻塞回复，可用强模型。推荐设置：温度 0，top-p 0.1。"
+    "ui_tier": "advanced_provider",
+    "hint": "高级覆盖：留空时使用共享辅助模型，再跟随当前/默认聊天模型。"
   },
   "sylanne_alpha_locked_persona_prompt": {
     "description": "锁定的人格 system prompt（覆盖动态生成）",
@@ -291,6 +285,7 @@
     "type": "string",
     "default": "",
     "_special": "select_provider",
+    "ui_tier": "advanced_provider",
     "hint": "指定用于转述的多模态 LLM provider；留空则自动检测已配置的多模态 provider。"
   },
   "sylanne_alpha_owner_id": {
@@ -304,6 +299,97 @@
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "Phase 2B：低频后台判会话关系语域（恋人/朋友/同事）。留空则复用 assessor provider。"
+    "ui_tier": "advanced_provider",
+    "hint": "高级覆盖：低频后台判会话关系语域；留空时使用评估器链、共享辅助模型，再跟随当前/默认聊天模型。"
+  },
+  "sylanne_alpha_cross_session_mode": {
+    "description": "跨群记忆总开关（v2.5.0 旁挂人核）",
+    "type": "string",
+    "default": "off",
+    "options": ["off", "shadow", "on"],
+    "hint": "默认 off（对现网行为零影响）。shadow：货架照常写入/闸照常算，只拦注入、落观测日志，不影响回复。on：真正跨群生效。她转述给别人听过的、关于第三方的私事，可能跨群被带出；系统只能软性约束，不能保证归零——对隐私敏感建议同时把 sylanne_alpha_cross_visibility_tier 调到 strict。切到 shadow/on 且开启 sylanne_alpha_cross_dialogue 后，货架写入与跨群召回即真正接入生产路径（私聊、以及已开 unique_session 的群会真正累积并召回；未开 unique_session 的共享群按身份中立跳过、不写入）。"
+  },
+  "sylanne_alpha_cross_session_scope": {
+    "description": "跨群记忆生效范围",
+    "type": "string",
+    "default": "owner",
+    "options": ["owner", "all"],
+    "hint": "owner：仅主人（sylanne_alpha_owner_id）的身份可跨群记忆。all：任何人都可跨群塑造她对该人自己的态度（爆炸半径锁在\"对该人的态度\"，不影响 romantic 判定）。建议先 owner 验证稳定后再考虑 all。"
+  },
+  "sylanne_alpha_cross_dialogue": {
+    "description": "跨群共享：对话记忆货架",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。开启后经净化的 bot↔本人直接对话内容会进入按身份挂靠的记忆货架，供跨群召回参考（不合并 per-session 主记忆、可随时关闭回退）。"
+  },
+  "sylanne_alpha_cross_relationship": {
+    "description": "跨群共享：关系计数 + warmth 长期基线 + 瞬时情绪",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。开启后关系四计数（偏好/边界/进展/修复）、Sylanne 对该人的 warmth 长期基线、以及有界的瞬时情绪偏移（她对这个人当下的心情余温/余怒，随时间自然回落，绝不影响她对其他人的态度）会按身份跨群携带。"
+  },
+  "sylanne_alpha_cross_personality": {
+    "description": "跨群共享：Sylanne Six 表层人格快照",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。开启后 Sylanne Six（warmth_bias/edge/curiosity/patience/intimacy_gravity/sovereignty_guard）落盘时会按身份混合进档案，跨群出生时用档案值替代默认播种，让她对同一人保持气质一致。"
+  },
+  "sylanne_alpha_cross_visibility_tier": {
+    "description": "跨群记忆读侧可见范围档位",
+    "type": "string",
+    "default": "same_group",
+    "options": ["same_group", "cross_group", "strict"],
+    "hint": "same_group：跨群货架只在与该人的私聊/原群可见（最保守）。cross_group：可见范围扩大到其他群，且默认对\"疑似提到该群其他已知成员\"的条目做降级锁定。strict：与 cross_group 同样的提及降级，额外收紧其余判定。跨群场景下第三方转述是方向性风险升级，建议对隐私敏感的部署优先选 strict。"
+  },
+  "sylanne_alpha_qzone_enabled": {
+    "description": "启用 QQ 空间说说功能（默认关）",
+    "type": "bool",
+    "default": false,
+    "hint": "总闸，默认关闭。开启后生活模拟的高分分享意图才会额外生成说说草稿候选。默认（sylanne_alpha_qzone_autonomy=review_all）不会自动发布，唯一发布路径是主人回复「说说确认」；把自主档调高后，纯她自己的生活/心情可以不经确认自动发。"
+  },
+  "sylanne_alpha_qzone_autonomy": {
+    "description": "说说发布自主权档位（她能自己发到哪一步）",
+    "type": "string",
+    "default": "review_all",
+    "options": ["review_all", "low_risk_auto", "full_auto"],
+    "hint": "控制说说要不要先经你过目才发，默认最保守。review_all：每条草稿都进你的私聊等你回「说说确认」才发（与历史行为一致，零变化）。low_risk_auto：先按人称/关系词粗筛，再让 LLM 语义判一次「是不是纯她自己一个人、完全没提到任何其他人、也没提到你我的关系或思念」——两道都点头才自己发；只要涉及你我关系、或带了别人的影子（包括斜指「那个人」、裸名、外文名），就拎回来给你过目；LLM 判不准时一律偏保守转过目。这是尽力判断、不是硬保证，模型偶尔可能误判。full_auto：只要过了广播净化硬闸就自动发，不再过任何分级判据、也不过目（最像真人、最放手，仅靠净化闸兜底；散文体裸名第三方这类结构闸逮不住的会直接发出去）。无论哪一档，广播净化闸（拦 PII/群聊背景/已知他人 sender_id）与每日/每周频率上限都照常先生效；隐私最敏感就保持默认 review_all。"
+  },
+  "sylanne_alpha_qzone_cookie": {
+    "description": "QQ 空间 Cookie（从浏览器复制，仅本地只读，代码绝不自动抓取/刷新）",
+    "type": "string",
+    "default": "",
+    "hint": "从浏览器 F12 网络面板复制 user.qzone.qq.com 请求的 Cookie 请求头，粘贴到这里；泄露此值等同泄露 QQ 空间登录态，不要分享给除你自己以外的任何人。Sylanne 不会、也不能自动获取或刷新这个值。"
+  },
+  "sylanne_alpha_qzone_my_qq": {
+    "description": "发说说所用的 QQ 号（hostuin，与上面 Cookie 对应的账号）",
+    "type": "string",
+    "default": "",
+    "hint": "填写 Cookie 所属账号的 QQ 号；留空发说说会直接失败。"
+  },
+  "sylanne_alpha_qzone_provider_id": {
+    "description": "说说草稿生成 LLM 的 provider ID（留空回退生活模拟/评估 provider）",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "ui_tier": "advanced_provider",
+    "hint": "高级覆盖：留空时依次使用生活模拟、主评估器、旧评估器、共享辅助模型与默认聊天模型。"
+  },
+  "sylanne_alpha_qzone_min_score": {
+    "description": "ShareIntent 分数达到此阈值才尝试生成说说候选",
+    "type": "float",
+    "default": 0.55,
+    "hint": "与私聊投递互不排斥：私聊照常按原逻辑投递，这里是额外把同一个高分意图也送去广播候选池。调低会让更多日常小事也尝试发说说。"
+  },
+  "sylanne_alpha_qzone_daily_max": {
+    "description": "每日最多发说说条数（必须 >0，否则视为闸关死）",
+    "type": "int",
+    "default": 1,
+    "hint": "频率闸独立于 owner 过目门——过目门保证内容对，这个保证不会发太勤显得账号异常。"
+  },
+  "sylanne_alpha_qzone_weekly_max": {
+    "description": "每周最多发说说条数（必须 >0，否则视为闸关死）",
+    "type": "int",
+    "default": 3,
+    "hint": "与每日上限同时生效，取更严的那个。"
   }
 }

@@ -10,10 +10,9 @@ user_prompt 参数就是这段模板本身）。这条假用户话会在此后�
 "用户历史发言"原样喂回 LLM，逐轮累积、毒化后续所有上下文。
 
 该插件是外部代码（不可编辑）；修复只能在我们自己读取 request.contexts 时，把
-匹配这个精确签名前缀的 user 轮次替换成中性占位
-"（她此前主动发来过一条消息）"——converting instruction-templates to
-placeholders IMPROVES persisted history，且只做精确签名前缀匹配（不做宽松
-包含匹配），真实用户文本几乎不可能恰好以这个字面量开头，正常轮次字节级不变。
+匹配这个精确签名前缀的 user 轮次在 provider-only 历史视图中替换成中性占位
+"（她此前主动发来过一条消息）"。只做精确签名前缀匹配（不做宽松包含匹配），
+真实用户文本几乎不可能恰好以这个字面量开头；持久化历史保持原样。
 
 覆盖：
   ① scrub_proactive_template_turns：命中模板签名的 user 轮次 → 替换为占位，

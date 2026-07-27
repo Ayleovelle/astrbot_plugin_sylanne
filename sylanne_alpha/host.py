@@ -1,7 +1,7 @@
 """会话宿主模块（CP3：已切换为 SDK 共振场计算芯）。
 
-本模块原先自带 SylanneAlphaHost + AlphaKernel（顺序管线 ComputationSpine）。
-深接入重构后，计算实现统一为 vendored SylannEngine 的共振场（ResonanceSpine）。
+本模块原先自带 SylanneAlphaHost + AlphaKernel。
+深接入后，计算实现统一为 vendored SylannEngine 的 ResonanceSpine。
 本文件现为转发层：
 
 - SylanneAlphaHostEvent: 直接复用 SDK 的事件类（业务层造的 event 才能被 SDK host

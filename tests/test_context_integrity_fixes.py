@@ -2,7 +2,7 @@
 
 - (c-i) _STOPWORDS 扩展多字虚词：jieba 整词命中的常见虚词/代词短语不应再
   漏网挤占召回索引槽位（旧实现只覆盖单字，"可以"/"这样"这类整词穿透）。
-- (c-ii) v2core PERCEPT 召回与 legacy [记忆参考] 同轮跨路径去重：v2core_on 时
+- (c-ii) v2core PERCEPT 召回与 legacy [记忆参考] 同轮跨路径去重：v2core
   两条路径都会各自召回一次，同一条记忆命中两边会在同一个 prompt 里重复注入。
 """
 
@@ -84,8 +84,8 @@ def test_peek_percept_recalled_texts_reads_pending_ctx_scratch():
 
 
 def test_prepare_memory_context_dedups_against_percept_recall():
-    """端到端：v2core_on 时，legacy _prepare_memory_context 应跳过已被本轮 PERCEPT
-    召回过的原文，不重复注入同一条记忆；不启用 v2core 时行为不变（旁路恒空集）。
+    """端到端：legacy _prepare_memory_context 应跳过已被本轮 PERCEPT
+    召回过的原文，不重复注入同一条记忆；已退役的 false 配置值不会关闭去重。
     """
     from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline
     from sylanne_alpha.memory_system import MemorySystem
@@ -145,7 +145,7 @@ def test_prepare_memory_context_dedups_against_percept_recall():
     )
     assert shared_text not in memory_fragment
 
-    # 关掉 v2core：旁路恒空集，legacy 正常注入（行为不变）。
+    # 已退役的 false 配置值必须被忽略，同轮去重仍然生效。
     pipe._p.config = {"sylanne_enable_v2core": False}
     pipe._p._v2core_runtimes = {"s1": {"pending": {"ctx": ctx}}}
     _, _, memory_fragment2 = asyncio.run(
@@ -153,4 +153,62 @@ def test_prepare_memory_context_dedups_against_percept_recall():
             "s1", "日本旅行", gap_seconds=99999.0, realtime_enabled=True,
         )
     )
-    assert shared_text in memory_fragment2
+    assert shared_text not in memory_fragment2
+
+
+def test_prepare_memory_context_never_promotes_unsent_draft_to_prompt() -> None:
+    """未送达 tail 只留下中断信号，正文必须从所有注入槽位消失。"""
+
+    from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline
+    from sylanne_alpha.session_state_store import SessionStateStore
+
+    store = SessionStateStore()
+    store.unfinished_replies.set("s1", "我想你（用户从未收到）")
+    observed: list[tuple[str, tuple[str, ...], str]] = []
+
+    class _Body:
+        def observe_shadow_signal(
+            self,
+            *,
+            text: str,
+            flags: list[str],
+            kind: str,
+        ) -> None:
+            observed.append((text, tuple(flags), kind))
+
+    class _Kernel:
+        body = _Body()
+
+    class _Host:
+        kernel = _Kernel()
+
+    class _Plugin:
+        _store = store
+        config: dict = {}
+        _config: dict = {}
+
+        def _host(self, _session_key: str) -> _Host:
+            return _Host()
+
+        async def _persist_kernel(
+            self,
+            _session_key: str,
+            _host: _Host,
+        ) -> None:
+            return None
+
+    pipe = LLMRequestPipeline(_Plugin())  # type: ignore[arg-type]
+    unfinished, outreach, memory = asyncio.run(
+        pipe._prepare_memory_context(
+            "s1",
+            "",
+            gap_seconds=0.0,
+            realtime_enabled=True,
+            history_depth=2,
+        )
+    )
+
+    assert unfinished == ""
+    assert "我想你" not in f"{unfinished}{outreach}{memory}"
+    assert store.unfinished_replies.get("s1") is None
+    assert observed == [("", ("unfinished_reply",), "interruption")]
