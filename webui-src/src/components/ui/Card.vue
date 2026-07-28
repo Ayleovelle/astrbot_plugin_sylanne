@@ -11,12 +11,17 @@ const emit = defineEmits<{ activate: [event: MouseEvent | KeyboardEvent] }>()
 const slots = useSlots()
 
 function isNestedInteractiveTarget(target: EventTarget | null): boolean {
-  return target instanceof Element && !!target.closest('a, button, input, select, textarea, [contenteditable="true"]')
+  return target instanceof Element && !!target.closest('a, button, input, select, textarea, [contenteditable="true"], [role="button"], [role="link"]')
+}
+
+function hasSelectionWithinCard(card: HTMLElement): boolean {
+  const selection = window.getSelection()
+  return !!(selection?.toString() && (card.contains(selection.anchorNode) || card.contains(selection.focusNode)))
 }
 
 function activate(event: MouseEvent | KeyboardEvent): void {
   if (!props.interactive || isNestedInteractiveTarget(event.target)) return
-  if (event.type === 'click' && window.getSelection()?.toString()) return
+  if (event.type === 'click' && hasSelectionWithinCard(event.currentTarget as HTMLElement)) return
   emit('activate', event)
 }
 
@@ -81,6 +86,9 @@ function onKeydown(event: KeyboardEvent): void {
   box-shadow: 0 2px 24px rgba(0, 0, 0, 0.28), 0 0 20px rgba(184, 138, 158, 0.06);
   transform: translateY(-1px);
   outline: none;
+}
+.card.interactive:focus-visible {
+  box-shadow: var(--ring-focus), 0 2px 24px rgba(0, 0, 0, 0.28), 0 0 20px rgba(184, 138, 158, 0.06);
 }
 .card-head {
   display: flex;

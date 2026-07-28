@@ -21,8 +21,10 @@ describe('observation chamber markup contracts', () => {
     expect(monitor).not.toContain('observation-open')
     expect(card).toContain(":role=\"interactive ? 'button' : undefined\"")
     expect(card).toContain("if (event.key === 'Enter' || event.key === ' ')")
-    expect(card).toContain("closest('a, button, input, select, textarea, [contenteditable=\"true\"]')")
-    expect(card).toContain('window.getSelection()?.toString()')
+    expect(card).toContain("[role=\"button\"], [role=\"link\"]")
+    expect(card).toContain('const selection = window.getSelection()')
+    expect(card).toContain('card.contains(selection.anchorNode)')
+    expect(card).toContain('var(--ring-focus)')
   })
 
   it('mounts one observation dialog and derives geometry from the owning card', () => {
