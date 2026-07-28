@@ -40,6 +40,10 @@ export function useBoot() {
     arrivalPending.value = true
   }
 
+  function cancelArrival(): void {
+    arrivalPending.value = false
+  }
+
   // DashboardLayout calls this once it has consumed the flag on mount.
   function consumeArrival(): boolean {
     const pending = arrivalPending.value
@@ -47,5 +51,12 @@ export function useBoot() {
     return pending
   }
 
-  return { done, arrivalPending, markDone, requestArrival, consumeArrival }
+  return {
+    done,
+    arrivalPending,
+    markDone,
+    requestArrival,
+    cancelArrival,
+    consumeArrival,
+  }
 }

@@ -6,6 +6,11 @@ import TopBar from './TopBar.vue'
 import AppFooter from './AppFooter.vue'
 import { useLiveStore } from '../../stores/live'
 import { useBoot } from '../../composables/useBoot'
+import {
+  ARRIVAL_CLEANUP_MS,
+  ARRIVAL_CONTENT_MS,
+  prefersReducedMotion,
+} from '../../motion/arrival'
 
 // The shell owns the shared /api/state poll for its whole lifetime, so every
 // dashboard page just reads useLiveStore().state.
@@ -13,12 +18,22 @@ const live = useLiveStore()
 onMounted(() => live.start(5000))
 onUnmounted(() => live.stop())
 
-// ── Arrival choreography (old transitionToDashboard entrance, UI/index.html
-// ~2028-2040): header slides down, footer slides up, spine nodes fade in,
-// and the current page's cards fly in staggered by column. Fires ONCE, only
-// when boot/LoginView flagged a real arrival — never on ordinary page nav.
+// ── Spine-first arrival choreography. A synchronous watcher applies the
+// hidden spine phase before the shell's first render, then advances all
+// content surfaces together only after the line has completed.
 const boot = useBoot()
-const arriving = ref(false)
+type ArrivalPhase = 'idle' | 'spine' | 'content'
+const arrivalPhase = ref<ArrivalPhase>('idle')
+let contentTimer: ReturnType<typeof setTimeout> | null = null
+let cleanupTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearArrivalTimers(): void {
+  if (contentTimer !== null) clearTimeout(contentTimer)
+  if (cleanupTimer !== null) clearTimeout(cleanupTimer)
+  contentTimer = null
+  cleanupTimer = null
+}
+
 // Reactive consume instead of a one-shot mount check: on a welcome-back boot
 // this layout mounts (under the boot cover) BEFORE the async verifyExisting()
 // resolves and requests the arrival — a mount-time consume would race it and
@@ -29,18 +44,25 @@ watch(
   () => boot.arrivalPending.value,
   (pending) => {
     if (!pending || !boot.consumeArrival()) return
-    arriving.value = true
-    // Strip once every choreographed animation below has finished — longest
-    // is the spine rail draw-in (1.2s) + its trailing node fade (0.9s delay
-    // + 0.4s), so this must clear noticeably later than the cards' own
-    // ~800ms, or the class would vanish mid-animation and pop the elements
-    // to their resting state.
-    setTimeout(() => {
-      arriving.value = false
-    }, 1400)
+    clearArrivalTimers()
+    if (prefersReducedMotion()) {
+      arrivalPhase.value = 'idle'
+      return
+    }
+
+    arrivalPhase.value = 'spine'
+    contentTimer = setTimeout(() => {
+      arrivalPhase.value = 'content'
+      contentTimer = null
+    }, ARRIVAL_CONTENT_MS)
+    cleanupTimer = setTimeout(() => {
+      arrivalPhase.value = 'idle'
+      cleanupTimer = null
+    }, ARRIVAL_CLEANUP_MS)
   },
-  { immediate: true },
+  { immediate: true, flush: 'sync' },
 )
+onUnmounted(clearArrivalTimers)
 
 // ── Directional page-switch (old .content-slider filmstrip, UI/index.html
 // ~285-289): navigating down the nav list slides the outgoing page up and
@@ -64,7 +86,13 @@ watch(
 </script>
 
 <template>
-  <div class="layout" :class="{ arrive: arriving }">
+  <div
+    class="layout"
+    :class="{
+      'arrival-spine': arrivalPhase === 'spine',
+      'arrival-content': arrivalPhase === 'content',
+    }"
+  >
     <SpineNav class="area-nav" />
     <TopBar class="area-top" />
     <main class="area-content">
@@ -175,60 +203,40 @@ watch(
   opacity: 0;
 }
 
-/* ── Arrival choreography: fires once, only on a real login/welcome-back
- * arrival (never on ordinary nav) — old transitionToDashboard entrance,
- * UI/index.html ~2028-2040 + .app-header/.app-footer/.card animate-in. */
-.arrive .area-top {
-  animation: shellDropIn 0.6s var(--ease-snap) 0.1s backwards;
+/* ── Arrival choreography: the first 1200ms show only the growing spine and
+ * its line-synchronised nodes. Shell chrome and the routed content subtree
+ * are hidden before the first paint, then all surfaces enter together. */
+.arrival-spine .area-top,
+.arrival-spine .area-foot,
+.arrival-spine .area-content > :deep(*) {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
 }
-.arrive .area-foot {
-  animation: shellRiseIn 0.6s var(--ease-snap) 0.1s backwards;
+.arrival-spine .area-nav :deep(.spine-line) {
+  animation: spineDrawIn 1200ms linear both;
 }
-.arrive .area-nav :deep(.spine-line) {
-  animation: spineDrawIn 1.2s var(--ease-organic) both;
+.arrival-spine .area-nav :deep(.spine-node),
+.arrival-spine .area-nav :deep(.spine-handle) {
+  animation: spineNodeIn 250ms var(--ease-organic) var(--arrival-delay) backwards;
 }
-/* Partial keyframe (from-only): animates opacity to each node's natural
- * resting value (.4 normal / 1 active) and never touches transform, so the
- * translate(-50%,-50%) centering isn't overridden mid-entrance. */
-.arrive .area-nav :deep(.spine-node) {
-  animation: spineNodeIn 0.4s var(--ease-organic) 0.9s backwards;
+.arrival-content .area-top {
+  animation: shellDropIn 600ms var(--ease-snap) both;
 }
-/* Cards now live inside .pane-left/.pane-right (the two dissected tissue
- * panes either side of the spine) instead of one shared grid, so the old
- * nth-child(even)/(odd) approximation is replaced with the real thing: each
- * pane's cards fly in FROM the direction the spine is on — left pane from
- * the left, right pane from the right — exactly like the old
- * cardFromLeft/cardFromRight split (UI/index.html .page-left/.page-right
- * .card.animate-in). Stagger is per-pane (each column counts its own
- * children), matching the old :nth-child stagger being scoped inside
- * .page-left/.page-right rather than across the whole page. */
-.arrive .area-content :deep(.pane-left .card) {
+.arrival-content .area-foot {
+  animation: shellRiseIn 600ms var(--ease-snap) both;
+}
+.arrival-content .area-content :deep(.pane-left .card),
+.arrival-content .area-content :deep(.pane-right .card) {
+  animation-duration: 600ms;
+  animation-timing-function: var(--ease-snap);
+  animation-fill-mode: both;
+}
+.arrival-content .area-content :deep(.pane-left .card) {
   animation-name: cardFromLeft;
-  animation-duration: 0.5s;
-  animation-timing-function: var(--ease-snap);
-  animation-fill-mode: backwards;
 }
-.arrive .area-content :deep(.pane-right .card) {
+.arrival-content .area-content :deep(.pane-right .card) {
   animation-name: cardFromRight;
-  animation-duration: 0.5s;
-  animation-timing-function: var(--ease-snap);
-  animation-fill-mode: backwards;
-}
-.arrive .area-content :deep(.pane-left .card:nth-child(2)),
-.arrive .area-content :deep(.pane-right .card:nth-child(2)) {
-  animation-delay: 0.07s;
-}
-.arrive .area-content :deep(.pane-left .card:nth-child(3)),
-.arrive .area-content :deep(.pane-right .card:nth-child(3)) {
-  animation-delay: 0.14s;
-}
-.arrive .area-content :deep(.pane-left .card:nth-child(4)),
-.arrive .area-content :deep(.pane-right .card:nth-child(4)) {
-  animation-delay: 0.21s;
-}
-.arrive .area-content :deep(.pane-left .card:nth-child(n + 5)),
-.arrive .area-content :deep(.pane-right .card:nth-child(n + 5)) {
-  animation-delay: 0.28s;
 }
 
 @keyframes shellDropIn {

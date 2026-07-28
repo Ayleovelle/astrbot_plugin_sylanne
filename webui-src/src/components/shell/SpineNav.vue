@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from '../../composables/useI18n'
+import { arrivalNodeDelay } from '../../motion/arrival'
 
 // ── Center-seam spine rail — restored from the old fixed-spine paradigm
 // (8655acd:UI/index.html ~164-242, ~3846-4013): a permanent floating rail on
@@ -207,7 +208,10 @@ onBeforeUnmount(() => {
       type="button"
       class="spine-node"
       :class="{ active: i === activeIndex, 'drag-near': i === dragHighlightIndex }"
-      :style="{ top: n.top + '%' }"
+      :style="{
+        top: n.top + '%',
+        '--arrival-delay': arrivalNodeDelay(n.top) + 'ms',
+      }"
       role="link"
       :aria-current="i === activeIndex ? 'page' : undefined"
       :aria-label="t(n.key)"
@@ -218,7 +222,12 @@ onBeforeUnmount(() => {
     <div
       class="spine-handle"
       :class="{ dragging }"
-      :style="{ top: handleTop + '%', transition: handleTransition, transform: `translate(-50%, -50%) scale(${handleScale})` }"
+      :style="{
+        top: handleTop + '%',
+        transition: handleTransition,
+        transform: `translate(-50%, -50%) scale(${handleScale})`,
+        '--arrival-delay': arrivalNodeDelay(NODES[activeIndex]?.top ?? MIN_TOP) + 'ms',
+      }"
       role="presentation"
       aria-hidden="true"
       @mousedown="startDrag"
@@ -265,9 +274,9 @@ onBeforeUnmount(() => {
     transparent calc(100% - var(--footer-h)),
     transparent 100%
   );
-  /* Resting state is fully drawn-in; DashboardLayout's `.arrive` choreography
-   * (fired once, only on a real login/welcome-back arrival) overrides this
-   * via the spineDrawIn keyframe animating clip-path from fully-clipped. */
+  /* Resting state is fully drawn-in; DashboardLayout's `.arrival-spine`
+   * choreography overrides this via the spineDrawIn keyframe animating
+   * clip-path from fully-clipped. */
   clip-path: inset(0 0 0% 0);
 }
 .spine-node {

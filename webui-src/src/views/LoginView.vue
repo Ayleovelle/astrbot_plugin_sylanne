@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref, watch } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useI18n } from '../composables/useI18n'
-import { useVoidTransition } from '../composables/useVoidTransition'
 import { useBoot } from '../composables/useBoot'
 import SpecimenCanvas from '../components/SpecimenCanvas.vue'
 
@@ -15,7 +14,6 @@ const router = useRouter()
 const route = useRoute()
 const auth = useAuthStore()
 const { t } = useI18n()
-const voidTransition = useVoidTransition()
 const boot = useBoot()
 
 type Phase = 'form' | 'verify'
@@ -42,6 +40,12 @@ function triggerShake(): void {
   })
 }
 
+function recoverFromNavigationFailure(): void {
+  boot.cancelArrival()
+  phase.value = 'form'
+  tokenInputEl.value?.focus()
+}
+
 async function submit(): Promise<void> {
   if (phase.value !== 'form') return
   const val = token.value.trim()
@@ -57,31 +61,14 @@ async function submit(): Promise<void> {
   if (ok) {
     verifyState.value = 'success'
     await delay(2200)
-    // 1. Specimen swallow plays exactly as before — ends fully solid.
-    await voidTransition.start('expanding')
-    // 2. Veil snaps opaque BEFORE the canvas unmounts (route change below),
-    //    so the solid void never drops for a frame between the two.
-    voidTransition.setVeilSolid(true)
     boot.requestArrival()
     const redirect = (route.query.redirect as string) || '/monitor'
-    // 3. Navigate underneath the opaque veil.
     try {
-      await router.replace(redirect)
+      const failure = await router.replace(redirect)
+      if (failure) recoverFromNavigationFailure()
     } catch {
-      // Failed nav (e.g. guard bounce) — never trap the UI behind a solid veil.
-      voidTransition.reset()
-      return
+      recoverFromNavigationFailure()
     }
-    // 4. Wait for the dashboard route to actually mount, then iris the veil
-    //    open — with a failsafe timeout so a stalled mount can't leave the
-    //    veil solid (or the FSM stuck mid-transition) forever.
-    await nextTick()
-    const revealTimedOut = await Promise.race([
-      voidTransition.start('revealing', 900).then(() => false),
-      delay(1500).then(() => true),
-    ])
-    if (revealTimedOut) voidTransition.reset()
-    voidTransition.setVeilSolid(false)
   } else {
     verifyState.value = 'error'
     await delay(1600)
