@@ -7,6 +7,7 @@ const source = (path: string): string =>
 describe('observation chamber markup contracts', () => {
   const monitor = source('views/MonitorView.vue')
   const card = source('components/ui/Card.vue')
+  const cardInteraction = source('components/ui/cardInteraction.ts')
   const modal = source('components/ui/Modal.vue')
   const chamber = source('components/monitor/ObservationChamber.vue')
   const chart = source('components/monitor/ObservationTrendChart.vue')
@@ -21,10 +22,13 @@ describe('observation chamber markup contracts', () => {
     expect(monitor).not.toContain('observation-open')
     expect(card).toContain(":role=\"interactive ? 'button' : undefined\"")
     expect(card).toContain("if (event.key === 'Enter' || event.key === ' ')")
-    expect(card).toContain("[role=\"button\"], [role=\"link\"]")
+    expect(card).toContain("import { isNestedInteractiveTarget }")
+    expect(cardInteraction).toContain("[role=\"button\"], [role=\"link\"]")
     expect(card).toContain('const selection = window.getSelection()')
     expect(card).toContain('card.contains(selection.anchorNode)')
     expect(card).toContain('var(--ring-focus)')
+    expect(card).toContain('animation: fadeUp 0.5s var(--ease-snap) backwards')
+    expect(card).toContain('transform: translateY(-1px)')
   })
 
   it('mounts one observation dialog and derives geometry from the owning card', () => {

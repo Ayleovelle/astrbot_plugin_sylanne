@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { useSlots } from 'vue'
+import { isNestedInteractiveTarget } from './cardInteraction'
 const props = defineProps<{
   title?: string
   interactive?: boolean
@@ -10,17 +11,13 @@ const props = defineProps<{
 const emit = defineEmits<{ activate: [event: MouseEvent | KeyboardEvent] }>()
 const slots = useSlots()
 
-function isNestedInteractiveTarget(target: EventTarget | null): boolean {
-  return target instanceof Element && !!target.closest('a, button, input, select, textarea, [contenteditable="true"], [role="button"], [role="link"]')
-}
-
 function hasSelectionWithinCard(card: HTMLElement): boolean {
   const selection = window.getSelection()
   return !!(selection?.toString() && (card.contains(selection.anchorNode) || card.contains(selection.focusNode)))
 }
 
 function activate(event: MouseEvent | KeyboardEvent): void {
-  if (!props.interactive || isNestedInteractiveTarget(event.target)) return
+  if (!props.interactive || isNestedInteractiveTarget(event.target, event.currentTarget)) return
   if (event.type === 'click' && hasSelectionWithinCard(event.currentTarget as HTMLElement)) return
   emit('activate', event)
 }
@@ -63,7 +60,7 @@ function onKeydown(event: KeyboardEvent): void {
   overflow: hidden;
   box-shadow: 0 2px 20px rgba(0, 0, 0, 0.22);
   transition: border-color var(--dur-mid) ease, box-shadow var(--dur-mid) ease, transform var(--dur-mid) ease;
-  animation: fadeUp 0.5s var(--ease-snap) both;
+  animation: fadeUp 0.5s var(--ease-snap) backwards;
   min-width: 0;
 }
 /* glowing "tissue slice" top edge — a constant faint version of the hover tint */
