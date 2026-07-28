@@ -12,19 +12,22 @@ describe('observation chamber markup contracts', () => {
   const chart = source('components/monitor/ObservationTrendChart.vue')
   const i18n = source('composables/useI18n.ts')
 
-  it('opens every monitor group from a real card action button', () => {
-    expect(monitor.match(/<template #action>/g) ?? []).toHaveLength(7)
-    expect(monitor.match(/class="observation-open"/g) ?? []).toHaveLength(7)
-    expect(monitor.match(/:aria-expanded=/g) ?? []).toHaveLength(7)
-    expect(monitor.match(/aria-controls="observation-chamber"/g) ?? []).toHaveLength(7)
-    expect(monitor.match(/@click="openObservation\('/g) ?? []).toHaveLength(7)
-    expect(monitor).toContain("t('observation.open')")
-    expect(card).not.toContain('@click=')
+  it('opens every monitor group from its whole interactive card surface', () => {
+    expect(monitor.match(/<Card :title=/g) ?? []).toHaveLength(7)
+    expect(monitor.match(/interactive/g) ?? []).toHaveLength(7)
+    expect(monitor.match(/:expanded=/g) ?? []).toHaveLength(7)
+    expect(monitor.match(/controls="observation-chamber"/g) ?? []).toHaveLength(7)
+    expect(monitor.match(/@activate="openObservation\('/g) ?? []).toHaveLength(7)
+    expect(monitor).not.toContain('observation-open')
+    expect(card).toContain(":role=\"interactive ? 'button' : undefined\"")
+    expect(card).toContain("if (event.key === 'Enter' || event.key === ' ')")
+    expect(card).toContain("closest('a, button, input, select, textarea, [contenteditable=\"true\"]')")
+    expect(card).toContain('window.getSelection()?.toString()')
   })
 
   it('mounts one observation dialog and derives geometry from the owning card', () => {
     expect(monitor.match(/<ObservationChamber/g) ?? []).toHaveLength(1)
-    expect(monitor).toContain("button.closest('.card')")
+    expect(monitor).toContain('card.getBoundingClientRect()')
     expect(monitor).toContain('getBoundingClientRect()')
     expect(monitor).toContain('originRect.value =')
     expect(monitor).toContain(':origin-rect="originRect"')

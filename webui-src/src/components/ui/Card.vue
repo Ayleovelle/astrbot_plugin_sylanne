@@ -1,11 +1,45 @@
 <script setup lang="ts">
 import { useSlots } from 'vue'
-defineProps<{ title?: string }>()
+const props = defineProps<{
+  title?: string
+  interactive?: boolean
+  expanded?: boolean
+  controls?: string
+  ariaLabel?: string
+}>()
+const emit = defineEmits<{ activate: [event: MouseEvent | KeyboardEvent] }>()
 const slots = useSlots()
+
+function isNestedInteractiveTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && !!target.closest('a, button, input, select, textarea, [contenteditable="true"]')
+}
+
+function activate(event: MouseEvent | KeyboardEvent): void {
+  if (!props.interactive || isNestedInteractiveTarget(event.target)) return
+  if (event.type === 'click' && window.getSelection()?.toString()) return
+  emit('activate', event)
+}
+
+function onKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault()
+    activate(event)
+  }
+}
 </script>
 
 <template>
-  <div class="card">
+  <div
+    class="card"
+    :class="{ interactive }"
+    :role="interactive ? 'button' : undefined"
+    :tabindex="interactive ? 0 : undefined"
+    :aria-label="interactive ? (ariaLabel || title) : undefined"
+    :aria-expanded="interactive ? expanded : undefined"
+    :aria-controls="interactive ? controls : undefined"
+    @click="activate"
+    @keydown="onKeydown"
+  >
     <div v-if="title || slots.header" class="card-head">
       <slot name="header"><span class="card-title">{{ title }}</span></slot>
       <slot name="action" />
@@ -23,7 +57,7 @@ const slots = useSlots()
   position: relative;
   overflow: hidden;
   box-shadow: 0 2px 20px rgba(0, 0, 0, 0.22);
-  transition: border-color var(--dur-mid) ease, box-shadow var(--dur-mid) ease;
+  transition: border-color var(--dur-mid) ease, box-shadow var(--dur-mid) ease, transform var(--dur-mid) ease;
   animation: fadeUp 0.5s var(--ease-snap) both;
   min-width: 0;
 }
@@ -38,9 +72,15 @@ const slots = useSlots()
   background: linear-gradient(90deg, transparent, var(--card-tick), transparent);
   opacity: 0.4;
 }
-.card:hover {
+.card.interactive {
+  cursor: pointer;
+}
+.card.interactive:hover,
+.card.interactive:focus-visible {
   border-color: rgba(184, 138, 158, 0.28);
   box-shadow: 0 2px 24px rgba(0, 0, 0, 0.28), 0 0 20px rgba(184, 138, 158, 0.06);
+  transform: translateY(-1px);
+  outline: none;
 }
 .card-head {
   display: flex;

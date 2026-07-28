@@ -37,11 +37,11 @@ const { t } = useI18n()
 const activeObservation = ref<ObservationGroup | null>(null)
 const observationOpen = ref(false)
 const originRect = ref<DOMRect | null>(null)
-function openObservation(group: ObservationGroup, event: MouseEvent): void {
+function openObservation(group: ObservationGroup, event: MouseEvent | KeyboardEvent): void {
   if (observationOpen.value) return
-  const button = event.currentTarget as HTMLButtonElement
-  button.focus()
-  originRect.value = button.closest('.card')?.getBoundingClientRect() || null
+  const card = event.currentTarget as HTMLElement
+  card.focus()
+  originRect.value = card.getBoundingClientRect()
   activeObservation.value = group
   observationOpen.value = true
 }
@@ -129,8 +129,7 @@ const timingRows = computed<TimingRow[]>(() => buildTimingRows(live.state))
 <template>
   <div v-if="live.state" class="page-split">
     <div class="pane-left">
-      <Card :title="t('monitor.emotion')">
-        <template #action><button type="button" class="observation-open" :aria-expanded="activeObservation === 'emotion' && observationOpen" aria-controls="observation-chamber" @click="openObservation('emotion', $event)">{{ t('observation.open') }}</button></template>
+      <Card :title="t('monitor.emotion')" interactive :aria-label="t('monitor.emotion')" :expanded="activeObservation === 'emotion' && observationOpen" controls="observation-chamber" @activate="openObservation('emotion', $event)">
         <BarRow
           v-for="row in emotionRows"
           :key="row.key"
@@ -141,13 +140,11 @@ const timingRows = computed<TimingRow[]>(() => buildTimingRows(live.state))
         />
       </Card>
 
-      <Card :title="t('monitor.boundary')">
-        <template #action><button type="button" class="observation-open" :aria-expanded="activeObservation === 'boundary' && observationOpen" aria-controls="observation-chamber" @click="openObservation('boundary', $event)">{{ t('observation.open') }}</button></template>
+      <Card :title="t('monitor.boundary')" interactive :aria-label="t('monitor.boundary')" :expanded="activeObservation === 'boundary' && observationOpen" controls="observation-chamber" @activate="openObservation('boundary', $event)">
         <StatGrid :items="boundaryItems" :cols="2" />
       </Card>
 
-      <Card :title="t('monitor.timing')">
-        <template #action><button type="button" class="observation-open" :aria-expanded="activeObservation === 'timing' && observationOpen" aria-controls="observation-chamber" @click="openObservation('timing', $event)">{{ t('observation.open') }}</button></template>
+      <Card :title="t('monitor.timing')" interactive :aria-label="t('monitor.timing')" :expanded="activeObservation === 'timing' && observationOpen" controls="observation-chamber" @activate="openObservation('timing', $event)">
         <table v-if="timingRows.length" class="timing-table mono">
           <thead>
             <tr>
@@ -171,18 +168,15 @@ const timingRows = computed<TimingRow[]>(() => buildTimingRows(live.state))
     </div>
 
     <div class="pane-right">
-      <Card :title="t('monitor.routing')">
-        <template #action><button type="button" class="observation-open" :aria-expanded="activeObservation === 'routing' && observationOpen" aria-controls="observation-chamber" @click="openObservation('routing', $event)">{{ t('observation.open') }}</button></template>
+      <Card :title="t('monitor.routing')" interactive :aria-label="t('monitor.routing')" :expanded="activeObservation === 'routing' && observationOpen" controls="observation-chamber" @activate="openObservation('routing', $event)">
         <RouteBar :dist="routeDist" />
       </Card>
 
-      <Card :title="t('monitor.gate')">
-        <template #action><button type="button" class="observation-open" :aria-expanded="activeObservation === 'gate' && observationOpen" aria-controls="observation-chamber" @click="openObservation('gate', $event)">{{ t('observation.open') }}</button></template>
+      <Card :title="t('monitor.gate')" interactive :aria-label="t('monitor.gate')" :expanded="activeObservation === 'gate' && observationOpen" controls="observation-chamber" @activate="openObservation('gate', $event)">
         <StatGrid :items="gateItems" :cols="3" />
       </Card>
 
-      <Card :title="t('monitor.expression')">
-        <template #action><button type="button" class="observation-open" :aria-expanded="activeObservation === 'expression' && observationOpen" aria-controls="observation-chamber" @click="openObservation('expression', $event)">{{ t('observation.open') }}</button></template>
+      <Card :title="t('monitor.expression')" interactive :aria-label="t('monitor.expression')" :expanded="activeObservation === 'expression' && observationOpen" controls="observation-chamber" @activate="openObservation('expression', $event)">
         <div class="expr-mode">
           <Badge variant="accent">{{ exprMode }}</Badge>
         </div>
@@ -195,8 +189,7 @@ const timingRows = computed<TimingRow[]>(() => buildTimingRows(live.state))
         />
       </Card>
 
-      <Card :title="t('monitor.feedback')">
-        <template #action><button type="button" class="observation-open" :aria-expanded="activeObservation === 'feedback' && observationOpen" aria-controls="observation-chamber" @click="openObservation('feedback', $event)">{{ t('observation.open') }}</button></template>
+      <Card :title="t('monitor.feedback')" interactive :aria-label="t('monitor.feedback')" :expanded="activeObservation === 'feedback' && observationOpen" controls="observation-chamber" @activate="openObservation('feedback', $event)">
         <StatGrid :items="feedbackItems" :cols="3" />
       </Card>
     </div>
@@ -255,6 +248,4 @@ const timingRows = computed<TimingRow[]>(() => buildTimingRows(live.state))
   letter-spacing: 1px;
   opacity: 0.7;
 }
-.observation-open { border: 1px solid var(--card-border); border-radius: var(--r-sm); color: var(--text-muted); background: transparent; padding: var(--space-2) var(--space-3); font-size: var(--font-xs); }
-.observation-open:hover, .observation-open:focus-visible { color: var(--text); border-color: var(--accent); outline: none; }
 </style>
