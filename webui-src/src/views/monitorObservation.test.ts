@@ -11,10 +11,18 @@ import {
   formatObservationBytes,
   formatObservationOldest,
   normalizeHistoryBuckets,
+  normalizedMeterPercent,
   resolveHistoryState,
 } from './monitorObservation'
 
 describe('monitor observation adapters', () => {
+  it('only gives normalized continuous readings a meter fill', () => {
+    expect(normalizedMeterPercent({ key: 'warmth', value: 0.42 })).toBe(42)
+    expect(normalizedMeterPercent({ key: 'warmth', value: 0 })).toBe(0)
+    expect(normalizedMeterPercent({ key: 'count', value: 12 })).toBeUndefined()
+    expect(normalizedMeterPercent({ key: 'route', value: 'dialogue', discrete: true })).toBeUndefined()
+  })
+
   it('maps all seven cards and preserves legacy aliases', () => {
     expect(OBSERVATION_GROUPS).toEqual([
       'emotion',

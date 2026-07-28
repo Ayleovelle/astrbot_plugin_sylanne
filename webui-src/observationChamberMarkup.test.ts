@@ -10,6 +10,7 @@ describe('observation chamber markup contracts', () => {
   const modal = source('components/ui/Modal.vue')
   const chamber = source('components/monitor/ObservationChamber.vue')
   const chart = source('components/monitor/ObservationTrendChart.vue')
+  const i18n = source('composables/useI18n.ts')
 
   it('opens every monitor group from a real card action button', () => {
     expect(monitor.match(/<template #action>/g) ?? []).toHaveLength(7)
@@ -58,6 +59,10 @@ describe('observation chamber markup contracts', () => {
     expect(chamber).toContain('reading-row')
     expect(chamber).toContain('lower-panel')
     expect(chamber).toContain('metadata-list')
+    expect(chamber).toContain("t('observation.explanation')")
+    expect(chamber).toContain('v-if="meterPercent(reading) !== undefined"')
+    expect(chamber).not.toContain("'28%'")
+    expect(i18n.match(/'observation\.explanation'/g) ?? []).toHaveLength(2)
   })
 
   it('renders only real normalized history on an accessible canvas', () => {
@@ -93,5 +98,7 @@ describe('observation chamber markup contracts', () => {
     expect(modal).toContain('.catch(() => {})')
     expect(modal).toContain('1100px')
     expect(modal).toContain('76dvh')
+    expect(modal).toContain('var(--bg) 96%')
+    expect(modal).toContain('var(--bg) 28%')
   })
 })

@@ -7,6 +7,11 @@ export type ObservationGroup = (typeof OBSERVATION_GROUPS)[number]
 export interface Reading { key: string; value: number | string; discrete?: boolean }
 export interface NormalizedBucket { fromMs: number; toMs: number; metrics: Record<string, { first?: number; last?: number; min?: number; max?: number }> }
 
+export function normalizedMeterPercent(reading: Reading): number | undefined {
+  if (reading.discrete || typeof reading.value !== 'number' || reading.value < 0 || reading.value > 1) return undefined
+  return reading.value * 100
+}
+
 const number = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) ? value : undefined
 const pick = (source: Record<string, unknown> | undefined, keys: string[]): number | undefined => {
   for (const key of keys) { const value = number(source?.[key]); if (value !== undefined) return value }
