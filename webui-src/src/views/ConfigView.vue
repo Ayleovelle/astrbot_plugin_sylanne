@@ -2,6 +2,10 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { apiFetch, ApiError } from '../api/client'
 import { useI18n } from '../composables/useI18n'
+import {
+  conciseFeedbackError,
+  useInteractionFeedback,
+} from '../composables/useInteractionFeedback'
 import type { ProviderInfo, SettingsSchemaEntry } from '../api/types'
 import type { ModelRoutingState, SettingsResponseWithModelRouting } from '../types'
 import {
@@ -26,6 +30,7 @@ import ErrorState from '../components/ui/ErrorState.vue'
 import type { SelectOption } from '../components/ui/Select.vue'
 
 const { t } = useI18n()
+const feedback = useInteractionFeedback()
 
 // computed so it re-renders on language switch (t() reads lang.value)
 const MANUAL_INPUT_LABEL = computed(() => t('config.manual_input'))
@@ -310,8 +315,16 @@ async function save(): Promise<void> {
     savedTimer = setTimeout(() => {
       justSaved.value = false
     }, 2500)
+    feedback.show(t('feedback.settings_saved'), 'success')
   } catch (e) {
     saveError.value = e instanceof ApiError ? e.message : String(e)
+    const detail = conciseFeedbackError(e, saveError.value)
+    feedback.show(
+      detail
+        ? `${t('feedback.settings_failed')} · ${detail}`
+        : t('feedback.settings_failed'),
+      'error',
+    )
   } finally {
     saving.value = false
   }

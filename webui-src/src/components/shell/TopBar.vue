@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from '../../composables/useI18n'
+import { useInteractionFeedback } from '../../composables/useInteractionFeedback'
 import { useTheme, useLang } from '../../composables/useTheme'
 import { useAuthStore } from '../../stores/auth'
 import { useSessionStore, sessionId, sessionLabel } from '../../stores/session'
@@ -21,14 +22,34 @@ const { lang, toggleLang } = useLang()
 const auth = useAuthStore()
 const session = useSessionStore()
 const live = useLiveStore()
+const feedback = useInteractionFeedback()
 
 const online = computed(() => !!live.state && !live.error)
 const canLogout = !usesHostAuthentication()
 
-function onSessionChange(e: Event): void {
+async function onSessionChange(e: Event): Promise<void> {
   const id = (e.target as HTMLSelectElement).value
   session.setCurrent(id)
-  void live.fetchOnce()
+  feedback.show(
+    `${t('feedback.session_switching')} · ${id}`,
+    'neutral',
+    { sticky: true },
+  )
+  const applied = await live.fetchOnce()
+  if (session.current !== id) return
+  if (applied) {
+    feedback.show(`${t('feedback.session_switched')} · ${id}`, 'success')
+  } else {
+    feedback.clear()
+  }
+}
+function onThemeToggle(): void {
+  toggleTheme()
+  feedback.show(t('feedback.theme_switched'))
+}
+function onLanguageToggle(): void {
+  toggleLang()
+  feedback.show(t('feedback.language_switched'))
 }
 function logout(): void {
   auth.logout()
@@ -69,10 +90,10 @@ function logout(): void {
         </option>
       </select>
 
-      <button class="chip" :title="t('chrome.theme')" @click="toggleTheme">
+      <button class="chip" :title="t('chrome.theme')" @click="onThemeToggle">
         {{ theme === 'dark' ? '☾' : '☀' }}
       </button>
-      <button class="chip mono" :title="t('chrome.lang')" @click="toggleLang">
+      <button class="chip mono" :title="t('chrome.lang')" @click="onLanguageToggle">
         {{ lang === 'zh' ? '中' : 'EN' }}
       </button>
       <button

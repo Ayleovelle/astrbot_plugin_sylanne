@@ -6,6 +6,8 @@ import TopBar from './TopBar.vue'
 import AppFooter from './AppFooter.vue'
 import { useLiveStore } from '../../stores/live'
 import { useBoot } from '../../composables/useBoot'
+import { useI18n } from '../../composables/useI18n'
+import { useInteractionFeedback } from '../../composables/useInteractionFeedback'
 import {
   ARRIVAL_CLEANUP_MS,
   ARRIVAL_CONTENT_MS,
@@ -15,8 +17,18 @@ import {
 // The shell owns the shared /api/state poll for its whole lifetime, so every
 // dashboard page just reads useLiveStore().state.
 const live = useLiveStore()
+const { t } = useI18n()
+const feedback = useInteractionFeedback()
 onMounted(() => live.start(5000))
 onUnmounted(() => live.stop())
+watch(
+  () => live.error,
+  (current, previous) => {
+    if (previous && !current) {
+      feedback.show(t('feedback.connection_restored'), 'success')
+    }
+  },
+)
 
 // ── Spine-first arrival choreography. A synchronous watcher applies the
 // hidden spine phase before the shell's first render, then advances all

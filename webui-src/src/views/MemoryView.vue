@@ -11,6 +11,10 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { apiFetch } from '../api/client'
 import { num } from '../composables/useAdapt'
 import { useI18n } from '../composables/useI18n'
+import {
+  conciseFeedbackError,
+  useInteractionFeedback,
+} from '../composables/useInteractionFeedback'
 import { useSessionStore } from '../stores/session'
 import { useAuthStore } from '../stores/auth'
 import type { MemoryPoolItem, MemoryPoolsResponse } from '../api/types'
@@ -25,6 +29,7 @@ import TextInput from '../components/ui/TextInput.vue'
 const { t } = useI18n()
 const session = useSessionStore()
 const auth = useAuthStore()
+const feedback = useInteractionFeedback()
 
 // ---- data: own poll of /api/memory_pools ----
 
@@ -112,6 +117,7 @@ const consolidating = ref(false)
 const consolidateCountdown = ref(0)
 const sinkResult = ref<number | null>(null)
 let consolidateTimer: number | null = null
+let organizingFeedbackId: number | null = null
 // Guards against a duplicate finishConsolidate() call — the ===0 branch and
 // the interval-completion branch could otherwise both fire and the second,
 // stale GET /api/memory_sink would clobber the real sunk result.
@@ -129,6 +135,11 @@ async function startConsolidate(): Promise<void> {
   consolidating.value = true
   consolidateFinished = false
   sinkResult.value = null
+  organizingFeedbackId = feedback.show(
+    t('feedback.memory_organizing'),
+    'neutral',
+    { sticky: true },
+  )
   try {
     const resp = await apiFetch<{ estimated_seconds?: number }>('/api/memory_consolidate', {
       method: 'POST',
@@ -150,8 +161,16 @@ async function startConsolidate(): Promise<void> {
         void finishConsolidate()
       }
     }, 1000)
-  } catch {
+  } catch (e) {
     consolidating.value = false
+    organizingFeedbackId = null
+    const detail = conciseFeedbackError(e, '')
+    feedback.show(
+      detail
+        ? `${t('feedback.memory_failed')} · ${detail}`
+        : t('feedback.memory_failed'),
+      'error',
+    )
   }
 }
 
@@ -161,9 +180,22 @@ async function finishConsolidate(): Promise<void> {
   try {
     const resp = await apiFetch<{ sunk?: number }>('/api/memory_sink' + query())
     sinkResult.value = num(resp as Record<string, unknown>, ['sunk'], 0)
+    organizingFeedbackId = null
+    feedback.show(
+      `${t('feedback.memory_completed')} · ${sinkResult.value}`,
+      'success',
+    )
     void fetchPools()
-  } catch {
+  } catch (e) {
     sinkResult.value = null
+    organizingFeedbackId = null
+    const detail = conciseFeedbackError(e, '')
+    feedback.show(
+      detail
+        ? `${t('feedback.memory_failed')} · ${detail}`
+        : t('feedback.memory_failed'),
+      'error',
+    )
   } finally {
     consolidating.value = false
   }
@@ -171,6 +203,10 @@ async function finishConsolidate(): Promise<void> {
 
 onUnmounted(() => {
   clearConsolidateTimer()
+  if (organizingFeedbackId !== null) {
+    feedback.clear(organizingFeedbackId)
+    organizingFeedbackId = null
+  }
 })
 
 // ---- meltdown ----
@@ -213,9 +249,20 @@ async function openMeltdown(): Promise<void> {
   try {
     const resp = await apiFetch<{ nonce?: string }>('/api/meltdown_nonce' + query())
     meltdownNonce.value = String(resp.nonce ?? '')
-  } catch {
+    if (!meltdownNonce.value) {
+      meltdownError.value = 'nonce fetch failed'
+      feedback.show(t('feedback.meltdown_prepare_failed'), 'error')
+    }
+  } catch (e) {
     meltdownNonce.value = ''
     meltdownError.value = 'nonce fetch failed'
+    const detail = conciseFeedbackError(e, '')
+    feedback.show(
+      detail
+        ? `${t('feedback.meltdown_prepare_failed')} · ${detail}`
+        : t('feedback.meltdown_prepare_failed'),
+      'error',
+    )
   }
 }
 
@@ -262,16 +309,28 @@ async function fireMeltdown(): Promise<void> {
       body: { session: session.current, nonce: meltdownNonce.value },
     })
     if (meltdownCancelled) return
-    if (resp.ok) {
-      // Reuse the auth store's logout path exactly (clears token + status),
-      // then hard-redirect so no stale in-memory state (pools, session)
-      // survives the meltdown.
-      auth.logout()
-      window.location.hash = '#/login'
-      window.location.reload()
+    if (!resp.ok) {
+      meltdownError.value = 'meltdown failed'
+      feedback.show(t('feedback.meltdown_execute_failed'), 'error')
+      return
     }
-  } catch {
-    if (!meltdownCancelled) meltdownError.value = 'meltdown failed'
+    // Reuse the auth store's logout path exactly (clears token + status),
+    // then hard-redirect so no stale in-memory state (pools, session)
+    // survives the meltdown.
+    auth.logout()
+    window.location.hash = '#/login'
+    window.location.reload()
+  } catch (e) {
+    if (!meltdownCancelled) {
+      meltdownError.value = 'meltdown failed'
+      const detail = conciseFeedbackError(e, '')
+      feedback.show(
+        detail
+          ? `${t('feedback.meltdown_execute_failed')} · ${detail}`
+          : t('feedback.meltdown_execute_failed'),
+        'error',
+      )
+    }
   }
 }
 

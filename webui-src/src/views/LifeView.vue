@@ -8,6 +8,10 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { apiFetch } from '../api/client'
 import { num } from '../composables/useAdapt'
 import { useI18n } from '../composables/useI18n'
+import {
+  conciseFeedbackError,
+  useInteractionFeedback,
+} from '../composables/useInteractionFeedback'
 import { useSessionStore } from '../stores/session'
 import type {
   LifeAuditEntry,
@@ -33,6 +37,7 @@ import Modal from '../components/ui/Modal.vue'
 
 const { t } = useI18n()
 const session = useSessionStore()
+const feedback = useInteractionFeedback()
 
 // ---- data: own 30s poll of /api/life/* (status/events/projects/audit) ----
 
@@ -251,14 +256,29 @@ async function postControl(action: string, value?: unknown): Promise<void> {
     if (resp && resp.ok) {
       controlsMsgIsError.value = false
       controlsMsg.value = 'Applied: ' + action
+      feedback.show(t('feedback.operation_applied'), 'success')
     } else {
       controlsMsgIsError.value = true
       controlsMsg.value = (resp && resp.error) || 'Failed'
+      const detail = conciseFeedbackError(resp?.error, '')
+      feedback.show(
+        detail
+          ? `${t('feedback.operation_failed')} · ${detail}`
+          : t('feedback.operation_failed'),
+        'error',
+      )
     }
     void fetchAll()
-  } catch {
+  } catch (e) {
     controlsMsgIsError.value = true
     controlsMsg.value = 'Request error'
+    const detail = conciseFeedbackError(e, '')
+    feedback.show(
+      detail
+        ? `${t('feedback.operation_failed')} · ${detail}`
+        : t('feedback.operation_failed'),
+      'error',
+    )
   }
 }
 
@@ -327,9 +347,17 @@ async function exportDiagnostics(): Promise<void> {
     setTimeout(() => URL.revokeObjectURL(url), 1000)
     controlsMsgIsError.value = false
     controlsMsg.value = 'Diagnostics JSON downloaded'
-  } catch {
+    feedback.show(t('feedback.diagnostics_exported'), 'success')
+  } catch (e) {
     controlsMsgIsError.value = true
     controlsMsg.value = 'Diagnostics download failed'
+    const detail = conciseFeedbackError(e, '')
+    feedback.show(
+      detail
+        ? `${t('feedback.diagnostics_failed')} · ${detail}`
+        : t('feedback.diagnostics_failed'),
+      'error',
+    )
   } finally {
     exportingDiag.value = false
   }
