@@ -3,6 +3,7 @@
 // dismiss. Backs the Memory meltdown confirmation flow (nonce type-to-confirm
 // + countdown), which is built INTO the memory page using this shell.
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { morphFromRect, prefersReducedObservationMotion } from '../monitor/observationChamberMotion'
 
 export type ModalSize = 'sm' | 'md' | 'lg'
 
@@ -11,8 +12,10 @@ const props = withDefaults(
     open: boolean
     title?: string
     size?: ModalSize
+    variant?: 'standard' | 'observation'
+    originRect?: DOMRect | null
   }>(),
-  { size: 'md' },
+  { size: 'md', variant: 'standard' },
 )
 
 const emit = defineEmits<{
@@ -21,8 +24,26 @@ const emit = defineEmits<{
 
 const dialogRef = ref<HTMLElement | null>(null)
 const lastFocused = ref<HTMLElement | null>(null)
+let motion: Animation | null = null
+let settling = false
+let opening = false
 
 function close(): void {
+  if (settling) return
+  if (opening) {
+    motion?.finished.then(() => { opening = false; close() }).catch(() => {})
+    return
+  }
+  if (props.variant === 'observation' && props.originRect && dialogRef.value && !prefersReducedObservationMotion()) {
+    const transform = morphFromRect(props.originRect, dialogRef.value.getBoundingClientRect())
+    if (transform) {
+      settling = true
+      motion?.cancel()
+      motion = dialogRef.value.animate([{ transform: 'none', opacity: 1 }, { transform: `translate(${transform.translateX}px, ${transform.translateY}px) scale(${transform.scaleX}, ${transform.scaleY})`, opacity: 0.75 }], { duration: 180, easing: 'cubic-bezier(.2,.8,.2,1)', fill: 'forwards' })
+      motion.onfinish = () => { settling = false; if (dialogRef.value) dialogRef.value.style.visibility = 'hidden'; emit('update:open', false) }
+      return
+    }
+  }
   emit('update:open', false)
 }
 
@@ -77,30 +98,45 @@ watch(
   () => props.open,
   (isOpen) => {
     if (isOpen) {
+      settling = false
+      if (dialogRef.value) dialogRef.value.style.visibility = ''
       lastFocused.value = document.activeElement as HTMLElement | null
       nextTick(() => {
         const els = focusableEls()
         if (els.length > 0) els[0].focus()
         else dialogRef.value?.focus()
+        if (props.variant === 'observation' && props.originRect && dialogRef.value && !prefersReducedObservationMotion()) {
+          const transform = morphFromRect(props.originRect, dialogRef.value.getBoundingClientRect())
+          if (transform) {
+            motion?.cancel()
+            opening = true
+            motion = dialogRef.value.animate([{ transform: `translate(${transform.translateX}px, ${transform.translateY}px) scale(${transform.scaleX}, ${transform.scaleY})`, opacity: 0.75 }, { transform: 'none', opacity: 1 }], { duration: 220, easing: 'cubic-bezier(.2,.8,.2,1)' })
+            motion.onfinish = () => { opening = false }
+          }
+        }
       })
     } else {
-      lastFocused.value?.focus()
+      motion?.cancel()
+      settling = false
+      opening = false
+      if (lastFocused.value?.isConnected) lastFocused.value?.focus()
       lastFocused.value = null
     }
   },
 )
 
 onBeforeUnmount(() => {
+  motion?.cancel()
   lastFocused.value = null
 })
 
-const sizeClass = computed(() => 'size-' + props.size)
+const sizeClass = computed(() => ['size-' + props.size, 'variant-' + props.variant])
 </script>
 
 <template>
   <Teleport to="body">
     <Transition name="modal-fade">
-      <div v-if="open" class="modal-backdrop" @mousedown.self="onBackdropClick">
+      <div v-if="open" class="modal-backdrop" :class="{ 'backdrop-observation': variant === 'observation' }" @mousedown.self="onBackdropClick">
         <div
           ref="dialogRef"
           class="modal-panel"
@@ -183,6 +219,9 @@ const sizeClass = computed(() => 'size-' + props.size)
 .modal-panel.size-lg {
   max-width: 760px;
 }
+.modal-panel.variant-observation { width: min(72vw, 1040px); max-width: none; max-height: 72vh; }
+.backdrop-observation { background: rgba(10, 8, 10, .42); backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px); }
+@media (max-width: 620px) { .modal-panel.variant-observation { width: calc(100vw - var(--space-6) * 2); max-height: calc(100dvh - var(--space-6) * 2); } }
 
 .modal-head {
   display: flex;

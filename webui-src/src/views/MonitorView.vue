@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { onBeforeRouteLeave } from 'vue-router'
 import { useLiveStore } from '../stores/live'
 import { useI18n } from '../composables/useI18n'
 import Card from '../components/ui/Card.vue'
@@ -9,6 +10,9 @@ import Badge from '../components/ui/Badge.vue'
 import RouteBar from '../components/ui/RouteBar.vue'
 import type { RouteDistribution } from '../api/types'
 import { buildTimingRows, type TimingRow } from './monitorTiming'
+import ObservationChamber from '../components/monitor/ObservationChamber.vue'
+import { useSessionStore } from '../stores/session'
+import type { ObservationGroup } from './monitorObservation'
 
 // Mirrors the old dashboard's adaptState()/num() helper (UI/index.html,
 // pre-rebuild — see git history at 1f8a21f). Explicit null/undefined/''
@@ -28,7 +32,22 @@ function num(obj: Record<string, unknown> | undefined, keys: string[], dflt: num
 }
 
 const live = useLiveStore()
+const session = useSessionStore()
 const { t } = useI18n()
+const activeObservation = ref<ObservationGroup | null>(null)
+const observationOpen = ref(false)
+const originRect = ref<DOMRect | null>(null)
+function openObservation(group: ObservationGroup, event: MouseEvent): void {
+  if (observationOpen.value) return
+  const button = event.currentTarget as HTMLButtonElement
+  button.focus()
+  originRect.value = button.closest('.card')?.getBoundingClientRect() || null
+  activeObservation.value = group
+  observationOpen.value = true
+}
+function closeObservation(): void { observationOpen.value = false; activeObservation.value = null; originRect.value = null }
+watch(() => session.current, closeObservation, { flush: 'sync' })
+onBeforeRouteLeave(() => closeObservation())
 
 const EMOTION_KEYS = [
   'warmth',
@@ -111,6 +130,7 @@ const timingRows = computed<TimingRow[]>(() => buildTimingRows(live.state))
   <div v-if="live.state" class="page-split">
     <div class="pane-left">
       <Card :title="t('monitor.emotion')">
+        <template #action><button type="button" class="observation-open" :aria-expanded="activeObservation === 'emotion' && observationOpen" aria-controls="observation-chamber" @click="openObservation('emotion', $event)">{{ t('observation.open') }}</button></template>
         <BarRow
           v-for="row in emotionRows"
           :key="row.key"
@@ -122,10 +142,12 @@ const timingRows = computed<TimingRow[]>(() => buildTimingRows(live.state))
       </Card>
 
       <Card :title="t('monitor.boundary')">
+        <template #action><button type="button" class="observation-open" :aria-expanded="activeObservation === 'boundary' && observationOpen" aria-controls="observation-chamber" @click="openObservation('boundary', $event)">{{ t('observation.open') }}</button></template>
         <StatGrid :items="boundaryItems" :cols="2" />
       </Card>
 
       <Card :title="t('monitor.timing')">
+        <template #action><button type="button" class="observation-open" :aria-expanded="activeObservation === 'timing' && observationOpen" aria-controls="observation-chamber" @click="openObservation('timing', $event)">{{ t('observation.open') }}</button></template>
         <table v-if="timingRows.length" class="timing-table mono">
           <thead>
             <tr>
@@ -150,14 +172,17 @@ const timingRows = computed<TimingRow[]>(() => buildTimingRows(live.state))
 
     <div class="pane-right">
       <Card :title="t('monitor.routing')">
+        <template #action><button type="button" class="observation-open" :aria-expanded="activeObservation === 'routing' && observationOpen" aria-controls="observation-chamber" @click="openObservation('routing', $event)">{{ t('observation.open') }}</button></template>
         <RouteBar :dist="routeDist" />
       </Card>
 
       <Card :title="t('monitor.gate')">
+        <template #action><button type="button" class="observation-open" :aria-expanded="activeObservation === 'gate' && observationOpen" aria-controls="observation-chamber" @click="openObservation('gate', $event)">{{ t('observation.open') }}</button></template>
         <StatGrid :items="gateItems" :cols="3" />
       </Card>
 
       <Card :title="t('monitor.expression')">
+        <template #action><button type="button" class="observation-open" :aria-expanded="activeObservation === 'expression' && observationOpen" aria-controls="observation-chamber" @click="openObservation('expression', $event)">{{ t('observation.open') }}</button></template>
         <div class="expr-mode">
           <Badge variant="accent">{{ exprMode }}</Badge>
         </div>
@@ -171,14 +196,15 @@ const timingRows = computed<TimingRow[]>(() => buildTimingRows(live.state))
       </Card>
 
       <Card :title="t('monitor.feedback')">
+        <template #action><button type="button" class="observation-open" :aria-expanded="activeObservation === 'feedback' && observationOpen" aria-controls="observation-chamber" @click="openObservation('feedback', $event)">{{ t('observation.open') }}</button></template>
         <StatGrid :items="feedbackItems" :cols="3" />
       </Card>
     </div>
   </div>
-
   <div v-else class="loading-state">
     <span class="mono">{{ t('common.loading') }}</span>
   </div>
+  <ObservationChamber :open="observationOpen" :group="activeObservation" :session="session.current" :state="live.state" :origin-rect="originRect" @update:open="closeObservation" />
 </template>
 
 <style scoped>
@@ -229,4 +255,6 @@ const timingRows = computed<TimingRow[]>(() => buildTimingRows(live.state))
   letter-spacing: 1px;
   opacity: 0.7;
 }
+.observation-open { border: 1px solid var(--card-border); border-radius: var(--r-sm); color: var(--text-muted); background: transparent; padding: var(--space-2) var(--space-3); font-size: var(--font-xs); }
+.observation-open:hover, .observation-open:focus-visible { color: var(--text); border-color: var(--accent); outline: none; }
 </style>
