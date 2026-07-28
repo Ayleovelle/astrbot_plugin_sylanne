@@ -23,6 +23,7 @@ import asyncio
 import json
 import secrets
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -35,6 +36,126 @@ except ImportError:
     import logging as _logging
 
     logger = _logging.getLogger("astrbot_plugin_sylanne")  # type: ignore
+
+
+OBSERVATION_HISTORY_GROUPS = frozenset(
+    {
+        "emotion",
+        "boundary",
+        "timing",
+        "routing",
+        "gate",
+        "expression",
+        "feedback",
+    }
+)
+
+
+def _observation_query_value(
+    query: Mapping[str, Any],
+    name: str,
+) -> Any:
+    value = query.get(name)
+    if isinstance(value, (list, tuple)):
+        return value[-1] if value else None
+    return value
+
+
+def _observation_query_int(
+    query: Mapping[str, Any],
+    name: str,
+    *,
+    default: int | None = None,
+    nonnegative: bool = False,
+) -> int | None:
+    raw = _observation_query_value(query, name)
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        raise ValueError(f"{name} must be an integer")
+    if isinstance(raw, int):
+        value = raw
+    elif isinstance(raw, str):
+        candidate = raw.strip()
+        if not candidate:
+            raise ValueError(f"{name} must be an integer")
+        try:
+            value = int(candidate, 10)
+        except ValueError as exc:
+            raise ValueError(f"{name} must be an integer") from exc
+    else:
+        raise ValueError(f"{name} must be an integer")
+    if nonnegative and value < 0:
+        raise ValueError(f"{name} must be nonnegative")
+    return value
+
+
+def parse_observation_history_query(
+    query: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the shared observation-history query contract."""
+
+    session = str(_observation_query_value(query, "session") or "").strip()
+    if not session:
+        raise ValueError("session is required")
+    group = str(_observation_query_value(query, "group") or "").strip()
+    if group not in OBSERVATION_HISTORY_GROUPS:
+        allowed = ", ".join(sorted(OBSERVATION_HISTORY_GROUPS))
+        raise ValueError(f"group must be one of: {allowed}")
+
+    from_ms = _observation_query_int(query, "from_ms", nonnegative=True)
+    to_ms = _observation_query_int(query, "to_ms", nonnegative=True)
+    if from_ms is not None and to_ms is not None and from_ms > to_ms:
+        raise ValueError("from_ms must be less than or equal to to_ms")
+    max_points = _observation_query_int(query, "max_points", default=240)
+    assert max_points is not None
+    max_points = max(1, min(1000, max_points))
+    return {
+        "session": session,
+        "group": group,
+        "from_ms": from_ms,
+        "to_ms": to_ms,
+        "max_points": max_points,
+    }
+
+
+def build_observation_history_payload(
+    plugin: Any,
+    query: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the canonical history payload used by every HTTP surface."""
+
+    parsed = parse_observation_history_query(query)
+    session_context = getattr(plugin, "_session_ctx", None)
+    store = getattr(session_context, "observation_history_store", None)
+    if store is None or not callable(getattr(store, "query", None)):
+        raise RuntimeError("observation history is unavailable")
+    result = store.query(
+        parsed["session"],
+        group=parsed["group"],
+        from_ms=parsed["from_ms"],
+        to_ms=parsed["to_ms"],
+        max_points=parsed["max_points"],
+    )
+    storage_source = result["storage"]
+    limit_bytes = storage_source["limit_bytes"]
+    storage = {
+        "used_bytes": storage_source["used_bytes"],
+        "limit_bytes": None if limit_bytes == 0 else limit_bytes,
+        "oldest_ms": storage_source["oldest_ms"],
+        "segment_count": storage_source["segment_count"],
+        "cleanup_active": storage_source["cleanup_active"],
+    }
+    return {
+        "schema_version": result["schema_version"],
+        "session": result["session"],
+        "group": result["group"],
+        "points": result["points"],
+        "sample_count": result["sample_count"],
+        "downsampled": result["downsampled"],
+        "partial": result["partial"],
+        "storage": storage,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -477,6 +598,16 @@ class WebUIRoutes:
             "sessions": _webui_session_items(self._p, all_sessions),
             "life_simulation": self._p._life_simulator.to_dict(),
         }
+
+    async def observation_history_handler(self) -> dict[str, Any]:
+        """Return persisted, numeric-only observation history."""
+
+        from astrbot.api.web import request
+
+        try:
+            return build_observation_history_payload(self._p, request.query)
+        except (RuntimeError, ValueError) as exc:
+            return {"error": str(exc)}
 
     # ------------------------------------------------------------------
     # Settings handlers

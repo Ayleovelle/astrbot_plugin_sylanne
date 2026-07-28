@@ -1392,6 +1392,7 @@ class EmotionalStatePlugin(Star):
         webui_routes: list[tuple[str, str, list[str]]] = [
             (f"/{P}/webui", "page_handler", ["GET"]),
             (f"/{P}/api/state", "state_handler", ["GET"]),
+            (f"/{P}/api/observation_history", "observation_history_handler", ["GET"]),
             (f"/{P}/api/settings", "settings_get_handler", ["GET"]),
             (f"/{P}/api/settings", "settings_post_handler", ["POST"]),
             (f"/{P}/api/computation_logs", "computation_logs_handler", ["GET"]),

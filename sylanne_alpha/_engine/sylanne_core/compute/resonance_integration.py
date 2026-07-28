@@ -1049,6 +1049,21 @@ class ResonanceSpine:
         return out
 
     def to_dict(self) -> dict[str, Any]:
+        timing: dict[str, float] = {}
+        if self._timings:
+            timing["total_ms"] = self.latest_timing_ns / 1_000_000.0
+            for layer in (
+                "perception",
+                "gate",
+                "void_scar",
+                "sheaf",
+                "hgt",
+                "boundary",
+                "expression",
+            ):
+                samples = self._layer_timings.get(layer)
+                if samples:
+                    timing[layer] = float(samples[-1]) / 1_000_000.0
         return {
             "tick_count": self._tick_count,
             "last_process_time": self._last_process_time,
@@ -1062,6 +1077,7 @@ class ResonanceSpine:
             "sheaf": self._sheaf.to_dict(),
             "route_counts": dict(self._route_counts),
             "feedback_counts": dict(self._feedback_counts),
+            "timing": timing,
             "expression_drive": self._expression_drive,
             "expression_threshold": self._expression_threshold,
             "expression_policy": self._expression_policy.to_dict(),

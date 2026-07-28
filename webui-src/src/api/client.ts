@@ -8,6 +8,10 @@
 
 import { devMock } from './devMock'
 import { bridgeFetch, getAstrBotBridge } from './astrBotBridge'
+import type {
+  ObservationHistoryParams,
+  ObservationHistoryResponse,
+} from './types'
 
 const TOKEN_KEY = 'sylanne_token'
 let csrfToken = ''
@@ -61,6 +65,29 @@ export class ApiError extends Error {
     this.status = status
     this.data = data
   }
+}
+
+export function fetchObservationHistory(
+  params: ObservationHistoryParams,
+  signal?: AbortSignal,
+): Promise<ObservationHistoryResponse> {
+  const query = new URLSearchParams()
+  query.set('session', params.session)
+  query.set('group', params.group)
+  if (params.from_ms !== undefined) {
+    query.set('from_ms', String(params.from_ms))
+  }
+  if (params.to_ms !== undefined) {
+    query.set('to_ms', String(params.to_ms))
+  }
+  if (params.max_points !== undefined) {
+    query.set('max_points', String(params.max_points))
+  }
+  const path = `/api/observation_history?${query.toString()}`
+  if (getAstrBotBridge()) {
+    return apiFetch<ObservationHistoryResponse>(path)
+  }
+  return apiFetch<ObservationHistoryResponse>(path, { signal })
 }
 
 export interface ApiOptions {

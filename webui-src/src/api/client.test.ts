@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, apiBase, apiFetch, usesHostAuthentication } from './client'
+import {
+  ApiError,
+  apiBase,
+  apiFetch,
+  fetchObservationHistory,
+  usesHostAuthentication,
+} from './client'
 
 function stubToken(token = 'standalone-secret'): void {
   vi.stubGlobal('localStorage', {
@@ -64,6 +70,50 @@ describe('apiBase', () => {
     expect(apiGet).toHaveBeenCalledWith('api/state', { session: 'friend:42' })
     expect(fetchMock).not.toHaveBeenCalled()
     expect(usesHostAuthentication()).toBe(true)
+  })
+
+  it('uses the AstrBot bridge for observation history without passing its signal', async () => {
+    const apiGet = vi.fn().mockResolvedValue({
+      schema_version: 'sylanne.observation.history.v1',
+      session: 'friend:42',
+      group: 'timing',
+      points: [],
+      sample_count: 0,
+      downsampled: false,
+      partial: false,
+      storage: {
+        used_bytes: 0,
+        limit_bytes: null,
+        oldest_ms: null,
+        segment_count: 0,
+        cleanup_active: false,
+      },
+    })
+    vi.stubGlobal('window', {
+      AstrBotPluginPage: { apiGet, apiPost: vi.fn() },
+    })
+    vi.stubGlobal('location', {
+      pathname: '/api/plugin/page/content/astrbot_plugin_sylanne/dashboard/index.html',
+    })
+    vi.stubGlobal('fetch', vi.fn())
+    const signal = new AbortController().signal
+
+    await fetchObservationHistory(
+      {
+        session: 'friend:42',
+        group: 'timing',
+        from_ms: 10,
+        max_points: 12,
+      },
+      signal,
+    )
+
+    expect(apiGet).toHaveBeenCalledWith('api/observation_history', {
+      session: 'friend:42',
+      group: 'timing',
+      from_ms: '10',
+      max_points: '12',
+    })
   })
 
   it('uses the AstrBot bridge for POST without leaking standalone auth', async () => {
@@ -137,5 +187,51 @@ describe('apiBase', () => {
       Authorization: 'Bearer standalone-secret',
     })
     expect(usesHostAuthentication()).toBe(false)
+  })
+
+  it('fetches standalone observation history with a relative URL, bearer, and signal', async () => {
+    const payload = {
+      schema_version: 'sylanne.observation.history.v1',
+      session: 'standalone',
+      group: 'emotion',
+      points: [],
+      sample_count: 0,
+      downsampled: false,
+      partial: false,
+      storage: {
+        used_bytes: 0,
+        limit_bytes: null,
+        oldest_ms: null,
+        segment_count: 0,
+        cleanup_active: false,
+      },
+    }
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(payload))
+    vi.stubGlobal('window', {})
+    vi.stubGlobal('location', { pathname: '/dashboard' })
+    vi.stubGlobal('fetch', fetchMock)
+    stubToken()
+    const signal = new AbortController().signal
+
+    await expect(
+      fetchObservationHistory(
+        {
+          session: 'standalone',
+          group: 'emotion',
+          from_ms: 10,
+          to_ms: 20,
+          max_points: 5,
+        },
+        signal,
+      ),
+    ).resolves.toEqual(payload)
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      '/api/observation_history?session=standalone&group=emotion&from_ms=10&to_ms=20&max_points=5',
+    )
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({
+      signal,
+      headers: { Authorization: 'Bearer standalone-secret' },
+    })
   })
 })

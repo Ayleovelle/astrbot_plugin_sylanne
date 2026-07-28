@@ -57,6 +57,18 @@ def _snapshot(value: float = 0.25) -> dict[str, Any]:
             },
             "expression_drive": 0.44,
             "feedback_counts": {"accepted": 5, "ignored": 2, "rejected": 1},
+            "timing": {
+                "total_ms": 2.5,
+                "perception": 0.1,
+                "gate": 0.2,
+                "void_scar": 0.3,
+                "sheaf": 0.4,
+                "hgt": 0.5,
+                "boundary": 0.6,
+                "expression": 0.7,
+                "rolling_samples": [1, 2, 3],
+                "private_note": "PRIVATE TIMING",
+            },
             "engine": {"memory": "PRIVATE ENGINE STATE"},
         },
         "_last_computation_result": {
@@ -108,6 +120,8 @@ def test_projection_is_explicit_finite_allow_list() -> None:
     snapshot = _snapshot()
     snapshot["_last_computation_result"]["emotion"]["warmth"] = float("nan")
     snapshot["computation"]["boundary"]["repair_rate"] = float("inf")
+    snapshot["computation"]["timing"]["gate"] = float("nan")
+    snapshot["computation"]["timing"]["expression"] = "0.7"
 
     row = history.project_observation("user/../../unsafe", snapshot, 1_234)
 
@@ -120,6 +134,7 @@ def test_projection_is_explicit_finite_allow_list() -> None:
         "emotion",
         "gate",
         "route",
+        "timing",
         "boundary",
         "expression",
         "feedback",
@@ -143,6 +158,14 @@ def test_projection_is_explicit_finite_allow_list() -> None:
     assert row["groups"]["route"] == {
         "route": "resonance",
         "route_counts": {"resonance": 7, "skip": 2},
+    }
+    assert row["groups"]["timing"] == {
+        "total_ms": 2.5,
+        "perception": 0.1,
+        "void_scar": 0.3,
+        "sheaf": 0.4,
+        "hgt": 0.5,
+        "boundary": 0.6,
     }
     assert row["groups"]["boundary"] == {
         "boundary_integrity": 0.91,
@@ -176,6 +199,25 @@ def test_projection_is_explicit_finite_allow_list() -> None:
     ):
         assert forbidden not in serialized
     assert len(row["digest"]) == 64
+
+
+def test_resonance_spine_snapshot_projects_latest_real_timings_in_ms() -> None:
+    from sylanne_alpha._engine.sylanne_core.compute.kernel import AlphaKernel
+
+    kernel = AlphaKernel.boot("timing-session")
+    before = kernel.computation.to_dict()["timing"]
+    assert before == {}
+
+    kernel.tick({"text": "measure a real computation", "now": 1.0})
+    timing = kernel.computation.to_dict()["timing"]
+
+    assert timing["total_ms"] == pytest.approx(
+        kernel.computation._timings[-1] / 1_000_000.0
+    )
+    for layer, samples in kernel.computation._layer_timings.items():
+        assert timing[layer] == pytest.approx(samples[-1] / 1_000_000.0)
+    assert all(value >= 0 for value in timing.values())
+    json.dumps(timing)
 
 
 def test_projection_digest_ignores_capture_time_but_includes_session_and_values() -> None:
@@ -270,8 +312,8 @@ def test_append_deduplicates_across_restart_and_query_is_chronological(
         max_points=None,
     )
 
-    assert [point["captured_at_ms"] for point in result["points"]] == [100, 300]
-    assert [point["warmth"] for point in result["points"]] == [0.3, 0.2]
+    assert [point["from_ms"] for point in result["points"]] == [100, 300]
+    assert [point["first"]["warmth"] for point in result["points"]] == [0.3, 0.2]
     assert result["sample_count"] == 2
     assert result["partial"] is False
     assert result["storage"]["segment_count"] == 1
@@ -294,7 +336,7 @@ def test_missing_or_corrupt_manifest_is_rebuilt_by_scanning_segments(
     rebuilt = history.ObservationHistoryStore(tmp_path, lambda: 0)
     result = rebuilt.query("session-a", group="emotion", from_ms=None, to_ms=None, max_points=None)
 
-    assert [point["warmth"] for point in result["points"]] == [0.2]
+    assert [point["first"]["warmth"] for point in result["points"]] == [0.2]
     parsed_manifest = json.loads(manifest.read_text(encoding="utf-8"))
     assert parsed_manifest["schema_version"] == "sylanne.observation.manifest.v1"
 
@@ -314,7 +356,7 @@ def test_invalid_utf8_manifest_is_rebuilt_by_scanning_segments(
         pytest.fail("invalid UTF-8 manifest was not treated as corrupt")
     result = rebuilt.query("session-a", group="emotion", from_ms=None, to_ms=None, max_points=None)
 
-    assert [point["warmth"] for point in result["points"]] == [0.2]
+    assert [point["first"]["warmth"] for point in result["points"]] == [0.2]
     assert json.loads(manifest.read_text(encoding="utf-8"))["schema_version"] == "sylanne.observation.manifest.v1"
 
 
@@ -346,7 +388,7 @@ def test_manifest_with_reused_next_segment_number_is_rebuilt(
     )
     result = rebuilt.query("session-a", group="emotion", from_ms=None, to_ms=None, max_points=None)
 
-    assert [point["warmth"] for point in result["points"]] == [0.1, 0.2, 0.3]
+    assert [point["first"]["warmth"] for point in result["points"]] == [0.1, 0.2, 0.3]
     assert {path.name for path in _jsonl_paths(tmp_path)} == {
         "segment-00000001.jsonl",
         "segment-00000002.jsonl",
@@ -366,7 +408,7 @@ def test_corrupt_or_truncated_rows_are_skipped_and_mark_query_partial(
 
     result = store.query("session-a", group="emotion", from_ms=None, to_ms=None, max_points=None)
 
-    assert [point["warmth"] for point in result["points"]] == [0.2]
+    assert [point["first"]["warmth"] for point in result["points"]] == [0.2]
     assert result["partial"] is True
 
 
@@ -388,7 +430,7 @@ def test_restart_closes_truncated_active_segment_before_next_append(
     )
     result = restarted.query("session-a", group="emotion", from_ms=None, to_ms=None, max_points=None)
 
-    assert [point["warmth"] for point in result["points"]] == [0.2, 0.3]
+    assert [point["first"]["warmth"] for point in result["points"]] == [0.2, 0.3]
     assert result["partial"] is True
     assert result["storage"]["segment_count"] == 2
 
@@ -404,11 +446,283 @@ def test_query_filters_range_and_reports_dynamic_global_storage_metadata(
     limit[0] = 0
     result = store.query("session-a", group="emotion", from_ms=101, to_ms=102, max_points=1)
 
-    assert [point["captured_at_ms"] for point in result["points"]] == [101, 102]
+    assert result["points"] == [
+        {
+            "from_ms": 101,
+            "to_ms": 102,
+            "first": {
+                "warmth": 0.2,
+                "arousal": 0.2,
+                "valence": -0.1,
+                "tension": 0.3,
+                "curiosity": 0.4,
+                "repair_pressure": 0.05,
+                "expression_drive": 0.44,
+                "boundary_firmness": 0.75,
+                "coherence": 0.82,
+            },
+            "last": {
+                "warmth": 0.3,
+                "arousal": 0.2,
+                "valence": -0.1,
+                "tension": 0.3,
+                "curiosity": 0.4,
+                "repair_pressure": 0.05,
+                "expression_drive": 0.44,
+                "boundary_firmness": 0.75,
+                "coherence": 0.82,
+            },
+            "min": {
+                "warmth": 0.2,
+                "arousal": 0.2,
+                "valence": -0.1,
+                "tension": 0.3,
+                "curiosity": 0.4,
+                "repair_pressure": 0.05,
+                "expression_drive": 0.44,
+                "boundary_firmness": 0.75,
+                "coherence": 0.82,
+            },
+            "max": {
+                "warmth": 0.3,
+                "arousal": 0.2,
+                "valence": -0.1,
+                "tension": 0.3,
+                "curiosity": 0.4,
+                "repair_pressure": 0.05,
+                "expression_drive": 0.44,
+                "boundary_firmness": 0.75,
+                "coherence": 0.82,
+            },
+        }
+    ]
     assert result["storage"]["limit_bytes"] == 0
     assert result["storage"]["used_bytes"] > 0
     assert result["storage"]["oldest_ms"] == 100
+    assert result["sample_count"] == 2
+    assert result["downsampled"] is True
+
+
+def test_query_downsamples_into_deterministic_time_buckets(
+    tmp_path: Path,
+) -> None:
+    history = _history_module()
+    store = history.ObservationHistoryStore(tmp_path, lambda: 0)
+    samples = (
+        (100, 0.4),
+        (110, 0.1),
+        (120, 0.3),
+        (130, 0.8),
+        (140, 0.2),
+        (150, 0.6),
+    )
+    for captured_at_ms, value in samples:
+        assert store.append_snapshot(
+            "session-a",
+            _snapshot(value),
+            captured_at_ms=captured_at_ms,
+        )
+
+    result = store.query(
+        "session-a",
+        group="emotion",
+        from_ms=None,
+        to_ms=None,
+        max_points=2,
+    )
+
+    assert result["sample_count"] == 6
+    assert result["downsampled"] is True
+    assert len(result["points"]) == 2
+    assert [
+        (
+            point["from_ms"],
+            point["to_ms"],
+            point["first"]["warmth"],
+            point["last"]["warmth"],
+            point["min"]["warmth"],
+            point["max"]["warmth"],
+        )
+        for point in result["points"]
+    ] == [
+        (100, 120, 0.4, 0.3, 0.1, 0.4),
+        (130, 150, 0.8, 0.6, 0.2, 0.8),
+    ]
+    assert result == store.query(
+        "session-a",
+        group="emotion",
+        from_ms=None,
+        to_ms=None,
+        max_points=2,
+    )
+
+
+def test_query_uses_one_bucket_per_sample_when_not_downsampled(
+    tmp_path: Path,
+) -> None:
+    history = _history_module()
+    store = history.ObservationHistoryStore(tmp_path, lambda: 0)
+    _append_values(store, "session-a", [0.2, 0.4], start_ms=20)
+
+    result = store.query(
+        "session-a",
+        group="emotion",
+        from_ms=None,
+        to_ms=None,
+        max_points=2,
+    )
+
     assert result["downsampled"] is False
+    assert [point["from_ms"] for point in result["points"]] == [20, 21]
+    assert [point["to_ms"] for point in result["points"]] == [20, 21]
+    assert all(set(point) == {"from_ms", "to_ms", "first", "last", "min", "max"} for point in result["points"])
+    assert all(
+        point["first"] == point["last"] == point["min"] == point["max"]
+        for point in result["points"]
+    )
+
+
+def test_query_aggregates_each_numeric_metric_across_missing_values(
+    tmp_path: Path,
+) -> None:
+    history = _history_module()
+    store = history.ObservationHistoryStore(tmp_path, lambda: 0)
+    first = _snapshot(0.2)
+    del first["_last_computation_result"]["emotion"]["warmth"]
+    first["_last_computation_result"]["emotion"]["arousal"] = 0.1
+    second = _snapshot(0.5)
+    del second["_last_computation_result"]["emotion"]["arousal"]
+
+    assert store.append_snapshot("session-a", first, captured_at_ms=100)
+    assert store.append_snapshot("session-a", second, captured_at_ms=200)
+
+    [bucket] = store.query(
+        "session-a",
+        group="emotion",
+        from_ms=None,
+        to_ms=None,
+        max_points=1,
+    )["points"]
+
+    assert bucket["first"]["arousal"] == 0.1
+    assert bucket["last"]["arousal"] == 0.1
+    assert bucket["first"]["warmth"] == 0.5
+    assert bucket["last"]["warmth"] == 0.5
+    assert bucket["min"]["warmth"] == 0.5
+    assert bucket["max"]["warmth"] == 0.5
+
+
+def test_query_routing_and_expression_drop_discrete_values(
+    tmp_path: Path,
+) -> None:
+    history = _history_module()
+    store = history.ObservationHistoryStore(tmp_path, lambda: 0)
+    assert store.append_snapshot(
+        "session-a",
+        _snapshot(),
+        captured_at_ms=100,
+    )
+
+    [routing] = store.query(
+        "session-a",
+        group="routing",
+        from_ms=None,
+        to_ms=None,
+        max_points=None,
+    )["points"]
+    [expression] = store.query(
+        "session-a",
+        group="expression",
+        from_ms=None,
+        to_ms=None,
+        max_points=None,
+    )["points"]
+
+    assert routing["first"] == {"resonance": 7, "skip": 2}
+    assert routing["last"] == routing["min"] == routing["max"] == routing["first"]
+    assert "route" not in json.dumps(routing)
+    assert "mode" not in json.dumps(expression)
+    assert all(
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+        for summary in ("first", "last", "min", "max")
+        for value in expression[summary].values()
+    )
+
+
+def test_unknown_session_returns_empty_strict_history_response(
+    tmp_path: Path,
+) -> None:
+    history = _history_module()
+    store = history.ObservationHistoryStore(tmp_path, lambda: 0)
+
+    result = store.query(
+        "missing-session",
+        group="timing",
+        from_ms=10,
+        to_ms=20,
+        max_points=20,
+    )
+
+    assert set(result) == {
+        "schema_version",
+        "session",
+        "group",
+        "points",
+        "sample_count",
+        "downsampled",
+        "partial",
+        "storage",
+    }
+    assert result["schema_version"] == "sylanne.observation.history.v1"
+    assert result["session"] == "missing-session"
+    assert result["group"] == "timing"
+    assert result["points"] == []
+    assert result["sample_count"] == 0
+    assert result["downsampled"] is False
+    assert result["partial"] is False
+
+
+def test_query_skips_old_rows_without_numeric_values_for_requested_group(
+    tmp_path: Path,
+) -> None:
+    history = _history_module()
+    old_snapshot = _snapshot()
+    del old_snapshot["computation"]["timing"]
+    old_row = history.project_observation(
+        "session-a",
+        old_snapshot,
+        100,
+    )
+    del old_row["groups"]["timing"]
+    old_row["digest"] = history._digest_payload(old_row)
+    session_dir = tmp_path / hashlib.sha256(b"session-a").hexdigest()
+    session_dir.mkdir(parents=True)
+    (session_dir / "segment-00000001.jsonl").write_bytes(
+        json.dumps(
+            old_row,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
+    store = history.ObservationHistoryStore(tmp_path, lambda: 0)
+
+    result = store.query(
+        "session-a",
+        group="timing",
+        from_ms=None,
+        to_ms=None,
+        max_points=1,
+    )
+
+    assert result["points"] == []
+    assert result["sample_count"] == 0
+    assert result["downsampled"] is False
+    assert result["partial"] is False
+    assert result["storage"]["segment_count"] == 1
+    assert result["storage"]["oldest_ms"] == 100
+    assert result["storage"]["used_bytes"] > 0
 
 
 def test_storage_used_bytes_counts_manifest_and_segments_but_not_temp(

@@ -38,6 +38,7 @@ from sylanne_alpha.webui_routes import (
     _comp_gate_dict,
     _comp_route_stats,
     _webui_session_items,
+    build_observation_history_payload,
     build_model_routing_payload,
 )
 
@@ -327,6 +328,18 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         # Item 24: 在 state 响应中附带 csrf_token
         data["csrf_token"] = _csrf_token
         return web.json_response(data)
+
+    async def handle_observation_history(request: web.Request) -> web.Response:
+        try:
+            payload = build_observation_history_payload(
+                _plugin(plugin),
+                request.query,
+            )
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        except RuntimeError as exc:
+            return web.json_response({"error": str(exc)}, status=503)
+        return web.json_response(payload)
 
     async def handle_life_status(request: web.Request) -> web.Response:
         """PR-B6：生活模拟只读可观测面板。
@@ -1614,6 +1627,7 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
     app.router.add_get("/health", handle_health)
     app.router.add_get("/metrics", handle_metrics)
     app.router.add_get("/api/state", handle_state)
+    app.router.add_get("/api/observation_history", handle_observation_history)
     app.router.add_get("/api/life/status", handle_life_status)  # PR-B6 只读观测
     # Phase 4：生活观测面板（events / projects / audit / diagnostics / controls）
     app.router.add_get("/api/life/events", handle_life_events)
@@ -1917,6 +1931,20 @@ def start_webui_thread_server(
                     # Item 24: 在 state 响应中附带 csrf_token
                     state["csrf_token"] = _csrf_token
                     self._send_json(state)
+                elif path == "/api/observation_history":
+                    try:
+                        with _plugin_access_lock:
+                            payload = build_observation_history_payload(
+                                _plugin(plugin),
+                                query,
+                            )
+                    except ValueError as exc:
+                        self._send_json({"error": str(exc)}, status=400)
+                        return
+                    except RuntimeError as exc:
+                        self._send_json({"error": str(exc)}, status=503)
+                        return
+                    self._send_json(payload)
                 elif path == "/api/settings":
                     with _plugin_access_lock:
                         current_plugin = _plugin(plugin)

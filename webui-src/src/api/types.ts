@@ -70,6 +70,51 @@ export interface FeedbackState {
   [k: string]: number | undefined
 }
 
+export type ObservationHistoryGroup =
+  | 'emotion'
+  | 'boundary'
+  | 'timing'
+  | 'routing'
+  | 'gate'
+  | 'expression'
+  | 'feedback'
+
+export interface ObservationHistoryParams {
+  session: string
+  group: ObservationHistoryGroup
+  from_ms?: number
+  to_ms?: number
+  max_points?: number
+}
+
+export interface ObservationHistoryPoint {
+  from_ms: number
+  to_ms: number
+  first: Record<string, number>
+  last: Record<string, number>
+  min: Record<string, number>
+  max: Record<string, number>
+}
+
+export interface ObservationHistoryStorage {
+  used_bytes: number
+  limit_bytes: number | null
+  oldest_ms: number | null
+  segment_count: number
+  cleanup_active: boolean
+}
+
+export interface ObservationHistoryResponse {
+  schema_version: 'sylanne.observation.history.v1'
+  session: string
+  group: ObservationHistoryGroup
+  points: ObservationHistoryPoint[]
+  sample_count: number
+  downsampled: boolean
+  partial: boolean
+  storage: ObservationHistoryStorage
+}
+
 export interface TimingLayer {
   avg?: number
   avg_ms?: number

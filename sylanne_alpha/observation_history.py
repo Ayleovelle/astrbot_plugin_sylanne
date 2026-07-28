@@ -51,6 +51,16 @@ _EXPRESSION_KEYS = (
     "expression_count",
 )
 _FEEDBACK_KEYS = ("accepted", "ignored", "rejected")
+_TIMING_KEYS = (
+    "total_ms",
+    "perception",
+    "gate",
+    "void_scar",
+    "sheaf",
+    "hgt",
+    "boundary",
+    "expression",
+)
 _COUNT_KEYS = {
     "history_len",
     "phase_transitions",
@@ -195,6 +205,10 @@ def project_observation(
         _dict(computation.get("feedback_counts")),
         _FEEDBACK_KEYS,
     )
+    timing = _numeric_projection(
+        _dict(computation.get("timing")),
+        _TIMING_KEYS,
+    )
 
     row: dict[str, Any] = {
         "schema_version": SAMPLE_SCHEMA_VERSION,
@@ -206,6 +220,7 @@ def project_observation(
             "emotion": emotion,
             "gate": gate,
             "route": route,
+            "timing": timing,
             "boundary": boundary,
             "expression": expression,
             "feedback": feedback,
@@ -331,14 +346,15 @@ class ObservationHistoryStore:
         to_ms: int | None = None,
         max_points: int | None = None,
     ) -> dict[str, Any]:
-        """Return valid raw points in chronological order with storage metadata."""
+        """Return numeric observation buckets in chronological order."""
 
-        del max_points  # deterministic bucketing is added by the API task
+        resolved_max_points = 240 if max_points is None else int(max_points)
+        resolved_max_points = max(1, min(1000, resolved_max_points))
         requested_group = str(group)
         stored_group = "route" if requested_group == "routing" else requested_group
         session = str(session_key)
         with self._lock:
-            points: list[dict[str, Any]] = []
+            samples: list[tuple[int, dict[str, int | float]]] = []
             partial = False
             session_meta = self._manifest["sessions"].get(_session_key(session))
             if session_meta is not None and session_meta.get("session") == session:
@@ -358,20 +374,96 @@ class ObservationHistoryStore:
                             continue
                         if to_ms is not None and captured > int(to_ms):
                             continue
-                        values = _dict(_dict(row.get("groups")).get(stored_group))
-                        points.append({"captured_at_ms": captured, **values})
-            points.sort(key=lambda point: point["captured_at_ms"])
+                        values = self._numeric_group_values(
+                            stored_group,
+                            _dict(_dict(row.get("groups")).get(stored_group)),
+                        )
+                        if not values:
+                            continue
+                        samples.append((captured, values))
+            samples.sort(key=lambda sample: sample[0])
+            points = self._bucket_samples(samples, resolved_max_points)
             storage = self._storage_metadata()
             return {
                 "schema_version": HISTORY_SCHEMA_VERSION,
                 "session": session,
                 "group": requested_group,
                 "points": points,
-                "sample_count": len(points),
-                "downsampled": False,
+                "sample_count": len(samples),
+                "downsampled": len(samples) > resolved_max_points,
                 "partial": partial,
                 "storage": storage,
             }
+
+    @staticmethod
+    def _numeric_group_values(
+        stored_group: str,
+        values: dict[str, Any],
+    ) -> dict[str, int | float]:
+        source = (
+            _dict(values.get("route_counts"))
+            if stored_group == "route"
+            else values
+        )
+        numeric: dict[str, int | float] = {}
+        for key, value in source.items():
+            if not isinstance(key, str):
+                continue
+            number = _finite_number(value)
+            if number is not None:
+                numeric[key] = number
+        return numeric
+
+    @classmethod
+    def _bucket_samples(
+        cls,
+        samples: list[tuple[int, dict[str, int | float]]],
+        max_points: int,
+    ) -> list[dict[str, Any]]:
+        if not samples:
+            return []
+        if len(samples) <= max_points:
+            return [cls._summarize_bucket([sample]) for sample in samples]
+
+        first_ms = samples[0][0]
+        span = samples[-1][0] - first_ms + 1
+        by_index: dict[int, list[tuple[int, dict[str, int | float]]]] = {}
+        for sample in samples:
+            index = min(
+                max_points - 1,
+                ((sample[0] - first_ms) * max_points) // span,
+            )
+            by_index.setdefault(index, []).append(sample)
+        return [
+            cls._summarize_bucket(by_index[index])
+            for index in sorted(by_index)
+        ]
+
+    @staticmethod
+    def _summarize_bucket(
+        samples: list[tuple[int, dict[str, int | float]]],
+    ) -> dict[str, Any]:
+        first: dict[str, int | float] = {}
+        last: dict[str, int | float] = {}
+        minimum: dict[str, int | float] = {}
+        maximum: dict[str, int | float] = {}
+        for _, values in samples:
+            for key, value in values.items():
+                if key not in first:
+                    first[key] = value
+                    minimum[key] = value
+                    maximum[key] = value
+                last[key] = value
+                minimum[key] = min(minimum[key], value)
+                maximum[key] = max(maximum[key], value)
+        return {
+            "from_ms": samples[0][0],
+            "to_ms": samples[-1][0],
+            "first": first,
+            "last": last,
+            "min": minimum,
+            "max": maximum,
+        }
 
     @staticmethod
     def _new_session_meta(session: str) -> dict[str, Any]:

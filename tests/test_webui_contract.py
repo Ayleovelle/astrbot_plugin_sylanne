@@ -1,9 +1,15 @@
 """WebUI API 端点契约测试（验证端点注册和基本响应格式）。"""
 import asyncio
 import json
+import socket
 import sys
+from contextlib import closing
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+
+import pytest
 
 sys.path.insert(0, '.')
 
@@ -161,6 +167,257 @@ def test_standalone_aiohttp_and_stdlib_settings_use_the_same_payload_builder() -
 
     assert "await _settings_payload(current_plugin)" in async_source
     assert "asyncio.run(_settings_payload(current_plugin))" in stdlib_source
+
+
+class _ObservationStore:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def query(
+        self,
+        session: str,
+        *,
+        group: str,
+        from_ms: int | None,
+        to_ms: int | None,
+        max_points: int,
+    ) -> dict:
+        self.calls.append(
+            {
+                "session": session,
+                "group": group,
+                "from_ms": from_ms,
+                "to_ms": to_ms,
+                "max_points": max_points,
+            }
+        )
+        return {
+            "schema_version": "sylanne.observation.history.v1",
+            "session": session,
+            "group": group,
+            "points": [],
+            "sample_count": 0,
+            "downsampled": False,
+            "partial": False,
+            "storage": {
+                "used_bytes": 17,
+                "limit_bytes": 0,
+                "oldest_ms": None,
+                "segment_count": 0,
+                "cleanup_active": False,
+            },
+        }
+
+
+def _observation_plugin(store: _ObservationStore | None = None) -> SimpleNamespace:
+    return SimpleNamespace(
+        _session_ctx=SimpleNamespace(
+            observation_history_store=store or _ObservationStore()
+        )
+    )
+
+
+def test_observation_history_query_parser_validates_and_clamps() -> None:
+    from sylanne_alpha.webui_routes import parse_observation_history_query
+
+    assert parse_observation_history_query(
+        {
+            "session": " friend:42 ",
+            "group": "timing",
+            "from_ms": "0",
+            "to_ms": "900",
+            "max_points": "5000",
+        }
+    ) == {
+        "session": "friend:42",
+        "group": "timing",
+        "from_ms": 0,
+        "to_ms": 900,
+        "max_points": 1000,
+    }
+    assert parse_observation_history_query(
+        {"session": "s", "group": "emotion"}
+    )["max_points"] == 240
+    assert parse_observation_history_query(
+        {"session": "s", "group": "emotion", "max_points": "-7"}
+    )["max_points"] == 1
+
+
+@pytest.mark.parametrize(
+    ("query", "message"),
+    [
+        ({"session": "", "group": "emotion"}, "session"),
+        ({"session": "s", "group": "route"}, "group"),
+        ({"session": "s", "group": "unknown"}, "group"),
+        ({"session": "s", "group": "emotion", "from_ms": "-1"}, "from_ms"),
+        ({"session": "s", "group": "emotion", "to_ms": "-1"}, "to_ms"),
+        ({"session": "s", "group": "emotion", "from_ms": "1.5"}, "from_ms"),
+        ({"session": "s", "group": "emotion", "to_ms": ""}, "to_ms"),
+        ({"session": "s", "group": "emotion", "max_points": "many"}, "max_points"),
+        (
+            {
+                "session": "s",
+                "group": "emotion",
+                "from_ms": "11",
+                "to_ms": "10",
+            },
+            "from_ms",
+        ),
+    ],
+)
+def test_observation_history_query_parser_rejects_invalid_values(
+    query: dict[str, str],
+    message: str,
+) -> None:
+    from sylanne_alpha.webui_routes import parse_observation_history_query
+
+    with pytest.raises(ValueError, match=message):
+        parse_observation_history_query(query)
+
+
+def test_observation_history_payload_is_the_single_store_query_mapping() -> None:
+    from sylanne_alpha.webui_routes import build_observation_history_payload
+
+    store = _ObservationStore()
+    payload = build_observation_history_payload(
+        _observation_plugin(store),
+        {
+            "session": "session-a",
+            "group": "routing",
+            "from_ms": "10",
+            "to_ms": "20",
+            "max_points": "12",
+        },
+    )
+
+    assert store.calls == [
+        {
+            "session": "session-a",
+            "group": "routing",
+            "from_ms": 10,
+            "to_ms": 20,
+            "max_points": 12,
+        }
+    ]
+    assert payload["storage"]["limit_bytes"] is None
+
+
+def test_native_observation_history_handler_and_error_dict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sylanne_alpha.webui_routes import WebUIRoutes
+
+    store = _ObservationStore()
+    plugin = _observation_plugin(store)
+    web = ModuleType("astrbot.api.web")
+    web.request = SimpleNamespace(
+        query={"session": "native-session", "group": "boundary"}
+    )
+    monkeypatch.setitem(sys.modules, "astrbot.api.web", web)
+
+    payload = asyncio.run(WebUIRoutes(plugin).observation_history_handler())
+    assert payload["session"] == "native-session"
+    assert store.calls[-1]["max_points"] == 240
+
+    web.request.query = {"session": "", "group": "boundary"}
+    error = asyncio.run(WebUIRoutes(plugin).observation_history_handler())
+    assert set(error) == {"error"}
+    assert "session" in error["error"]
+
+
+def test_native_observation_history_route_is_registered() -> None:
+    import inspect
+    import main
+
+    source = inspect.getsource(main.EmotionalStatePlugin._register_web_apis)
+
+    assert 'api/observation_history", "observation_history_handler", ["GET"]' in source
+
+
+def _unused_local_port() -> int:
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as stream:
+        stream.bind(("127.0.0.1", 0))
+        return int(stream.getsockname()[1])
+
+
+def test_aiohttp_observation_history_endpoint_uses_shared_payload() -> None:
+    from aiohttp import ClientSession
+    from sylanne_alpha import webui_server
+
+    async def exercise() -> None:
+        token = "observation-test-token"
+        port = _unused_local_port()
+        store = _ObservationStore()
+        plugin = _observation_plugin(store)
+        webui_server._active_token = token
+        task = asyncio.create_task(
+            webui_server.start_webui_server(plugin, host="127.0.0.1", port=port)
+        )
+        try:
+            async with ClientSession(
+                headers={"Authorization": f"Bearer {token}"}
+            ) as client:
+                response = None
+                for _ in range(100):
+                    try:
+                        response = await client.get(
+                            f"http://127.0.0.1:{port}/api/observation_history",
+                            params={"session": "aiohttp", "group": "feedback"},
+                        )
+                        break
+                    except OSError:
+                        await asyncio.sleep(0.01)
+                assert response is not None
+                async with response:
+                    assert response.status == 200
+                    payload = await response.json()
+                assert payload["session"] == "aiohttp"
+                invalid = await client.get(
+                    f"http://127.0.0.1:{port}/api/observation_history",
+                    params={"session": "", "group": "feedback"},
+                )
+                async with invalid:
+                    assert invalid.status == 400
+                    assert "session" in (await invalid.json())["error"]
+            assert store.calls[-1]["group"] == "feedback"
+        finally:
+            task.cancel()
+            await task
+
+    asyncio.run(exercise())
+
+
+def test_stdlib_observation_history_endpoint_uses_shared_payload() -> None:
+    from sylanne_alpha import webui_server
+
+    token = "observation-test-token"
+    store = _ObservationStore()
+    plugin = _observation_plugin(store)
+    webui_server._active_token = token
+    webui_server.start_webui_thread_server(plugin, host="127.0.0.1", port=0)
+    try:
+        assert webui_server._httpd is not None
+        port = int(webui_server._httpd.server_address[1])
+        request = Request(
+            f"http://127.0.0.1:{port}/api/observation_history"
+            "?session=stdlib&group=gate&max_points=2",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urlopen(request, timeout=2) as response:
+            payload = json.loads(response.read())
+        assert payload["session"] == "stdlib"
+        assert store.calls[-1]["max_points"] == 2
+
+        invalid = Request(
+            f"http://127.0.0.1:{port}/api/observation_history"
+            "?session=stdlib&group=route",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with pytest.raises(HTTPError) as caught:
+            urlopen(invalid, timeout=2)
+        assert caught.value.code == 400
+    finally:
+        asyncio.run(webui_server.stop_webui_server())
 
 
 def test_standalone_state_supports_resonance_spine_without_empty_fallback() -> None:
