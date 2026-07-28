@@ -54,6 +54,10 @@ describe('observation chamber markup contracts', () => {
     expect(chamber).toContain("trendState === 'empty' && error")
     expect(chamber).toContain("t('observation.related')")
     expect(chamber).toContain('readingLabel')
+    expect(chamber).toContain('chamber-header')
+    expect(chamber).toContain('reading-row')
+    expect(chamber).toContain('lower-panel')
+    expect(chamber).toContain('metadata-list')
   })
 
   it('renders only real normalized history on an accessible canvas', () => {
@@ -87,5 +91,7 @@ describe('observation chamber markup contracts', () => {
     expect(modal).toContain('.animate(')
     expect(modal).toContain('visibility = \'hidden\'')
     expect(modal).toContain('.catch(() => {})')
+    expect(modal).toContain('1100px')
+    expect(modal).toContain('76dvh')
   })
 })

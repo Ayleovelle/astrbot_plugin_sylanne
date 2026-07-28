@@ -25,6 +25,7 @@ const verifyState = ref<VerifyState>('verifying')
 const shakeActive = ref(false)
 const decoEntered = ref(false)
 const tokenInputEl = ref<HTMLInputElement | null>(null)
+const loginError = ref('')
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -46,8 +47,13 @@ function recoverFromNavigationFailure(): void {
   tokenInputEl.value?.focus()
 }
 
+function clearLoginError(): void {
+  loginError.value = ''
+}
+
 async function submit(): Promise<void> {
   if (phase.value !== 'form') return
+  clearLoginError()
   const val = token.value.trim()
   if (!val) {
     triggerShake()
@@ -73,10 +79,10 @@ async function submit(): Promise<void> {
     verifyState.value = 'error'
     await delay(1600)
     phase.value = 'form'
-    await delay(500)
-    token.value = ''
+    loginError.value = t('login.error')
     triggerShake()
     tokenInputEl.value?.focus()
+    tokenInputEl.value?.select()
   }
 }
 
@@ -147,12 +153,17 @@ onMounted(() => {
           v-model="token"
           class="token-input"
           :class="{ shake: shakeActive }"
+          :aria-invalid="Boolean(loginError)"
+          aria-describedby="tokenError"
+          aria-errormessage="tokenError"
           type="password"
           autocomplete="off"
           spellcheck="false"
+          @input="clearLoginError"
           @keydown.enter.prevent="submit"
         />
-        <button class="submit-btn" :disabled="phase !== 'form'" @click="submit">
+        <p id="tokenError" class="token-error" role="alert">{{ loginError }}</p>
+        <button type="button" class="submit-btn" :disabled="phase !== 'form'" @click="submit">
           {{ t('login.authenticate') }}
         </button>
       </div>
@@ -323,6 +334,12 @@ onMounted(() => {
 }
 .token-input.shake {
   animation: shake 0.3s ease;
+}
+.token-error {
+  min-height: 1.6em;
+  margin: var(--space-2) 0 0;
+  color: var(--red);
+  font-size: var(--font-sm);
 }
 
 .submit-btn {

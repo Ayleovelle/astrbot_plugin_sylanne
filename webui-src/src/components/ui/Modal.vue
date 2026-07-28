@@ -219,8 +219,8 @@ const sizeClass = computed(() => ['size-' + props.size, 'variant-' + props.varia
 .modal-panel.size-lg {
   max-width: 760px;
 }
-.modal-panel.variant-observation { width: min(72vw, 1040px); max-width: none; max-height: 72vh; }
-.backdrop-observation { background: rgba(10, 8, 10, .42); backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px); }
+.modal-panel.variant-observation { width: min(72vw, 1200px); min-width: min(1100px, calc(100vw - var(--space-10) * 2)); max-width: none; max-height: 76dvh; background: color-mix(in srgb, var(--card) 98%, var(--bg)); }
+.backdrop-observation { background: rgba(10, 8, 10, .54); backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px); }
 @media (max-width: 620px) { .modal-panel.variant-observation { width: calc(100vw - var(--space-6) * 2); max-height: calc(100dvh - var(--space-6) * 2); } }
 
 .modal-head {
