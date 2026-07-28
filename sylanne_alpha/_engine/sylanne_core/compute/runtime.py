@@ -13,7 +13,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from .body import SCHEMA_VERSION
 from .kernel import AlphaKernel
@@ -52,6 +52,16 @@ class AlphaRuntime:
         self._profile = profile
         self._pel_enabled = pel_enabled
         self._save_count: int = 0
+        self._observation_sink: (
+            Callable[[str, dict[str, Any]], None] | None
+        ) = None
+
+    def set_observation_sink(
+        self,
+        sink: Callable[[str, dict[str, Any]], None] | None,
+    ) -> None:
+        """设置快照成功落盘后的可选观测接收器。"""
+        self._observation_sink = sink
 
     def load(self, session_key: str) -> AlphaKernel:
         """加载指定 session 的 kernel 状态。
@@ -124,6 +134,11 @@ class AlphaRuntime:
         except OSError:
             tmp.unlink(missing_ok=True)
             raise
+        if self._observation_sink is not None:
+            try:
+                self._observation_sink(session_key, snapshot)
+            except Exception:
+                logger.warning("Observation history append failed", exc_info=True)
 
     def reset(self, session_key: str) -> AlphaKernel:
         """重置指定 session：创建全新 kernel 并立即持久化。

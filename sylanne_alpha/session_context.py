@@ -32,10 +32,12 @@ except ImportError:
         return Path.home()
 
 from sylanne_alpha.infra import resolve_data_root
-
-
 from sylanne_alpha.host import SylanneAlphaHost
 from sylanne_alpha.memory_system import ConversationBuffer, MemorySystem
+from sylanne_alpha.observation_history import (
+    DEFAULT_MAX_BYTES,
+    ObservationHistoryStore,
+)
 
 if TYPE_CHECKING:
     from sylanne_alpha.protocols import PluginHost
@@ -420,6 +422,53 @@ class SessionContext:
         self._first_impressions: dict[str, FirstImpression] = {}
         # Item 153: 关系仪式注册表
         self._ritual_registry = RitualRegistry()
+        cfg = (
+            self._p.config
+            if hasattr(self._p, "_config")
+            else getattr(self._p, "config", {}) or {}
+        )
+        self._observation_history_store = ObservationHistoryStore(
+            Path(resolve_data_root(cfg)) / "observation-history",
+            self._observation_history_limit_bytes,
+        )
+        self._observation_sink = self._observation_history_store.append_snapshot
+        hosts = getattr(getattr(self._p, "_store", None), "hosts", None)
+        snapshot_items = getattr(hosts, "snapshot_items", None)
+        if callable(snapshot_items):
+            for _, host in snapshot_items():
+                self._bind_observation_sink(host)
+
+    @property
+    def observation_history_store(self) -> ObservationHistoryStore:
+        """返回插件实例共享的观测历史存储。"""
+        return self._observation_history_store
+
+    def _observation_history_limit_bytes(self) -> int:
+        """动态读取历史存储预算；负值按 128 MiB 默认值处理。"""
+        cfg = (
+            self._p.config
+            if hasattr(self._p, "_config")
+            else getattr(self._p, "config", {}) or {}
+        )
+        getter = getattr(cfg, "get", None)
+        raw_value = (
+            getter("sylanne_webui_history_storage_limit_mb", 128)
+            if callable(getter)
+            else 128
+        )
+        try:
+            megabytes = int(raw_value)
+        except (TypeError, ValueError, OverflowError):
+            return DEFAULT_MAX_BYTES
+        if megabytes < 0:
+            return DEFAULT_MAX_BYTES
+        return megabytes * 1024 * 1024
+
+    def _bind_observation_sink(self, host: Any) -> None:
+        """把共享存储绑定到 host runtime（重复绑定安全）。"""
+        setter = getattr(getattr(host, "runtime", None), "set_observation_sink", None)
+        if callable(setter):
+            setter(self._observation_sink)
 
     # ------------------------------------------------------------------
     # 关系年龄（Item 125 / Item 130）
@@ -1160,6 +1209,7 @@ class SessionContext:
             )
             root = resolve_data_root(cfg)
             host = SylanneAlphaHost(root=root, session_key=session_key)
+            self._bind_observation_sink(host)
             # v2.5.0 跨群记忆出生播种（design §3/§4.1，与关系计数/Sylanne Six
             # 播种同点同档门）。**必须在此刻（第一次调用 `_personality()` 之前）
             # 判断"是否真正首次出生"**——`kernel._personality()` 有惰性初始化
@@ -1214,6 +1264,7 @@ class SessionContext:
         else:
             # 已存在：重新写入以刷新 LRU 顺序（set→__setitem__ 会 move_to_end）
             host = existing_host
+            self._bind_observation_sink(host)
             hosts.set(session_key, host)
         return host
 
