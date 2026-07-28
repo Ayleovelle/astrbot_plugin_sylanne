@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { apiFetch } from '../api/client'
+import { isAstrBotPage } from '../api/astrBotBridge'
 import type { StateResponse } from '../api/types'
 import { useSessionStore } from './session'
 
@@ -11,24 +12,59 @@ export const useLiveStore = defineStore('live', () => {
   const loading = ref(false)
   const error = ref('')
   let timer: number | null = null
-  let inflight = false
+  let generation = 0
+  let controller: AbortController | null = null
 
-  async function fetchOnce(): Promise<void> {
-    if (inflight) return
-    inflight = true
-    const session = useSessionStore().current
-    const q = session ? '?session=' + encodeURIComponent(session) : ''
+  function isAbortError(cause: unknown): boolean {
+    return cause instanceof Error && cause.name === 'AbortError'
+  }
+
+  async function fetchOnce(): Promise<boolean> {
+    const requestGeneration = ++generation
+    controller?.abort()
+    const requestController = new AbortController()
+    controller = requestController
+    const sessionStore = useSessionStore()
+    const requestedSession = sessionStore.current
+    const q = requestedSession
+      ? '?session=' + encodeURIComponent(requestedSession)
+      : ''
+
     try {
       loading.value = true
-      const data = await apiFetch<StateResponse>('/api/state' + q)
+      const data = isAstrBotPage()
+        ? await apiFetch<StateResponse>('/api/state' + q)
+        : await apiFetch<StateResponse>('/api/state' + q, {
+            signal: requestController.signal,
+          })
+      if (
+        requestGeneration !== generation ||
+        requestController.signal.aborted ||
+        requestedSession !== sessionStore.current
+      ) {
+        return false
+      }
+
+      if (data.sessions) sessionStore.setSessions(data.sessions)
       state.value = data
       error.value = ''
-      if (data.sessions) useSessionStore().setSessions(data.sessions)
-    } catch (e) {
-      error.value = e instanceof Error ? e.message : 'fetch failed'
+      return true
+    } catch (cause) {
+      if (
+        requestGeneration !== generation ||
+        requestController.signal.aborted ||
+        requestedSession !== sessionStore.current ||
+        isAbortError(cause)
+      ) {
+        return false
+      }
+      error.value = cause instanceof Error ? cause.message : 'fetch failed'
+      return false
     } finally {
-      loading.value = false
-      inflight = false
+      if (requestGeneration === generation) {
+        loading.value = false
+        if (controller === requestController) controller = null
+      }
     }
   }
 
@@ -38,10 +74,14 @@ export const useLiveStore = defineStore('live', () => {
     timer = window.setInterval(() => void fetchOnce(), intervalMs)
   }
   function stop(): void {
+    generation += 1
+    controller?.abort()
+    controller = null
     if (timer !== null) {
       clearInterval(timer)
       timer = null
     }
+    loading.value = false
   }
 
   return { state, loading, error, fetchOnce, start, stop }

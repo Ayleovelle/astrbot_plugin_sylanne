@@ -30,7 +30,14 @@ export const useSessionStore = defineStore('session', () => {
   }
   function setSessions(s: SessionInfo[]): void {
     sessions.value = s || []
-    if (!current.value && s && s.length) setCurrent(sessionId(s[0]))
+    if (!sessions.value.length) {
+      if (current.value) setCurrent('')
+      return
+    }
+    const currentStillExists = sessions.value.some(
+      (session) => sessionId(session) === current.value,
+    )
+    if (!currentStillExists) setCurrent(sessionId(sessions.value[0]))
   }
 
   return { sessions, current, setCurrent, setSessions }
