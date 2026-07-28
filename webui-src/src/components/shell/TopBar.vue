@@ -75,7 +75,14 @@ function logout(): void {
       <button class="chip mono" :title="t('chrome.lang')" @click="toggleLang">
         {{ lang === 'zh' ? '中' : 'EN' }}
       </button>
-      <button v-if="canLogout" class="chip" :title="t('chrome.logout')" @click="logout">⏻</button>
+      <button
+        v-if="canLogout"
+        class="chip logout-chip"
+        :title="t('chrome.logout')"
+        @click="logout"
+      >
+        {{ t('chrome.logout') }}
+      </button>
     </div>
   </header>
 </template>
@@ -167,6 +174,13 @@ function logout(): void {
   font-size: var(--font-sm);
   transition: border-color var(--dur-fast) ease;
 }
+.logout-chip {
+  width: auto;
+  min-width: fit-content;
+  padding: 0 var(--space-3);
+  font-size: var(--font-xs);
+  white-space: nowrap;
+}
 .chip:hover {
   border-color: var(--accent);
 }
@@ -203,6 +217,10 @@ function logout(): void {
   .chip {
     width: 26px;
     flex: none;
+  }
+  .logout-chip {
+    width: auto;
+    padding: 0 var(--space-2);
   }
 }
 </style>

@@ -11,6 +11,23 @@ import { ref } from 'vue'
 const done = ref(false)
 const arrivalPending = ref(false)
 
+export function waitForBootVerification(
+  verification: Promise<boolean>,
+  timeoutMs = 3000,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false
+    const settle = (result: boolean): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      resolve(result)
+    }
+    const timeout = setTimeout(() => settle(false), timeoutMs)
+    verification.then(settle, () => settle(false))
+  })
+}
+
 export function useBoot() {
   function markDone(): void {
     done.value = true

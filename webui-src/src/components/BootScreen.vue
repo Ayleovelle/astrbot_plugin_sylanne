@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useAuthStore } from '../stores/auth'
-import { useBoot } from '../composables/useBoot'
+import { useBoot, waitForBootVerification } from '../composables/useBoot'
 
 // Faithful port of the old #loadingScreen (UI/index.html ~599-605, 4144-4153):
 // full-screen cover shown at least 1000ms AND until window load or a 3000ms
@@ -34,12 +34,9 @@ onMounted(() => {
   // Absorbed under the cover: welcome-back verification. Runs in parallel
   // with the min-delay/load race above, not stacked after it.
   let welcomeBack = false
-  const verify = auth.verifyExisting().then(
-    (ok) => {
-      welcomeBack = ok
-    },
-    () => undefined,
-  )
+  const verify = waitForBootVerification(auth.verifyExisting()).then((ok) => {
+    welcomeBack = ok
+  })
 
   Promise.all([minDelay, resourcesReady, verify]).then(() => {
     fadeOut.value = true

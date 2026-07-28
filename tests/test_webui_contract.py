@@ -3,7 +3,7 @@ import asyncio
 import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 sys.path.insert(0, '.')
 
@@ -297,6 +297,35 @@ def test_native_spine_layers_map_internal_timing_keys_to_l1_l7() -> None:
         (float(index), float(index + 10), float(index + 20), index, "active")
         for index in range(1, 8)
     ]
+
+
+def test_native_pages_state_after_tick_is_json_serializable(monkeypatch) -> None:
+    from sylanne_alpha._engine.sylanne_core.compute.kernel import AlphaKernel
+    from sylanne_alpha.webui_routes import WebUIRoutes
+
+    session_key = "native-pages"
+    kernel = AlphaKernel.boot(session_key)
+    kernel.tick({"text": "serialization probe", "now": 1.0})
+    host = SimpleNamespace(kernel=kernel)
+    plugin = SimpleNamespace(
+        _hosts={session_key: host},
+        _known_webui_sessions=lambda requested: [session_key],
+        _host=lambda requested: host,
+        _webui_runtime_info=lambda: {"runtime_id": "test-runtime"},
+        _persona_profile=lambda requested: {},
+        _life_simulator=SimpleNamespace(to_dict=lambda: {}),
+    )
+    web = ModuleType("astrbot.api.web")
+    web.request = SimpleNamespace(query={"session": session_key})
+    monkeypatch.setitem(sys.modules, "astrbot.api.web", web)
+
+    payload = asyncio.run(WebUIRoutes(plugin).state_handler())
+
+    assert isinstance(kernel.computation.last_hdc_sample, bytearray)
+    json.dumps(payload)
+    assert payload["layers"]["L1_HDC"]["sample_bits"] == list(
+        kernel.computation.last_hdc_sample
+    )
 
 
 if __name__ == "__main__":

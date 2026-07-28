@@ -394,7 +394,10 @@ class WebUIRoutes:
         timing["total_ms"] = round(total_ms, 3)
 
         # Ensure L1_HDC layer always has sample_bits for frontend visualization
-        sample_bits = comp.last_hdc_sample if hasattr(comp, "last_hdc_sample") else []
+        sample_bits = list(
+            (comp.last_hdc_sample if hasattr(comp, "last_hdc_sample") else None)
+            or []
+        )
         if "L1_HDC" not in layers:
             layers["L1_HDC"] = {
                 "vector_dim": 2048,

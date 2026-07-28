@@ -39,6 +39,16 @@ describe('apiBase', () => {
     expect(apiBase()).toBe(expected)
   })
 
+  it('does not treat a plugin-name substring in a standalone path as host routing', () => {
+    vi.stubGlobal('window', {})
+    vi.stubGlobal('location', {
+      pathname: '/dashboard/astrbot_plugin_sylanne-preview',
+    })
+
+    expect(apiBase()).toBe('')
+    expect(usesHostAuthentication()).toBe(false)
+  })
+
   it('uses the AstrBot bridge and converts query strings into GET params', async () => {
     const apiGet = vi.fn().mockResolvedValue({ tick_count: 7 })
     const apiPost = vi.fn()

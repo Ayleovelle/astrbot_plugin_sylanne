@@ -14,9 +14,10 @@ let csrfToken = ''
 
 export function apiBase(): string {
   const p = typeof location !== 'undefined' ? location.pathname : ''
-  const pluginPath = '/astrbot_plugin_sylanne'
-  const pluginIndex = p.indexOf(pluginPath)
-  return pluginIndex >= 0 ? p.slice(0, pluginIndex + pluginPath.length) : ''
+  const pluginName = 'astrbot_plugin_sylanne'
+  const segments = p.split('/')
+  const pluginIndex = segments.indexOf(pluginName)
+  return pluginIndex >= 0 ? segments.slice(0, pluginIndex + 1).join('/') : ''
 }
 
 export function usesHostAuthentication(): boolean {
