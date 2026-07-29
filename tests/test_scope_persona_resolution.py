@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -185,3 +186,77 @@ async def test_unified_origin_must_match_canonical_session_before_persona_lookup
     context.get_config.assert_not_called()
     manager.resolve_selected_persona.assert_not_awaited()
     assert resolver.catalog.current(transport.session_ref.token).turn_state == "resolving"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["umo", "session", "turn"])
+async def test_persona_await_parent_mutation_fails_before_scope_publication(
+    tmp_path,
+    mutation: str,
+) -> None:
+    event = _event()
+    turn_holder: dict[str, object] = {}
+
+    async def select_persona(**_kwargs):
+        if mutation == "umo":
+            event.unified_msg_origin = "adapter:FriendMessage:different"
+        elif mutation == "session":
+            class _ChangedSession:
+                platform_id = "adapter"
+
+                def __str__(self) -> str:
+                    return "adapter:FriendMessage:different"
+
+            event.session = _ChangedSession()
+            event.unified_msg_origin = "adapter:FriendMessage:different"
+        else:
+            event.set_extra(
+                "_sylanne_transport_turn_v1",
+                replace(
+                    turn_holder["turn"],
+                    updated_at_ms=turn_holder["turn"].updated_at_ms + 1,
+                ),
+            )
+        return (
+            "narrator",
+            {"prompt": "quiet", "begin_dialogs": [], "tools": None, "skills": []},
+            None,
+            False,
+        )
+
+    context = SimpleNamespace(
+        persona_manager=SimpleNamespace(
+            resolve_selected_persona=AsyncMock(side_effect=select_persona)
+        ),
+        get_config=lambda *, umo: {"provider_settings": {}},
+    )
+    resolver = ScopeResolver.for_test(context, root=tmp_path)
+    transport = resolver.resolve_transport(event)
+    binding = resolver.delivery_binding(event, transport)
+    assert binding is not None
+
+    def publish(turn) -> bool:
+        event.set_extra("_sylanne_transport_scope_v1", transport)
+        event.set_extra("_sylanne_transport_turn_v1", turn)
+        return (
+            event.get_extra("_sylanne_transport_scope_v1") is transport
+            and event.get_extra("_sylanne_transport_turn_v1") is turn
+        )
+
+    turn = resolver.catalog.begin_turn(transport, binding, publish=publish)
+    turn_holder["turn"] = turn
+
+    result = await resolver.resolve(
+        event,
+        SimpleNamespace(conversation=SimpleNamespace(persona_id=None)),
+    )
+
+    assert result.private_scope_enabled is False
+    assert resolver.catalog.current(transport.session_ref.token) == turn
+    assert resolver.catalog.current(transport.session_ref.token).turn_state == "resolving"
+    persona_root = (
+        resolver._repository.bots_directory / transport.bot_ref.token / "personas"
+    )
+    assert not persona_root.exists() or list(persona_root.rglob("*")) == []
+    with resolver._repository.transaction():
+        assert resolver._repository._read_catalog_locked()["scopes"] == {}

@@ -223,6 +223,7 @@ from sylanne_alpha.scope_contracts import (  # noqa: E402
     ResolvedTransportScope,
 )
 from sylanne_alpha.scope_identity import ScopeResolver  # noqa: E402
+from sylanne_alpha.session_catalog import TransportTurn  # noqa: E402
 
 # 加载 WebUI dashboard HTML（从 UI/index.html）
 _webui_dashboard_path = Path(_PLUGIN_DIR) / "UI" / "index.html"
@@ -1945,20 +1946,15 @@ class EmotionalStatePlugin(Star):
     # 消息事件监听：捕获所有消息（含未经 LLM 的），更新时间戳和节奏
     # -----------------------------------------------------------------------
 
-    def _advance_inbound_delivery_epoch(self, event: Any, session_key: str) -> None:
-        """Register one real inbound message and interrupt an older delivery.
-
-        This hook runs before AstrBot enters its per-session agent lock. That is
-        the only point where a newly arrived user message can stop an older reply
-        that is still generating or sleeping between bubbles.
-        """
+    def _register_inbound_duplicate(self, event: Any) -> bool:
+        """Register dedup ownership only after a Persona scope has frozen."""
 
         get_extra = getattr(event, "get_extra", None)
         set_extra = getattr(event, "set_extra", None)
         if callable(get_extra):
             try:
                 if get_extra("_syl_inbound_registered", False):
-                    return
+                    return bool(get_extra("_syl_inbound_duplicate", False))
             except Exception:
                 pass
 
@@ -2011,8 +2007,17 @@ class EmotionalStatePlugin(Star):
                         pass
 
         if duplicate:
-            return
+            return True
+        return False
 
+    def _advance_transport_delivery_fence(
+        self,
+        event: Any,
+        session_key: str,
+    ) -> None:
+        """Advance only the realtime delivery fence and interrupt its old turn."""
+
+        set_extra = getattr(event, "set_extra", None)
         epochs = getattr(self._store, "conversation_input_epoch", None)
         input_epoch = 0
         if epochs is not None:
@@ -2046,6 +2051,17 @@ class EmotionalStatePlugin(Star):
                 session_key,
                 exc_info=True,
             )
+
+    def _advance_inbound_delivery_epoch(self, event: Any, session_key: str) -> None:
+        """Compatibility wrapper for callers that need registration plus fence."""
+
+        if EmotionalStatePlugin._register_inbound_duplicate(self, event):
+            return
+        EmotionalStatePlugin._advance_transport_delivery_fence(
+            self,
+            event,
+            session_key,
+        )
 
     def _scope_resolver_instance(self) -> ScopeResolver | None:
         resolver = getattr(self, "_scope_resolver_v1", None)
@@ -2111,6 +2127,126 @@ class EmotionalStatePlugin(Star):
             return False
         return True
 
+    def _verified_transport_turn(
+        self,
+        event: Any,
+    ) -> tuple[ScopeResolver, ResolvedTransportScope, TransportTurn] | None:
+        """Return only an exact attached resolving turn backed by current authority."""
+
+        try:
+            resolver = EmotionalStatePlugin._scope_resolver_instance(self)
+            transport = ScopeResolver._event_extra(
+                event,
+                "_sylanne_transport_scope_v1",
+            )
+            turn = ScopeResolver._event_extra(
+                event,
+                "_sylanne_transport_turn_v1",
+            )
+            if (
+                resolver is None
+                or type(transport) is not ResolvedTransportScope
+                or transport.private_scope_enabled is not True
+                or transport.bot_ref is None
+                or transport.session_ref is None
+                or type(turn) is not TransportTurn
+                or turn.turn_state != "resolving"
+            ):
+                return None
+            session = getattr(event, "session", None)
+            canonical_umo = str(session) if session is not None else ""
+            event_umo = getattr(event, "unified_msg_origin", None)
+            if (
+                not canonical_umo
+                or type(event_umo) is not str
+                or event_umo != canonical_umo
+                or resolver.resolve_transport(event) != transport
+                or resolver.catalog.binding_generation_for_bot_ref(
+                    transport.bot_ref
+                )
+                != transport.bot_ref.generation
+                or not resolver.catalog.matches_resolving_turn(
+                    transport,
+                    turn,
+                )
+            ):
+                return None
+            return resolver, transport, turn
+        except Exception:
+            return None
+
+    def _verified_legacy_delivery_locator(
+        self,
+        event: Any,
+    ) -> str | None:
+        """Prove the temporary raw delivery key from this exact canonical event."""
+
+        try:
+            session = getattr(event, "session", None)
+            canonical_umo = str(session) if session is not None else ""
+            event_umo = getattr(event, "unified_msg_origin", None)
+            session_ctx = getattr(self, "_session_ctx", None)
+            derive = getattr(session_ctx, "session_key", None)
+            if (
+                not canonical_umo
+                or type(event_umo) is not str
+                or event_umo != canonical_umo
+                or not callable(derive)
+            ):
+                return None
+            locator = derive(event)
+            if type(locator) is not str or not locator or locator == "default":
+                return None
+            base = str(getattr(event, "session_id", "") or event_umo)
+            sender = str(
+                getattr(event, "sender_id", "")
+                or getattr(event, "user_id", "")
+                or ""
+            )
+            expected = (
+                f"{base}:{sender}"
+                if sender and base != "default"
+                else base
+            )
+            if not expected or expected == "default" or locator != expected:
+                return None
+            return locator
+        except Exception:
+            return None
+
+    def _on_transport_ready_safety(self, event: Any) -> None:
+        """Run only event/delivery safety work before AstrBot's agent lock."""
+
+        if EmotionalStatePlugin._verified_transport_turn(self, event) is None:
+            return
+        # Event-local stream mode must be fixed before AgentSubStage reads it.
+        try:
+            realtime_enabled, realtime_intercept = realtime_flags(self.config)
+            if realtime_enabled and realtime_intercept:
+                setter = getattr(event, "set_extra", None)
+                if callable(setter):
+                    setter("enable_streaming", False)
+        except Exception:
+            pass
+
+        # Task 9 replaces this legacy raw-key bridge with opaque transport keys.
+        # Until then, never treat the locator as identity: accept only the exact
+        # non-default value independently reconstructed from this canonical event,
+        # and touch only the delivery epoch/interrupt registries.
+        if EmotionalStatePlugin._verified_transport_turn(self, event) is None:
+            return
+        locator = EmotionalStatePlugin._verified_legacy_delivery_locator(
+            self,
+            event,
+        )
+        if locator is None:
+            return
+        EmotionalStatePlugin._advance_transport_delivery_fence(
+            self,
+            event,
+            locator,
+        )
+
     async def _freeze_scope_persona(self, event: Any, request: Any) -> ResolvedScope:
         try:
             resolver = EmotionalStatePlugin._scope_resolver_instance(self)
@@ -2142,6 +2278,7 @@ class EmotionalStatePlugin(Star):
             transport_ready = EmotionalStatePlugin._begin_scope_transport(self, event)
             if transport_ready is not True:
                 return
+            EmotionalStatePlugin._on_transport_ready_safety(self, event)
         except Exception:
             return
 
@@ -2149,7 +2286,7 @@ class EmotionalStatePlugin(Star):
         self,
         event: Any,
         resolved_scope: ResolvedScope,
-    ) -> None:
+    ) -> bool:
         """Run legacy private-state message work only after scope publication."""
 
         if (
@@ -2161,47 +2298,27 @@ class EmotionalStatePlugin(Star):
             )
             is not resolved_scope
         ):
-            return
+            return False
         try:
             resolver = EmotionalStatePlugin._scope_resolver_instance(self)
             if (
                 resolver is None
                 or not resolver._matches_published_scope(event, resolved_scope)
             ):
-                return
+                return False
         except Exception:
-            return
+            return False
         marker = "_sylanne_legacy_on_message_v1"
-        if ScopeResolver._event_extra(event, marker, False) is True:
-            return
-        if not ScopeResolver.set_event_extra(event, marker, True):
-            return
+        marker_state = ScopeResolver._event_extra(event, marker)
+        if marker_state == "complete":
+            return True
+        if marker_state is not None:
+            return False
+        if not ScopeResolver.set_event_extra(event, marker, "running"):
+            return False
         try:
-            # M4a（realtime 完整重做 Model-D）：即时聊天接管开启时强制关闭本轮
-            # 流式，让响应侧走非流式档（on_decorating_result 才够得着、能抑制
-            # 框架重发）。此处（filter.event_message_type(ALL)，由 ProcessStage
-            # 内 star_request_sub_stage 触发）确定运行在 AgentRequestSubStage/
-            # InternalAgentSubStage 读取 event.get_extra("enable_streaming")
-            # （internal.py:169）之前——见 process_stage/stage.py 的调用顺序：
-            # star_request_sub_stage.process 先于 agent_sub_stage.process。
-            # 默认两开关皆关时这里零行为（不碰 enable_streaming，流式配置原样）。
-            try:
-                _realtime_enabled, _realtime_intercept = realtime_flags(self.config)
-                if _realtime_enabled and _realtime_intercept:
-                    set_extra = getattr(event, "set_extra", None)
-                    if callable(set_extra):
-                        set_extra("enable_streaming", False)
-            except Exception:
-                pass
             session_key = self._session_ctx.session_key(event)
-            # Call through the class so narrow plugin-host stubs that bind only
-            # on_message still exercise the real hook without needing to copy
-            # every private helper onto their namespace.
-            EmotionalStatePlugin._advance_inbound_delivery_epoch(
-                self,
-                event,
-                session_key,
-            )
+            EmotionalStatePlugin._register_inbound_duplicate(self, event)
             now = time.time()
             # v2.5.0 slice-1b（design §8 BLOCKER B1，全矩阵扎实版修正）：主判据
             # 消费——供三写点（货架写/profile 软同步/出生播种，本 slice 货架写
@@ -2264,7 +2381,9 @@ class EmotionalStatePlugin(Star):
             # T1-04②：节流落盘节奏学习器状态（镜像 life_sim 的节流落盘模式）。
             await self._rhythm_learner_throttled_save()
         except Exception:
-            pass
+            ScopeResolver.set_event_extra(event, marker, "failed")
+            return False
+        return ScopeResolver.set_event_extra(event, marker, "complete")
 
     # on_llm_request 钩子：在 LLM 请求发出前注入情感状态上下文
     @filter.on_llm_request(desc="注入 Sylanne 情感计算上下文到 LLM prompt")
@@ -2335,11 +2454,13 @@ class EmotionalStatePlugin(Star):
             or resolved_scope.private_scope_enabled is not True
         ):
             return
-        await EmotionalStatePlugin._on_message_after_scope_frozen(
+        legacy_ready = await EmotionalStatePlugin._on_message_after_scope_frozen(
             self,
             event,
             resolved_scope,
         )
+        if legacy_ready is not True:
+            return
         # v2.5.0 入站消息级幂等闸：必须在任何早退（尤其 should_express 静默
         # return）之前拦截，否则 SILENT 轮的 message_id 不会入集，漏掉最可能
         # 触发悬挂重复的链路。命中即 stop_event + 早退，框架不再跑

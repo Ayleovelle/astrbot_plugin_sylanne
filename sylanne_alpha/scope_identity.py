@@ -675,6 +675,49 @@ class ScopeResolver:
         except Exception:
             return None
 
+    def _matches_live_resolving_parent(
+        self,
+        event: Any,
+        transport: ResolvedTransportScope,
+        turn: Any,
+        *,
+        canonical_umo: str,
+        platform_id: str,
+    ) -> bool:
+        """Revalidate the live event and exact attached parent after any await."""
+
+        if (
+            type(transport) is not ResolvedTransportScope
+            or transport.private_scope_enabled is not True
+            or transport.bot_ref is None
+            or transport.session_ref is None
+            or self._event_extra(event, "_sylanne_transport_scope_v1")
+            is not transport
+            or self._event_extra(event, "_sylanne_transport_turn_v1") is not turn
+        ):
+            return False
+        try:
+            session = getattr(event, "session", None)
+            live_umo = str(session) if session is not None else ""
+            event_umo = getattr(event, "unified_msg_origin", None)
+            live_platform_id = str(event.get_platform_id() or "")
+            return (
+                live_umo == canonical_umo
+                and type(event_umo) is str
+                and event_umo == canonical_umo
+                and live_platform_id == platform_id
+                and str(getattr(session, "platform_id", "") or "")
+                == platform_id
+                and self.resolve_transport(event) == transport
+                and self._catalog.binding_generation_for_bot_ref(
+                    transport.bot_ref
+                )
+                == transport.bot_ref.generation
+                and self._catalog.matches_resolving_turn(transport, turn)
+            )
+        except Exception:
+            return False
+
     def _matches_published_scope(self, event: Any, resolved: ResolvedScope) -> bool:
         if (
             type(resolved) is not ResolvedScope
@@ -775,7 +818,20 @@ class ScopeResolver:
         transport = self._event_extra(event, "_sylanne_transport_scope_v1")
         turn = self._event_extra(event, "_sylanne_transport_turn_v1")
         if type(transport) is not ResolvedTransportScope:
-            transport = self.resolve_transport(event) if self._allow_test_synthetic_turn else None
+            transport = (
+                self.resolve_transport(event)
+                if self._allow_test_synthetic_turn
+                else None
+            )
+            if (
+                type(transport) is not ResolvedTransportScope
+                or not self.set_event_extra(
+                    event,
+                    "_sylanne_transport_scope_v1",
+                    transport,
+                )
+            ):
+                transport = None
         if (
             type(transport) is not ResolvedTransportScope
             or transport.private_scope_enabled is not True
@@ -787,6 +843,12 @@ class ScopeResolver:
             )
         if turn is None:
             turn = self._test_turn(event, transport)
+            if turn is not None and not self.set_event_extra(
+                event,
+                "_sylanne_transport_turn_v1",
+                turn,
+            ):
+                turn = None
         if turn is None:
             return ResolvedScope.disabled("transport_turn_unverified", resolved_at_ms=now_ms)
         try:
@@ -830,6 +892,17 @@ class ScopeResolver:
             )
         except Exception:
             return ResolvedScope.disabled("persona_unavailable", resolved_at_ms=now_ms)
+        if not self._matches_live_resolving_parent(
+            event,
+            transport,
+            turn,
+            canonical_umo=canonical_umo,
+            platform_id=platform_id,
+        ):
+            return ResolvedScope.disabled(
+                "transport_parent_changed",
+                resolved_at_ms=now_ms,
+            )
         if selected_id is None or personality is None:
             return ResolvedScope.disabled("persona_unavailable", resolved_at_ms=now_ms)
         if type(selected_id) is str and selected_id.startswith(_MANAGED_EMBODIMENT_PREFIX):

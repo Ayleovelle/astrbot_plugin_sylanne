@@ -750,6 +750,38 @@ class SessionCatalog:
             self._write_turn_locked(frozen)
             return committed, frozen
 
+    def matches_resolving_turn(
+        self,
+        transport_scope: ResolvedTransportScope,
+        turn: object,
+    ) -> bool:
+        """Read-only full-parent check for one still-resolving transport turn."""
+
+        if (
+            type(transport_scope) is not ResolvedTransportScope
+            or type(turn) is not TransportTurn
+        ):
+            return False
+        try:
+            with self.repository.transaction():
+                current = self._load_turn_locked(turn.bot_ref, turn.session_ref)
+                return (
+                    transport_scope.private_scope_enabled is True
+                    and transport_scope.disabled_reason is None
+                    and transport_scope.bot_ref is not None
+                    and transport_scope.session_ref is not None
+                    and current == turn
+                    and turn.turn_state == "resolving"
+                    and turn.bot_ref == transport_scope.bot_ref.token
+                    and turn.session_ref == transport_scope.session_ref.token
+                    and turn.session_generation
+                    == transport_scope.session_ref.generation
+                    and turn.identity_quality == transport_scope.identity_quality
+                    and self._validate_binding_locked(turn)
+                )
+        except Exception:
+            return False
+
     def matches_frozen_scope(
         self,
         transport_scope: ResolvedTransportScope,

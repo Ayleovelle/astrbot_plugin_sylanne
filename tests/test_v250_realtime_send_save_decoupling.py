@@ -51,6 +51,8 @@ from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline
 from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline
 from sylanne_alpha.message_dispatch import realtime_flags
 from sylanne_alpha.rhythm_learner import RhythmLearner
+from sylanne_alpha.scope_contracts import ResolvedTransportScope
+from sylanne_alpha.scope_identity import ScopeResolver
 from sylanne_alpha.semantic_segmentation import (
     PauseClass,
     SEMANTIC_BEAT_NONCE_EXTRA,
@@ -122,6 +124,47 @@ class _Ev:
 
     def get_result(self) -> object | None:
         return self._result
+
+
+class _ScopeSession:
+    platform_id = "adapter"
+
+    def __str__(self) -> str:
+        return "adapter:FriendMessage:42"
+
+
+class _ScopedEv(_Ev):
+    """Minimal real-shape transport event for scope-gated on_message tests."""
+
+    def __init__(self, *, set_calls: list | None = None) -> None:
+        super().__init__()
+        self.unified_msg_origin = "adapter:FriendMessage:42"
+        self.session_id = self.unified_msg_origin
+        self.session = _ScopeSession()
+        self.message_obj = SimpleNamespace(message_id="msg-next")
+        self._set_calls = set_calls
+
+    def get_platform_id(self) -> str:
+        return "adapter"
+
+    def get_platform_name(self) -> str:
+        return "aiocqhttp"
+
+    def get_self_id(self) -> str:
+        return "10001"
+
+    def set_extra(self, key: str, value: object) -> None:
+        if self._set_calls is not None:
+            self._set_calls.append((key, value))
+        super().set_extra(key, value)
+
+
+def _scope_resolver(root: object) -> ScopeResolver:
+    context = SimpleNamespace(
+        get_config=lambda *, umo: {"provider_settings": {}},
+        persona_manager=SimpleNamespace(resolve_selected_persona=None),
+    )
+    return ScopeResolver.for_test(context, root=root)
 
 
 class _Plugin:
@@ -662,7 +705,9 @@ def test_interrupted_delivery_commits_only_successfully_sent_prefix_to_history(
     asyncio.run(scenario())
 
 
-def test_new_inbound_message_advances_epoch_and_interrupts_active_delivery() -> None:
+def test_new_inbound_message_advances_epoch_and_interrupts_active_delivery(
+    tmp_path,
+) -> None:
     """中断必须发生在 AstrBot 会话锁之前，不能等下一轮 on_llm_request。"""
 
     class SessionMap:
@@ -682,14 +727,11 @@ def test_new_inbound_message_advances_epoch_and_interrupts_active_delivery() -> 
         def interrupt(self) -> None:
             self.interrupted = True
 
-    class Event(_Ev):
-        message_str = "行"
-        message_obj = SimpleNamespace(message_id="msg-next")
-
     turn = Turn()
     epochs = SessionMap()
     active_turns = SessionMap()
-    active_turns.set("sess:realtime-decouple", turn)
+    locator = "adapter:FriendMessage:42"
+    active_turns.set(locator, turn)
     store = SimpleNamespace(
         conversation_input_epoch=epochs,
         segmented_delivery_turns=active_turns,
@@ -699,18 +741,70 @@ def test_new_inbound_message_advances_epoch_and_interrupts_active_delivery() -> 
     shell = object.__new__(EmotionalStatePlugin)
     shell.config = _cfg(enabled=True, intercept=True)
     shell._config = shell.config
+    shell._scope_resolver_v1 = _scope_resolver(tmp_path)
+    shell._inbound_seen = {"existing": 1}
     shell._store = store
     shell._session_ctx = SimpleNamespace(
-        session_key=lambda _event: "sess:realtime-decouple",
+        session_key=lambda _event: locator,
         resolve_authenticated_identity=lambda _event: None,
     )
 
-    event = Event()
+    event = _ScopedEv()
+    event.message_str = "行"
     asyncio.run(EmotionalStatePlugin.on_message(shell, event))
 
     assert event.get_extra("_syl_input_epoch") == 1
-    assert epochs.get("sess:realtime-decouple") == 1
+    assert epochs.get(locator) == 1
     assert turn.interrupted is True
+    assert shell._inbound_seen == {"existing": 1}
+    assert event.get_extra("_syl_inbound_duplicate") is None
+    assert event.get_extra("_syl_inbound_registered") is None
+
+
+@pytest.mark.parametrize("legacy_locator", ["", "default", "wrong:session"])
+def test_transport_safety_bridge_rejects_unproven_legacy_locator(
+    tmp_path,
+    legacy_locator: str,
+) -> None:
+    class SessionMap:
+        def __init__(self) -> None:
+            self.values: dict[str, object] = {}
+
+        def get(self, key: str, default: object = None) -> object:
+            return self.values.get(key, default)
+
+        def set(self, key: str, value: object) -> None:
+            self.values[key] = value
+
+    class Turn:
+        def __init__(self) -> None:
+            self.interrupted = False
+
+        def interrupt(self) -> None:
+            self.interrupted = True
+
+    active = Turn()
+    epochs = SessionMap()
+    active_turns = SessionMap()
+    active_turns.set("adapter:FriendMessage:42", active)
+    shell = object.__new__(EmotionalStatePlugin)
+    shell.config = {}
+    shell._config = {}
+    shell._scope_resolver_v1 = _scope_resolver(tmp_path)
+    shell._store = SimpleNamespace(
+        conversation_input_epoch=epochs,
+        segmented_delivery_turns=active_turns,
+    )
+    shell._session_ctx = SimpleNamespace(
+        session_key=lambda _event: legacy_locator,
+    )
+    event = _ScopedEv()
+
+    asyncio.run(EmotionalStatePlugin.on_message(shell, event))
+
+    assert epochs.values == {}
+    assert event.get_extra("_syl_input_epoch") is None
+    assert active.interrupted is False
 
 
 def test_full_delivery_commits_exact_visible_bubbles_as_assistant_history(
@@ -1219,22 +1313,24 @@ def test_stream_first_do_first_requires_all_three_gates() -> None:
 # ===========================================================================
 
 
-def test_on_message_forces_streaming_off_when_realtime_takeover_active() -> None:
+def test_on_message_forces_streaming_off_when_realtime_takeover_active(
+    tmp_path,
+) -> None:
     calls: list = []
 
-    class _StreamEv:
-        def set_extra(self, key: str, value: object) -> None:
-            calls.append((key, value))
-
     self_stub = SimpleNamespace(
+        _scope_resolver_v1=_scope_resolver(tmp_path),
         config={
             "sylanne_alpha_realtime_chat_enabled": True,
             "sylanne_alpha_realtime_intercept_llm_response": True,
         }
     )
-    # on_message 后续逻辑（session_ctx 等）在桩下必然抛异常，但整段被外层
-    # try/except 吞掉——只关心 M4a 这一行是否先于崩溃执行。
-    asyncio.run(EmotionalStatePlugin.on_message(self_stub, _StreamEv()))
+    asyncio.run(
+        EmotionalStatePlugin.on_message(
+            self_stub,
+            _ScopedEv(set_calls=calls),
+        )
+    )
 
     assert ("enable_streaming", False) in calls
 
@@ -1257,7 +1353,15 @@ def test_on_message_leaves_streaming_alone_when_not_fully_enabled(cfg: dict) -> 
     self_stub = SimpleNamespace(config=cfg)
     asyncio.run(EmotionalStatePlugin.on_message(self_stub, _StreamEv()))
 
-    assert calls == [], f"两开关未同时开启时不应碰 enable_streaming (cfg={cfg})"
+    assert not any(
+        key == "enable_streaming" for key, _value in calls
+    ), f"两开关未同时开启时不应碰 enable_streaming (cfg={cfg})"
+    assert len(calls) == 1
+    key, disabled = calls[0]
+    assert key == "_sylanne_transport_scope_v1"
+    assert type(disabled) is ResolvedTransportScope
+    assert disabled.private_scope_enabled is False
+    assert disabled.disabled_reason == "scope_resolver_unavailable"
 
 
 def _decorate_event(chain: list, *, takeover: bool = True) -> SimpleNamespace:

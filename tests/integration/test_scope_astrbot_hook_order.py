@@ -82,8 +82,26 @@ async def test_transport_turn_and_persona_freeze_precede_existing_pipeline(
     async def existing_pipeline(_event, _request):
         order.append("existing pipeline")
 
+    async def save_rhythm():
+        return None
+
     plugin = SimpleNamespace(
         _scope_resolver_v1=resolver,
+        config={},
+        _session_ctx=SimpleNamespace(
+            session_key=lambda _event: "adapter:FriendMessage:42",
+            resolve_authenticated_identity=lambda _event: None,
+            detect_and_observe_ritual_from_text=lambda *_args: None,
+        ),
+        _store=SimpleNamespace(
+            stash_authenticated_identity=lambda *_args: None,
+            last_user_message_time=SimpleNamespace(set=lambda *_args: None),
+            hosts=SimpleNamespace(get=lambda *_args: None),
+        ),
+        _rhythm_learner=SimpleNamespace(
+            observe_user_message=lambda *_args: None,
+        ),
+        _rhythm_learner_throttled_save=save_rhythm,
         _inbound_dup_gate=lambda _event: False,
         _llm_request_pipeline=SimpleNamespace(_on_llm_request_inner=existing_pipeline),
     )
@@ -101,6 +119,7 @@ async def test_transport_turn_and_persona_freeze_precede_existing_pipeline(
         "binding",
         "begin_turn",
         "persona resolve",
+        "transport",
         "publish/freeze",
         "transport",
         "existing pipeline",
@@ -217,7 +236,14 @@ async def test_persona_resolution_failure_runs_no_legacy_private_path(
         _scope_resolver_v1=resolver,
         config={},
         _session_ctx=SimpleNamespace(
-            session_key=lambda _event: legacy_calls.append("on_message") or "legacy"
+            session_key=lambda _event: "adapter:FriendMessage:42",
+            resolve_authenticated_identity=lambda _event: (
+                legacy_calls.append("identity")
+            ),
+        ),
+        _store=SimpleNamespace(
+            conversation_input_epoch=None,
+            segmented_delivery_turns=None,
         ),
         _inbound_dup_gate=lambda _event: False,
         _llm_request_pipeline=SimpleNamespace(_on_llm_request_inner=existing_pipeline),
@@ -381,3 +407,144 @@ async def test_forged_published_scope_fails_closed_without_persona_resolution(
     assert result.private_scope_enabled is False
     assert result.disabled_reason == "resolved_scope_mismatch"
     assert manager.resolve_selected_persona.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_event_tamper_after_resolve_stops_legacy_and_existing_pipeline(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    manager = SimpleNamespace(
+        resolve_selected_persona=AsyncMock(
+            return_value=(
+                "narrator",
+                {"prompt": "quiet", "begin_dialogs": [], "tools": None, "skills": []},
+                None,
+                False,
+            )
+        )
+    )
+    resolver = ScopeResolver.for_test(
+        SimpleNamespace(
+            get_config=lambda *, umo: {"provider_settings": {}},
+            persona_manager=manager,
+        ),
+        root=tmp_path,
+    )
+    extras: dict[str, object] = {}
+    event = SimpleNamespace(
+        session=_Session(),
+        unified_msg_origin="adapter:FriendMessage:42",
+        get_platform_id=lambda: "adapter",
+        get_platform_name=lambda: "aiocqhttp",
+        get_self_id=lambda: "10001",
+        get_extra=lambda key, default=None: extras.get(key, default),
+        set_extra=lambda key, value: extras.__setitem__(key, value),
+    )
+    calls: list[str] = []
+
+    async def existing_pipeline(_event, _request):
+        calls.append("pipeline")
+
+    plugin = SimpleNamespace(
+        _scope_resolver_v1=resolver,
+        config={},
+        _session_ctx=SimpleNamespace(
+            session_key=lambda _event: calls.append("legacy") or "legacy",
+        ),
+        _inbound_dup_gate=lambda _event: calls.append("dedup") or False,
+        _llm_request_pipeline=SimpleNamespace(
+            _on_llm_request_inner=existing_pipeline
+        ),
+    )
+    assert EmotionalStatePlugin._begin_scope_transport(plugin, event) is True
+    original_freeze = EmotionalStatePlugin._freeze_scope_persona
+
+    async def freeze_then_tamper(self, live_event, request):
+        resolved = await original_freeze(self, live_event, request)
+        live_event.unified_msg_origin = "adapter:FriendMessage:different"
+        return resolved
+
+    monkeypatch.setattr(
+        EmotionalStatePlugin,
+        "_freeze_scope_persona",
+        freeze_then_tamper,
+    )
+
+    await EmotionalStatePlugin._on_llm_request_inner(
+        plugin,
+        event,
+        SimpleNamespace(conversation=SimpleNamespace(persona_id=None)),
+    )
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_core_error_stops_dedup_and_existing_pipeline(tmp_path) -> None:
+    manager = SimpleNamespace(
+        resolve_selected_persona=AsyncMock(
+            return_value=(
+                "narrator",
+                {"prompt": "quiet", "begin_dialogs": [], "tools": None, "skills": []},
+                None,
+                False,
+            )
+        )
+    )
+    resolver = ScopeResolver.for_test(
+        SimpleNamespace(
+            get_config=lambda *, umo: {"provider_settings": {}},
+            persona_manager=manager,
+        ),
+        root=tmp_path,
+    )
+    extras: dict[str, object] = {}
+    event = SimpleNamespace(
+        session=_Session(),
+        unified_msg_origin="adapter:FriendMessage:42",
+        get_platform_id=lambda: "adapter",
+        get_platform_name=lambda: "aiocqhttp",
+        get_self_id=lambda: "10001",
+        get_extra=lambda key, default=None: extras.get(key, default),
+        set_extra=lambda key, value: extras.__setitem__(key, value),
+    )
+    calls: list[str] = []
+
+    def fail_core_write(*_args):
+        raise RuntimeError("last-user-message store unavailable")
+
+    async def existing_pipeline(_event, _request):
+        calls.append("pipeline")
+
+    plugin = SimpleNamespace(
+        _scope_resolver_v1=resolver,
+        config={},
+        _session_ctx=SimpleNamespace(
+            session_key=lambda _event: "adapter:FriendMessage:42",
+            resolve_authenticated_identity=lambda _event: None,
+        ),
+        _store=SimpleNamespace(
+            stash_authenticated_identity=lambda *_args: None,
+            last_user_message_time=SimpleNamespace(set=fail_core_write),
+        ),
+        _inbound_dup_gate=lambda _event: calls.append("dedup") or False,
+        _llm_request_pipeline=SimpleNamespace(
+            _on_llm_request_inner=existing_pipeline
+        ),
+    )
+    assert EmotionalStatePlugin._begin_scope_transport(plugin, event) is True
+
+    await EmotionalStatePlugin._on_llm_request_inner(
+        plugin,
+        event,
+        SimpleNamespace(conversation=SimpleNamespace(persona_id=None)),
+    )
+    await EmotionalStatePlugin._on_llm_request_inner(
+        plugin,
+        event,
+        SimpleNamespace(conversation=SimpleNamespace(persona_id=None)),
+    )
+
+    assert calls == []
+    assert extras["_sylanne_legacy_on_message_v1"] == "failed"
