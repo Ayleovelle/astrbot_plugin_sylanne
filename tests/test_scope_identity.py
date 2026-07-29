@@ -56,7 +56,9 @@ def test_bot_derivation_is_deterministic_and_session_generation_is_versioned() -
 
     assert qq_bot != discord_bot
     assert qq_bot == key.bot_ref(BotBinding(platform_id="qq", self_id="account-a"), generation=0)
-    assert key.session_ref(qq_bot, "qq", "umo-1", generation=0) != key.session_ref(
+    session_v0 = key.session_ref(qq_bot, "qq", "umo-1", generation=0)
+    assert session_v0 == key.session_ref(qq_bot, "qq", "umo-1", generation=0)
+    assert session_v0 != key.session_ref(
         qq_bot,
         "qq",
         "umo-1",

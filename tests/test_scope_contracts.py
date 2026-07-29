@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from dataclasses import FrozenInstanceError
+from typing import get_type_hints
 
 import pytest
 
@@ -96,6 +98,16 @@ def test_scope_contracts_validate_parentage_tokens_and_generations() -> None:
         disabled_reason=None,
     ).session_ref is session
 
+    with pytest.raises(ValueError, match="^identity_quality must be a non-empty str$"):
+        ResolvedTransportScope(
+            bot_ref=bot,
+            session_ref=session,
+            identity_quality=None,
+            private_scope_enabled=True,
+            disabled_reason=None,
+        )
+    assert get_type_hints(ResolvedTransportScope)["identity_quality"] is str
+
     with pytest.raises(ValueError, match="^invalid bot_v1_ token$"):
         BotRef(token="bot_v2_A", generation=0)
     with pytest.raises(ValueError, match="^invalid scope_v1_ token$"):
@@ -122,23 +134,44 @@ def test_api_diagnostics_and_delivery_contracts_keep_sensitive_fields_redacted()
         scope_generation=3,
     )
 
-    assert ScopeDiagnosticEcho(
-        bot_ref=bot,
-        persona_ref=persona,
-        session_ref=session,
+    diagnostic = ScopeDiagnosticEcho(
+        bot_ref=bot.token,
+        persona_ref=persona.token,
+        session_ref=session.token,
         scope_generation=3,
         resolved_at_ms=12,
-    ).scope_generation == 3
+    )
+    assert diagnostic.scope_generation == 3
+    assert (diagnostic.bot_ref, diagnostic.persona_ref, diagnostic.session_ref) == (
+        "bot_v1_A",
+        "persona_v1_P",
+        "session_v1_S",
+    )
+    assert all(type(value) is str for value in (diagnostic.bot_ref, diagnostic.persona_ref, diagnostic.session_ref))
+
+    scope_path = ScopeApiPathEcho(
+        bot_ref=bot.token,
+        persona_ref=persona.token,
+        session_ref=session.token,
+    )
     assert ScopeApiEcho(
-        scope=ScopeApiPathEcho(bot_ref=bot, persona_ref=persona, session_ref=session),
+        scope=scope_path,
         scope_generation=3,
         resolved_at_ms=12,
-    ).scope.session_ref is session
+    ).scope == scope_path
+    assert (scope_path.bot_ref, scope_path.persona_ref, scope_path.session_ref) == (
+        "bot_v1_A",
+        "persona_v1_P",
+        "session_v1_S",
+    )
+
+    persona_path = PersonaApiPathEcho(bot_ref=bot.token, persona_ref=persona.token)
     assert PersonaApiEcho(
-        scope=PersonaApiPathEcho(bot_ref=bot, persona_ref=persona),
+        scope=persona_path,
         scope_generation=0,
         resolved_at_ms=12,
-    ).scope.persona_ref is persona
+    ).scope == persona_path
+    assert (persona_path.bot_ref, persona_path.persona_ref) == ("bot_v1_A", "persona_v1_P")
     assert ResolvedScope.disabled("unverified", resolved_at_ms=12) == ResolvedScope(
         scope=None,
         persona_source=None,
@@ -149,6 +182,18 @@ def test_api_diagnostics_and_delivery_contracts_keep_sensitive_fields_redacted()
         disabled_reason="unverified",
         turn_generation=None,
     )
+    assert ResolvedScope.__annotations__["scope"] == "SessionScope | None"
+    with pytest.raises(ValueError, match="^scope must be a SessionScope or None$"):
+        ResolvedScope(
+            scope=PersonaScope(bot_ref=bot, persona_ref=persona),
+            persona_source=None,
+            identity_quality="verified",
+            resolution_source="adapter",
+            resolved_at_ms=12,
+            private_scope_enabled=True,
+            disabled_reason=None,
+            turn_generation=0,
+        )
 
     lease = TurnDeliveryLease(
         transport_session_token="session_v1_S",
@@ -188,5 +233,16 @@ def test_api_diagnostics_and_delivery_contracts_keep_sensitive_fields_redacted()
 
     assert lease.turn_generation == 9
     assert draft.delivery_ref is delivery
+    assert type(draft.issuer_mac) is str
+    assert json.dumps({"issuer_mac": draft.issuer_mac}) == '{"issuer_mac": "mac-secret"}'
+    assert get_type_hints(ProactiveIntentDraft)["issuer_mac"] is str
+    with pytest.raises(ValueError, match="^issuer_mac must be an exact str$"):
+        ProactiveIntentDraft(
+            delivery_ref=delivery,
+            lease=proactive_lease,
+            text="message-secret",
+            idempotent=True,
+            issuer_mac=b"mac-secret",  # type: ignore[arg-type]
+        )
     assert all(secret not in repr(delivery) for secret in ("platform-secret", "self-secret", "target-secret", "send-secret"))
     assert all(secret not in repr(draft) for secret in ("message-secret", "mac-secret"))

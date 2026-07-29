@@ -180,7 +180,7 @@ class RelationScope:
 class ResolvedTransportScope:
     bot_ref: BotRef
     session_ref: SessionRef
-    identity_quality: str | None
+    identity_quality: str
     private_scope_enabled: bool
     disabled_reason: str | None
 
@@ -188,14 +188,14 @@ class ResolvedTransportScope:
         bot_ref = _require_bot_ref(self.bot_ref)
         session_ref = _require_session_ref(self.session_ref)
         _require_session_belongs(bot_ref, session_ref)
-        _require_optional_text(self.identity_quality, "identity_quality")
+        _require_text(self.identity_quality, "identity_quality")
         _require_bool(self.private_scope_enabled, "private_scope_enabled")
         _require_optional_text(self.disabled_reason, "disabled_reason")
 
 
 @dataclass(frozen=True, slots=True)
 class ResolvedScope:
-    scope: SessionScope | PersonaScope | RelationScope | None
+    scope: SessionScope | None
     persona_source: PersonaSource | None
     identity_quality: str | None
     resolution_source: str | None
@@ -205,8 +205,8 @@ class ResolvedScope:
     turn_generation: int | None
 
     def __post_init__(self) -> None:
-        if self.scope is not None and type(self.scope) not in (SessionScope, PersonaScope, RelationScope):
-            raise ValueError("scope must be a scope contract or None")
+        if self.scope is not None and type(self.scope) is not SessionScope:
+            raise ValueError("scope must be a SessionScope or None")
         _require_optional_text(self.identity_quality, "identity_quality")
         _require_optional_text(self.resolution_source, "resolution_source")
         _require_generation(self.resolved_at_ms, "resolved_at_ms")
@@ -233,34 +233,30 @@ class ResolvedScope:
 class ScopeDiagnosticEcho:
     """Bounded diagnostic projection; do not pass this object to public serializers."""
 
-    bot_ref: BotRef
-    persona_ref: PersonaRevisionRef
-    session_ref: SessionRef
+    bot_ref: str
+    persona_ref: str
+    session_ref: str
     scope_generation: int
     resolved_at_ms: int
 
     def __post_init__(self) -> None:
-        bot_ref = _require_bot_ref(self.bot_ref)
-        persona_ref = _require_persona_ref(self.persona_ref)
-        session_ref = _require_session_ref(self.session_ref)
-        _require_persona_belongs(bot_ref, persona_ref)
-        _require_session_belongs(bot_ref, session_ref)
+        _require_token(self.bot_ref, "bot_v1_")
+        _require_token(self.persona_ref, "persona_v1_")
+        _require_token(self.session_ref, "session_v1_")
         _require_generation(self.scope_generation, "scope_generation")
         _require_generation(self.resolved_at_ms, "resolved_at_ms")
 
 
 @dataclass(frozen=True, slots=True)
 class ScopeApiPathEcho:
-    bot_ref: BotRef
-    persona_ref: PersonaRevisionRef
-    session_ref: SessionRef
+    bot_ref: str
+    persona_ref: str
+    session_ref: str
 
     def __post_init__(self) -> None:
-        bot_ref = _require_bot_ref(self.bot_ref)
-        persona_ref = _require_persona_ref(self.persona_ref)
-        session_ref = _require_session_ref(self.session_ref)
-        _require_persona_belongs(bot_ref, persona_ref)
-        _require_session_belongs(bot_ref, session_ref)
+        _require_token(self.bot_ref, "bot_v1_")
+        _require_token(self.persona_ref, "persona_v1_")
+        _require_token(self.session_ref, "session_v1_")
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,13 +274,12 @@ class ScopeApiEcho:
 
 @dataclass(frozen=True, slots=True)
 class PersonaApiPathEcho:
-    bot_ref: BotRef
-    persona_ref: PersonaRevisionRef
+    bot_ref: str
+    persona_ref: str
 
     def __post_init__(self) -> None:
-        bot_ref = _require_bot_ref(self.bot_ref)
-        persona_ref = _require_persona_ref(self.persona_ref)
-        _require_persona_belongs(bot_ref, persona_ref)
+        _require_token(self.bot_ref, "bot_v1_")
+        _require_token(self.persona_ref, "persona_v1_")
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,7 +365,7 @@ class ProactiveIntentDraft:
     lease: ProactiveDeliveryLease
     text: str = field(repr=False)
     idempotent: bool
-    issuer_mac: str | bytes = field(repr=False)
+    issuer_mac: str = field(repr=False)
 
     def __post_init__(self) -> None:
         if type(self.delivery_ref) is not BotDeliveryRef:
@@ -380,8 +375,8 @@ class ProactiveIntentDraft:
         if type(self.text) is not str:
             raise ValueError("text must be an exact str")
         _require_bool(self.idempotent, "idempotent")
-        if type(self.issuer_mac) not in (str, bytes):
-            raise ValueError("issuer_mac must be exact str or bytes")
+        if type(self.issuer_mac) is not str:
+            raise ValueError("issuer_mac must be an exact str")
 
 
 __all__ = [
