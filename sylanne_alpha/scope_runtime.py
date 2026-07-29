@@ -33,6 +33,7 @@ PersonaKey = tuple[str, str, int]
 SessionKey = tuple[str, str, int, str, int]
 RelationKey = tuple[str, str, int, str, int]
 TransportKey = tuple[str, int, str, int]
+TransportIdentityKey = tuple[str, int, str]
 
 
 def _require_scope(scope: object) -> SessionScope:
@@ -82,6 +83,14 @@ def _transport_key(transport: ResolvedTransportScope) -> TransportKey:
         transport.bot_ref.generation,
         transport.session_ref.token,
         transport.session_ref.generation,
+    )
+
+
+def _transport_identity_for_scope(scope: SessionScope) -> TransportIdentityKey:
+    return (
+        scope.bot_ref.token,
+        scope.bot_ref.generation,
+        scope.session_ref.token,
     )
 
 
@@ -207,6 +216,7 @@ class ScopeRuntimeRegistry:
         self._released_sessions: set[SessionKey] = set()
         self._retired_personas: set[PersonaKey] = set()
         self._transport_owners: dict[TransportKey, SessionKey] = {}
+        self._highest_transport_generations: dict[TransportIdentityKey, int] = {}
 
     @property
     def persona_count(self) -> int:
@@ -331,16 +341,18 @@ class ScopeRuntimeRegistry:
             or not self.is_live_session(scope)
         ):
             return False
-        # A higher authenticated SessionRef generation supersedes all older
-        # publications for this opaque bot/session pair.
-        bot_token, bot_generation, session_token, _generation = transport_key
+        # SessionRef generation is a monotonic authority fence.  A late old
+        # request may remain a live exact runtime, but it must never evict the
+        # newer transport owner.  Same-generation publication remains valid for
+        # a later successfully frozen Persona switch.
+        identity = transport_key[:3]
+        generation = transport_key[3]
+        highest_generation = self._highest_transport_generations.get(identity)
+        if highest_generation is not None and generation < highest_generation:
+            return False
+        self._highest_transport_generations[identity] = generation
         for key in list(self._transport_owners):
-            if (
-                key[0] == bot_token
-                and key[1] == bot_generation
-                and key[2] == session_token
-                and key != transport_key
-            ):
+            if key[:3] == identity and key != transport_key:
                 self._transport_owners.pop(key, None)
         self._transport_owners[transport_key] = session_key
         return True
@@ -361,6 +373,7 @@ class ScopeRuntimeRegistry:
         session_runtime = self._sessions.get(session_key)
         if session_runtime is None:
             self._transport_owners.pop(transport_key, None)
+            self._drop_unused_transport_generation_fence(transport_key[:3])
             return None
         scope = session_runtime.scope
         persona_runtime = self._personas.get(_persona_key(scope))
@@ -372,6 +385,7 @@ class ScopeRuntimeRegistry:
             or not self.is_live_session(scope)
         ):
             self._transport_owners.pop(transport_key, None)
+            self._drop_unused_transport_generation_fence(transport_key[:3])
             return None
         return TransportRuntimeOwner(
             scope=scope,
@@ -456,12 +470,14 @@ class ScopeRuntimeRegistry:
         if runtime is None:
             return
         session_key = _session_key(scope)
+        transport_identity = _transport_identity_for_scope(scope)
         for transport_key, owner_key in list(self._transport_owners.items()):
             if owner_key == session_key:
                 self._transport_owners.pop(transport_key, None)
         self._released_sessions.add(session_key)
         self._cancel_tasks(runtime.session_background_tasks.pop(session_key, set()))
         self._sessions.pop(session_key, None)
+        self._drop_unused_transport_generation_fence(transport_identity)
         latest_key = (persona_key, scope.storage_token)
         current_key = self._latest_sessions.get(latest_key)
         if current_key is not None and current_key != session_key:
@@ -503,6 +519,11 @@ class ScopeRuntimeRegistry:
             return False
         self._retired_personas.add(key)
         runtime = self._personas.pop(key, None)
+        transport_identities = {
+            _transport_identity_for_scope(session_runtime.scope)
+            for session_key, session_runtime in self._sessions.items()
+            if session_key[:3] == key
+        }
         for session_key in [item for item in self._sessions if item[:3] == key]:
             self._sessions.pop(session_key, None)
         for latest_key in [item for item in self._latest_sessions if item[0] == key]:
@@ -511,7 +532,10 @@ class ScopeRuntimeRegistry:
             self._highest_session_generations.pop(generation_key, None)
         for transport_key, session_key in list(self._transport_owners.items()):
             if session_key[:3] == key:
+                transport_identities.add(transport_key[:3])
                 self._transport_owners.pop(transport_key, None)
+        for identity in transport_identities:
+            self._drop_unused_transport_generation_fence(identity)
         self._released_sessions = {
             item for item in self._released_sessions if item[:3] != key
         }
@@ -524,6 +548,20 @@ class ScopeRuntimeRegistry:
             runtime.store.reset_all()
             runtime.relation_runtimes.clear()
         return runtime is not None
+
+    def _drop_unused_transport_generation_fence(
+        self,
+        identity: TransportIdentityKey,
+    ) -> None:
+        """Drop high-water state only when no exact session can late-publish."""
+
+        if any(
+            _transport_identity_for_scope(runtime.scope) == identity
+            and self.is_live_session(runtime.scope)
+            for runtime in self._sessions.values()
+        ):
+            return
+        self._highest_transport_generations.pop(identity, None)
 
     @staticmethod
     def _cancel_runtime_tasks(runtime: PersonaRuntime) -> None:

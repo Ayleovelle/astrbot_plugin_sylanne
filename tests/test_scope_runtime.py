@@ -171,6 +171,89 @@ def test_transport_safety_uses_only_published_exact_runtime_and_fences_stale(
     assert turn.interrupted == 1
 
 
+def test_transport_owner_publication_rejects_late_lower_session_generation(
+    scopes,
+) -> None:
+    registry = ScopeRuntimeRegistry.for_test()
+    base = scopes.bot_a_persona_a
+    generation_zero = replace(
+        base,
+        storage_token="scope_v1_transport_generation_zero",
+    )
+    generation_one = replace(
+        base,
+        session_ref=SessionRef(
+            token=base.session_ref.token,
+            bot_ref=base.bot_ref,
+            generation=1,
+        ),
+        storage_token="scope_v1_transport_generation_one",
+    )
+    registry.exact_session(generation_zero)
+    generation_one_runtime = registry.exact_session(generation_one)
+    old_transport = _transport_scope(generation_zero)
+    new_transport = _transport_scope(generation_one)
+
+    assert registry.publish_transport_owner(old_transport, generation_zero) is True
+    assert registry.publish_transport_owner(new_transport, generation_one) is True
+    assert registry.transport_owner_or_none(old_transport) is None
+    assert registry.publish_transport_owner(old_transport, generation_zero) is False
+
+    owner = registry.transport_owner_or_none(new_transport)
+    assert owner is not None
+    assert owner.scope == generation_one
+    assert owner.session_runtime is generation_one_runtime
+
+    # Releasing the high owner must not reopen rollback while a lower-generation
+    # exact session can still issue a late publication.
+    registry.release_session(generation_one)
+    assert registry.publish_transport_owner(old_transport, generation_zero) is False
+
+    # Once no exact session for the opaque identity remains, lifecycle cleanup
+    # may discard the fence and permit a genuinely new owner.
+    registry.release_session(generation_zero)
+    fresh = replace(
+        scopes.bot_a_persona_b,
+        session_ref=generation_zero.session_ref,
+        storage_token="scope_v1_transport_generation_fresh",
+    )
+    fresh_runtime = registry.exact_session(fresh)
+    assert registry.publish_transport_owner(old_transport, fresh) is True
+    fresh_owner = registry.transport_owner_or_none(old_transport)
+    assert fresh_owner is not None
+    assert fresh_owner.scope == fresh
+    assert fresh_owner.session_runtime is fresh_runtime
+
+
+def test_same_transport_generation_can_follow_a_later_frozen_persona(scopes) -> None:
+    registry = ScopeRuntimeRegistry.for_test()
+    session_ref = SessionRef(
+        token=scopes.bot_a_persona_a.session_ref.token,
+        bot_ref=scopes.bot_a_persona_a.bot_ref,
+        generation=1,
+    )
+    first = replace(
+        scopes.bot_a_persona_a,
+        session_ref=session_ref,
+        storage_token="scope_v1_transport_persona_first",
+    )
+    second = replace(
+        scopes.bot_a_persona_b,
+        session_ref=session_ref,
+        storage_token="scope_v1_transport_persona_second",
+    )
+    registry.exact_session(first)
+    second_runtime = registry.exact_session(second)
+    transport = _transport_scope(first)
+
+    assert registry.publish_transport_owner(transport, first) is True
+    assert registry.publish_transport_owner(transport, second) is True
+    owner = registry.transport_owner_or_none(transport)
+    assert owner is not None
+    assert owner.scope == second
+    assert owner.session_runtime is second_runtime
+
+
 def test_registry_free_store_seam_cannot_bypass_a_scoped_registry(scopes) -> None:
     plugin = object.__new__(EmotionalStatePlugin)
     legacy_store = SimpleNamespace(owner="registry-free")
