@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -154,3 +154,30 @@ async def test_missing_self_accepts_only_live_proof_for_persisted_binding() -> N
 
     assert resolved.private_scope_enabled is True
     assert resolved.identity_quality == "single_account_proven"
+
+
+@pytest.mark.asyncio
+async def test_unified_origin_must_match_canonical_session_before_persona_lookup() -> None:
+    manager = SimpleNamespace(resolve_selected_persona=AsyncMock())
+    context = SimpleNamespace(
+        persona_manager=manager,
+        get_config=Mock(return_value={"provider_settings": {}}),
+    )
+    resolver = ScopeResolver.for_test(context)
+    event = _event()
+    event.unified_msg_origin = "adapter:FriendMessage:different"
+    request = SimpleNamespace(conversation=SimpleNamespace(persona_id=None))
+    transport = resolver.resolve_transport(event)
+    binding = resolver.delivery_binding(event, transport)
+    assert binding is not None
+    turn = resolver.catalog.begin_turn(transport, binding)
+    event.set_extra("_sylanne_transport_scope_v1", transport)
+    event.set_extra("_sylanne_transport_turn_v1", turn)
+
+    resolved = await resolver.resolve(event, request)
+
+    assert resolved.private_scope_enabled is False
+    assert resolved.disabled_reason == "umo_session_conflict"
+    context.get_config.assert_not_called()
+    manager.resolve_selected_persona.assert_not_awaited()
+    assert resolver.catalog.current(transport.session_ref.token).turn_state == "resolving"

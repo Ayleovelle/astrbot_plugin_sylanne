@@ -451,7 +451,8 @@ class ScopeResolver:
             setter(key, value)
         except Exception:
             return False
-        return True
+        missing = object()
+        return ScopeResolver._event_extra(event, key, missing) is value
 
     def resolve_transport(self, event: Any) -> ResolvedTransportScope:
         """Use only the adapter event's current canonical session and identity."""
@@ -700,6 +701,33 @@ class ScopeResolver:
         if turn is None:
             return ResolvedScope.disabled("transport_turn_unverified", resolved_at_ms=now_ms)
         try:
+            session = getattr(event, "session", None)
+            canonical_umo = str(session) if session is not None else ""
+            event_umo = getattr(event, "unified_msg_origin", None)
+            platform_id = str(event.get_platform_id() or "")
+            session_platform_id = str(getattr(session, "platform_id", "") or "")
+            expected_session_ref = self._identity.session_ref(
+                transport.bot_ref,
+                platform_id,
+                canonical_umo,
+                generation=transport.session_ref.generation,
+            )
+        except Exception:
+            return ResolvedScope.disabled(
+                "transport_session_unverified", resolved_at_ms=now_ms
+            )
+        if (
+            not canonical_umo
+            or not platform_id
+            or session_platform_id != platform_id
+            or expected_session_ref != transport.session_ref
+        ):
+            return ResolvedScope.disabled(
+                "transport_session_unverified", resolved_at_ms=now_ms
+            )
+        if type(event_umo) is not str or event_umo != canonical_umo:
+            return ResolvedScope.disabled("umo_session_conflict", resolved_at_ms=now_ms)
+        try:
             cfg = self._context.get_config(umo=event.unified_msg_origin)
             selected_id, personality, forced_id, _is_webchat_special = (
                 await self._context.persona_manager.resolve_selected_persona(
@@ -727,9 +755,6 @@ class ScopeResolver:
         if source is None:
             return ResolvedScope.disabled("persona_unavailable", resolved_at_ms=now_ms)
         try:
-            session = getattr(event, "session", None)
-            platform_id = str(event.get_platform_id() or "")
-            canonical_umo = str(session) if session is not None else ""
             scope = self._scope_for(
                 transport,
                 source,

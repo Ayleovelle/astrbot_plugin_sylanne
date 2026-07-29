@@ -218,6 +218,10 @@ from sylanne_alpha.memory_facade import MemoryFacade  # noqa: E402
 from sylanne_alpha.realtime_dispatch import RealtimeDispatch  # noqa: E402
 from sylanne_alpha.background_queue import BackgroundPostQueue  # noqa: E402
 from sylanne_alpha.webui_routes import WebUIRoutes  # noqa: E402
+from sylanne_alpha.scope_contracts import (  # noqa: E402
+    ResolvedScope,
+    ResolvedTransportScope,
+)
 from sylanne_alpha.scope_identity import ScopeResolver  # noqa: E402
 
 # 加载 WebUI dashboard HTML（从 UI/index.html）
@@ -2059,12 +2063,20 @@ class EmotionalStatePlugin(Star):
         self._scope_resolver_v1 = resolver
         return resolver
 
-    def _begin_scope_transport(self, event: Any) -> bool | None:
+    def _begin_scope_transport(self, event: Any) -> bool:
         """Persist one resolving transport turn before any legacy private state."""
 
-        resolver = EmotionalStatePlugin._scope_resolver_instance(self)
+        try:
+            resolver = EmotionalStatePlugin._scope_resolver_instance(self)
+        except Exception:
+            resolver = None
         if resolver is None:
-            return None
+            ScopeResolver.set_event_extra(
+                event,
+                "_sylanne_transport_scope_v1",
+                ResolvedTransportScope.disabled("scope_resolver_unavailable"),
+            )
+            return False
         transport = resolver.resolve_transport(event)
         if transport.private_scope_enabled is not True:
             resolver.set_event_extra(event, "_sylanne_transport_scope_v1", transport)
@@ -2072,20 +2084,49 @@ class EmotionalStatePlugin(Star):
         binding = resolver.delivery_binding(event, transport)
         if binding is None:
             return False
+
+        def publish(turn: Any) -> bool:
+            if not resolver.set_event_extra(
+                event, "_sylanne_transport_scope_v1", transport
+            ):
+                return False
+            if resolver.set_event_extra(event, "_sylanne_transport_turn_v1", turn):
+                return True
+            resolver.set_event_extra(
+                event,
+                "_sylanne_transport_scope_v1",
+                ResolvedTransportScope.disabled("transport_attachment_failed"),
+            )
+            return False
+
         try:
-            turn = resolver.catalog.begin_turn(transport, binding)
+            resolver.catalog.begin_turn(transport, binding, publish=publish)
         except Exception:
-            return False
-        if not resolver.set_event_extra(event, "_sylanne_transport_scope_v1", transport):
-            return False
-        if not resolver.set_event_extra(event, "_sylanne_transport_turn_v1", turn):
+            resolver.set_event_extra(
+                event,
+                "_sylanne_transport_scope_v1",
+                ResolvedTransportScope.disabled("transport_turn_unverified"),
+            )
+            resolver.set_event_extra(event, "_sylanne_transport_turn_v1", None)
             return False
         return True
 
-    async def _freeze_scope_persona(self, event: Any, request: Any) -> Any | None:
-        resolver = EmotionalStatePlugin._scope_resolver_instance(self)
+    async def _freeze_scope_persona(self, event: Any, request: Any) -> ResolvedScope:
+        try:
+            resolver = EmotionalStatePlugin._scope_resolver_instance(self)
+        except Exception:
+            resolver = None
         if resolver is None:
-            return None
+            disabled = ResolvedScope.disabled(
+                "scope_resolver_unavailable",
+                resolved_at_ms=time.time_ns() // 1_000_000,
+            )
+            ScopeResolver.set_event_extra(
+                event,
+                "_sylanne_resolved_scope_v1",
+                disabled,
+            )
+            return disabled
         return await resolver.resolve(event, request)
 
     @filter.event_message_type(filter.EventMessageType.ALL)
@@ -2099,7 +2140,7 @@ class EmotionalStatePlugin(Star):
         本插件只用 event。"""
         try:
             transport_ready = EmotionalStatePlugin._begin_scope_transport(self, event)
-            if transport_ready is False:
+            if transport_ready is not True:
                 return
             # M4a（realtime 完整重做 Model-D）：即时聊天接管开启时强制关闭本轮
             # 流式，让响应侧走非流式档（on_decorating_result 才够得着、能抑制
@@ -2255,8 +2296,8 @@ class EmotionalStatePlugin(Star):
             self, event, request
         )
         if (
-            resolved_scope is not None
-            and getattr(resolved_scope, "private_scope_enabled", False) is not True
+            type(resolved_scope) is not ResolvedScope
+            or resolved_scope.private_scope_enabled is not True
         ):
             return
         # v2.5.0 入站消息级幂等闸：必须在任何早退（尤其 should_express 静默

@@ -11,6 +11,7 @@ import stat
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Callable
 
 from . import infra
 from .infra import atomic_write_owner_only_bytes
@@ -515,6 +516,8 @@ class SessionCatalog:
         self,
         transport_scope: ResolvedTransportScope,
         delivery_binding: ProtectedDeliveryBinding,
+        *,
+        publish: Callable[[TransportTurn], bool] | None = None,
     ) -> TransportTurn:
         if type(transport_scope) is not ResolvedTransportScope:
             raise ValueError("transport_scope must be a ResolvedTransportScope")
@@ -599,7 +602,15 @@ class SessionCatalog:
                 identity_quality=transport_scope.identity_quality,
                 updated_at_ms=self._now_ms(),
             )
-            # Publishing resolving first makes any interrupted update fail closed.
+            if publish is not None:
+                try:
+                    published = publish(turn)
+                except Exception as exc:
+                    raise ValueError("transport turn publication failed") from exc
+                if published is not True:
+                    raise ValueError("transport turn publication failed")
+            # The exact event objects are published before either durable turn
+            # artifact, so an attachment failure cannot strand a resolving turn.
             self._write_turn_locked(turn)
             self._write_binding_locked(turn, delivery_binding)
             return turn
