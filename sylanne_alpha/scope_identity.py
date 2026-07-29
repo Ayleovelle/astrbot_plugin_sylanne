@@ -6,9 +6,11 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from .infra import load_or_create_owner_only_secret
 from .scope_contracts import BotRef, PersonaRevisionRef, RelationRef, SessionRef
 
 _BOT_DOMAIN = b"sylanne.scope.bot.v1\x00"
@@ -18,6 +20,9 @@ _RELATION_DOMAIN = b"sylanne.scope.relation.v1\x00"
 _STORAGE_DOMAIN = b"sylanne.scope.storage.v1\x00"
 _MANAGED_EMBODIMENT_PREFIX = "sylanne_embodiment_"
 _MAX_IDENTITY_COMPONENT_BYTES = 4096
+_SCOPE_KEY_MAGIC = b"SYLANNE-SCOPE-IDENTITY\x01\x00"
+_SCOPE_KEY_ID_DOMAIN = b"sylanne.scope.key-id.v1\x00"
+_SCOPE_SECRET_BYTES = 32
 
 
 def _token(prefix: str, digest: bytes) -> str:
@@ -122,8 +127,8 @@ class ScopeIdentityKey:
 
     def __post_init__(self) -> None:
         _frame(self.key_id)
-        if type(self.secret) is not bytes or len(self.secret) < 32:
-            raise ValueError("secret must be exact bytes with length at least 32")
+        if type(self.secret) is not bytes or len(self.secret) != _SCOPE_SECRET_BYTES:
+            raise ValueError("secret must be exact bytes with length 32")
 
     def _digest(self, domain: bytes, *values: str) -> bytes:
         if type(domain) is not bytes:
@@ -252,6 +257,21 @@ class ScopeIdentityKey:
         )
 
 
+def load_or_create_scope_identity_key(
+    path: str | os.PathLike[str],
+) -> ScopeIdentityKey:
+    """Load the stable scope HMAC key or create it once with owner-only access."""
+
+    secret = load_or_create_owner_only_secret(
+        path,
+        magic=_SCOPE_KEY_MAGIC,
+        secret_bytes=_SCOPE_SECRET_BYTES,
+        error_label="scope identity key",
+    )
+    digest = hashlib.sha256(_SCOPE_KEY_ID_DOMAIN + secret).hexdigest()
+    return ScopeIdentityKey(key_id=f"scope-key-v1-{digest[:32]}", secret=secret)
+
+
 @dataclass(frozen=True, slots=True)
 class AdapterAccountProof:
     platform_id: str
@@ -337,5 +357,6 @@ __all__ = [
     "NoAdapterAccountProofProvider",
     "PersonaSource",
     "ScopeIdentityKey",
+    "load_or_create_scope_identity_key",
     "resolve_proven_single_account",
 ]
