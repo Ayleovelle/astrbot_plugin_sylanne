@@ -8,7 +8,13 @@ from types import ModuleType
 
 import pytest
 
-from sylanne_alpha.scope_contracts import BotRef, PersonaRevisionRef, SessionRef, SessionScope
+from sylanne_alpha.scope_contracts import (
+    BotRef,
+    PersonaRevisionRef,
+    RelationRef,
+    SessionRef,
+    SessionScope,
+)
 from sylanne_alpha.scope_identity import load_or_create_scope_identity_key
 from sylanne_alpha.scope_repository import ScopeRepository, StaleScopeWrite
 
@@ -141,3 +147,74 @@ def test_scope_root_adapter_uses_only_startools_data_dir(monkeypatch: pytest.Mon
     monkeypatch.setattr(infra, "resolve_data_root", lambda: (_ for _ in ()).throw(AssertionError()))
 
     assert infra.resolve_scope_v1_root() == tmp_path / "plugin-data" / "scope-v1"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        ".",
+        "..",
+        "../escape",
+        "..\\escape",
+        "/absolute",
+        "C:escape",
+        "line\nbreak",
+        "é",
+    ),
+)
+def test_all_public_scope_tokens_reject_non_path_safe_payloads(payload: str) -> None:
+    bot = BotRef(token="bot_v1_A", generation=0)
+    persona = PersonaRevisionRef(
+        token="persona_v1_P",
+        bot_ref=bot,
+        persona_id_digest="a" * 64,
+        source_fingerprint="b" * 64,
+        lifecycle_generation=0,
+    )
+    session = SessionRef(token="session_v1_S", bot_ref=bot, generation=0)
+
+    with pytest.raises(ValueError):
+        BotRef(token=f"bot_v1_{payload}", generation=0)
+    with pytest.raises(ValueError):
+        PersonaRevisionRef(
+            token=f"persona_v1_{payload}",
+            bot_ref=bot,
+            persona_id_digest="a" * 64,
+            source_fingerprint="b" * 64,
+            lifecycle_generation=0,
+        )
+    with pytest.raises(ValueError):
+        SessionRef(token=f"session_v1_{payload}", bot_ref=bot, generation=0)
+    with pytest.raises(ValueError):
+        RelationRef(token=f"relation_v1_{payload}", bot_ref=bot)
+    with pytest.raises(ValueError):
+        SessionScope(
+            bot_ref=bot,
+            persona_ref=persona,
+            session_ref=session,
+            storage_token=f"scope_v1_{payload}",
+            scope_generation=0,
+        )
+
+
+def test_repository_path_helpers_revalidate_tokens_before_computing_paths(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "scope-v1"
+    repository = ScopeRepository(root)
+
+    with pytest.raises(ValueError):
+        repository.session_path(
+            (
+                "bot_v1_A/../../../../outside",
+                "persona_v1_P",
+                "session_v1_S",
+            )
+        )
+    with pytest.raises(ValueError):
+        repository.transport_catalog_path(
+            "bot_v1_A",
+            "session_v1_..\\outside",
+        )
+
+    assert not (tmp_path.parent / "outside").exists()

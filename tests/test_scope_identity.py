@@ -238,6 +238,20 @@ def test_proven_single_account_rejects_changed_current_account_material() -> Non
     ) is None
 
 
+def test_adapter_account_proof_repr_does_not_disclose_platform_id() -> None:
+    proof = AdapterAccountProof(
+        platform_id="private-platform-id",
+        bot_ref=BotRef(token="bot_v1_A", generation=0),
+        proof_generation=0,
+        verified_at_ms=100,
+        expires_at_ms=200,
+        account_set_digest="digest-a",
+        account_count=1,
+    )
+
+    assert "private-platform-id" not in repr(proof)
+
+
 def test_restart_with_no_proof_provider_cannot_reuse_an_old_in_memory_proof() -> None:
     bot = BotRef(token="bot_v1_A", generation=0)
     old_proof = AdapterAccountProof(

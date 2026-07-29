@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .scope_identity import PersonaSource
 
+_TOKEN_PAYLOAD = re.compile(r"[A-Za-z0-9_-]+\Z", re.ASCII)
+
 
 def _require_token(value: object, prefix: str) -> str:
     """Return one exact opaque token, rejecting values outside its namespace."""
 
-    if type(value) is not str or not value.startswith(prefix) or len(value) == len(prefix):
+    if (
+        type(value) is not str
+        or not value.startswith(prefix)
+        or _TOKEN_PAYLOAD.fullmatch(value[len(prefix) :]) is None
+    ):
         raise ValueError(f"invalid {prefix} token")
     return value
 

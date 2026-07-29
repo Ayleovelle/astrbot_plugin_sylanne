@@ -24,6 +24,7 @@ _BOT_SCHEMA = "sylanne.scope.bot.v1"
 _PERSONA_SCHEMA = "sylanne.scope.persona.v1"
 _SCOPE_META_SCHEMA = "sylanne.scope.meta.v1"
 _COMPONENT_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+_TOKEN_PAYLOAD = re.compile(r"[A-Za-z0-9_-]+\Z", re.ASCII)
 
 
 class RepositoryCorruptionError(RuntimeError):
@@ -81,7 +82,11 @@ class _InterProcessLock:
 
 
 def _require_token(value: object, prefix: str) -> str:
-    if type(value) is not str or not value.startswith(prefix) or len(value) == len(prefix):
+    if (
+        type(value) is not str
+        or not value.startswith(prefix)
+        or _TOKEN_PAYLOAD.fullmatch(value[len(prefix) :]) is None
+    ):
         raise ValueError(f"invalid {prefix} token")
     return value
 
@@ -139,6 +144,7 @@ class ScopeRepository:
         self.root = Path(os.fspath(root))
         self.catalog_path = self.root / "catalog.json"
         self.bots_directory = self.root / "bots"
+        self.bot_bindings_directory = self.root / "bot-bindings"
         self._lock_path = self.root / ".scope-v1.lock"
         self._lock_timeout_seconds = timeout
         self._replace_attempts = max(1, int(replace_attempts))
@@ -380,6 +386,13 @@ class ScopeRepository:
 
     def transport_delivery_binding_path(self, bot_token: str, session_token: str) -> Path:
         return self.transport_session_directory(bot_token, session_token) / "delivery-binding.json"
+
+    def bot_binding_manifest_path(self, binding_token: str) -> Path:
+        return (
+            self.bot_bindings_directory
+            / _require_token(binding_token, "binding_v1_")
+            / "manifest.json"
+        )
 
     def _quarantine_locked(self, path: Path) -> None:
         quarantine = path.parent / "quarantine"

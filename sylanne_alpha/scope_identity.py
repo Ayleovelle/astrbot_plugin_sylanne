@@ -274,7 +274,7 @@ def load_or_create_scope_identity_key(
 
 @dataclass(frozen=True, slots=True)
 class AdapterAccountProof:
-    platform_id: str
+    platform_id: str = field(repr=False)
     bot_ref: BotRef
     proof_generation: int
     verified_at_ms: int

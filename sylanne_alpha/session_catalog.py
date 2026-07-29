@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import stat
 import time
 from dataclasses import dataclass, field, replace
@@ -14,7 +15,11 @@ from pathlib import Path
 from . import infra
 from .infra import atomic_write_owner_only_bytes
 from .scope_contracts import ResolvedTransportScope, SessionScope
-from .scope_identity import ScopeIdentityKey, load_or_create_scope_identity_key
+from .scope_identity import (
+    BotBinding,
+    ScopeIdentityKey,
+    load_or_create_scope_identity_key,
+)
 from .scope_repository import (
     RepositoryCorruptionError,
     ScopeRepository,
@@ -24,11 +29,18 @@ from .scope_repository import (
 
 _TRANSPORT_SCHEMA = "sylanne.transport.session.v1"
 _DELIVERY_BINDING_SCHEMA = "sylanne.delivery.binding.v1"
+_BOT_BINDING_SCHEMA = "sylanne.bot.binding.v1"
 _BINDING_DIGEST_DOMAIN = b"sylanne.scope.delivery-binding.v1\x00"
+_BOT_BINDING_TOKEN_DOMAIN = b"sylanne.scope.bot-binding-token.v1\x00"
+_TOKEN_PAYLOAD = re.compile(r"[A-Za-z0-9_-]+\Z", re.ASCII)
 
 
 def _require_token(value: object, prefix: str) -> str:
-    if type(value) is not str or not value.startswith(prefix) or len(value) == len(prefix):
+    if (
+        type(value) is not str
+        or not value.startswith(prefix)
+        or _TOKEN_PAYLOAD.fullmatch(value[len(prefix) :]) is None
+    ):
         raise ValueError(f"invalid {prefix} token")
     return value
 
@@ -167,6 +179,115 @@ class SessionCatalog:
             hashlib.sha256,
         ).hexdigest()
         return f"binding-v1-{digest}"
+
+    def _bot_binding_token(self, platform_id: str, self_id: str) -> str:
+        material = _canonical_json_bytes(
+            {
+                "platform_id": _require_text(platform_id, "platform_id"),
+                "self_id": _require_text(self_id, "self_id"),
+            }
+        )
+        digest = hmac.new(
+            self._identity_key.secret,
+            _BOT_BINDING_TOKEN_DOMAIN + material,
+            hashlib.sha256,
+        ).hexdigest()
+        return f"binding_v1_{digest}"
+
+    def _load_bot_binding_locked(
+        self,
+        binding_token: str,
+    ) -> tuple[int, str] | None:
+        token = _require_token(binding_token, "binding_v1_")
+        loaded = self.repository._read_json(
+            self.repository.bot_binding_manifest_path(token),
+            error_label="bot binding authority",
+        )
+        if loaded is None:
+            return None
+        raw, document = loaded
+        expected_fields = {
+            "schema_version",
+            "binding_token",
+            "bot_ref",
+            "binding_generation",
+            "updated_at_ms",
+        }
+        if (
+            set(document) != expected_fields
+            or document["schema_version"] != _BOT_BINDING_SCHEMA
+            or document["binding_token"] != token
+            or raw != _canonical_json_bytes(document)
+        ):
+            raise RepositoryCorruptionError("bot binding authority is invalid")
+        try:
+            bot_token = _require_token(document["bot_ref"], "bot_v1_")
+            generation = _require_generation(
+                document["binding_generation"],
+                "binding_generation",
+            )
+            _require_generation(document["updated_at_ms"], "updated_at_ms")
+        except ValueError as exc:
+            raise RepositoryCorruptionError(
+                "bot binding authority is invalid"
+            ) from exc
+        return generation, bot_token
+
+    def _write_bot_binding_locked(
+        self,
+        binding_token: str,
+        *,
+        bot_token: str,
+        generation: int,
+    ) -> None:
+        token = _require_token(binding_token, "binding_v1_")
+        self.repository._atomic_json_replace(
+            self.repository.bot_binding_manifest_path(token),
+            {
+                "schema_version": _BOT_BINDING_SCHEMA,
+                "binding_token": token,
+                "bot_ref": _require_token(bot_token, "bot_v1_"),
+                "binding_generation": _require_generation(
+                    generation,
+                    "binding_generation",
+                ),
+                "updated_at_ms": self._now_ms(),
+            },
+            owner_only=True,
+        )
+        self.repository._commit_catalog_generation_locked()
+
+    def binding_generation(self, platform_id: str, self_id: str) -> int:
+        """Return the durable generation for one proven non-empty bot binding."""
+
+        binding = BotBinding(
+            platform_id=_require_text(platform_id, "platform_id"),
+            self_id=_require_text(self_id, "self_id"),
+        )
+        binding_token = self._bot_binding_token(
+            binding.platform_id,
+            binding.self_id,
+        )
+        with self.repository.transaction():
+            authority = self._load_bot_binding_locked(binding_token)
+            if authority is None:
+                generation = 0
+                expected_bot = self._identity_key.bot_ref(binding, generation)
+                self.repository._ensure_bot_locked(expected_bot)
+                self._write_bot_binding_locked(
+                    binding_token,
+                    bot_token=expected_bot.token,
+                    generation=generation,
+                )
+                return generation
+            generation, stored_bot_token = authority
+            expected_bot = self._identity_key.bot_ref(binding, generation)
+            if not hmac.compare_digest(stored_bot_token, expected_bot.token):
+                raise RepositoryCorruptionError(
+                    "bot binding authority does not match identity key"
+                )
+            self.repository._ensure_bot_locked(expected_bot)
+            return generation
 
     @staticmethod
     def _turn_document(turn: TransportTurn) -> dict[str, object]:
@@ -321,8 +442,45 @@ class SessionCatalog:
             or transport_scope.disabled_reason is not None
         ):
             raise ValueError("transport scope is not enabled")
+        binding = BotBinding(
+            platform_id=delivery_binding.platform_id,
+            self_id=delivery_binding.self_id,
+        )
+        binding_token = self._bot_binding_token(
+            binding.platform_id,
+            binding.self_id,
+        )
         with self.repository.transaction():
-            self.repository._ensure_bot_locked(transport_scope.bot_ref)
+            authority = self._load_bot_binding_locked(binding_token)
+            if authority is None:
+                binding_generation = 0
+                stored_bot_token = None
+            else:
+                binding_generation, stored_bot_token = authority
+            expected_bot = self._identity_key.bot_ref(
+                binding,
+                binding_generation,
+            )
+            if delivery_binding.binding_generation != binding_generation:
+                raise ValueError("binding generation is stale")
+            if (
+                expected_bot != transport_scope.bot_ref
+                or (
+                    stored_bot_token is not None
+                    and not hmac.compare_digest(
+                        stored_bot_token,
+                        expected_bot.token,
+                    )
+                )
+            ):
+                raise ValueError("bot binding does not match transport scope")
+            self.repository._ensure_bot_locked(expected_bot)
+            if authority is None:
+                self._write_bot_binding_locked(
+                    binding_token,
+                    bot_token=expected_bot.token,
+                    generation=binding_generation,
+                )
             current = self._load_turn_locked(
                 transport_scope.bot_ref.token,
                 transport_scope.session_ref.token,
