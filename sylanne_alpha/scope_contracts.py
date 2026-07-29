@@ -1,0 +1,406 @@
+"""Opaque, immutable contracts for multibot scope resolution and delivery."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .scope_identity import PersonaSource
+
+
+def _require_token(value: object, prefix: str) -> str:
+    """Return one exact opaque token, rejecting values outside its namespace."""
+
+    if type(value) is not str or not value.startswith(prefix) or len(value) == len(prefix):
+        raise ValueError(f"invalid {prefix} token")
+    return value
+
+
+def _require_generation(value: object, name: str = "generation") -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{name} must be a non-negative int")
+    return value
+
+
+def _require_text(value: object, name: str) -> str:
+    if type(value) is not str or not value:
+        raise ValueError(f"{name} must be a non-empty str")
+    return value
+
+
+def _require_optional_text(value: object, name: str) -> str | None:
+    if value is None:
+        return None
+    return _require_text(value, name)
+
+
+def _require_bool(value: object, name: str) -> bool:
+    if type(value) is not bool:
+        raise ValueError(f"{name} must be an exact bool")
+    return value
+
+
+def _require_bot_ref(value: object) -> BotRef:
+    if type(value) is not BotRef:
+        raise ValueError("bot_ref must be a BotRef")
+    return value
+
+
+def _require_persona_ref(value: object) -> PersonaRevisionRef:
+    if type(value) is not PersonaRevisionRef:
+        raise ValueError("persona_ref must be a PersonaRevisionRef")
+    return value
+
+
+def _require_session_ref(value: object) -> SessionRef:
+    if type(value) is not SessionRef:
+        raise ValueError("session_ref must be a SessionRef")
+    return value
+
+
+def _require_relation_ref(value: object) -> RelationRef:
+    if type(value) is not RelationRef:
+        raise ValueError("relation_ref must be a RelationRef")
+    return value
+
+
+def _require_persona_belongs(bot_ref: BotRef, persona_ref: PersonaRevisionRef) -> None:
+    if persona_ref.bot_ref != bot_ref:
+        raise ValueError("persona does not belong to bot")
+
+
+def _require_session_belongs(bot_ref: BotRef, session_ref: SessionRef) -> None:
+    if session_ref.bot_ref != bot_ref:
+        raise ValueError("session does not belong to bot")
+
+
+@dataclass(frozen=True, slots=True)
+class BotRef:
+    token: str
+    generation: int
+
+    def __post_init__(self) -> None:
+        _require_token(self.token, "bot_v1_")
+        _require_generation(self.generation)
+
+
+@dataclass(frozen=True, slots=True)
+class PersonaRevisionRef:
+    token: str
+    bot_ref: BotRef
+    persona_id_digest: str
+    source_fingerprint: str
+    lifecycle_generation: int
+
+    def __post_init__(self) -> None:
+        _require_token(self.token, "persona_v1_")
+        _require_bot_ref(self.bot_ref)
+        if type(self.persona_id_digest) is not str or len(self.persona_id_digest) != 64:
+            raise ValueError("persona_id_digest must be a 64-character str")
+        if type(self.source_fingerprint) is not str or len(self.source_fingerprint) != 64:
+            raise ValueError("source_fingerprint must be a 64-character str")
+        _require_generation(self.lifecycle_generation, "lifecycle_generation")
+
+
+@dataclass(frozen=True, slots=True)
+class SessionRef:
+    token: str
+    bot_ref: BotRef
+    generation: int
+
+    def __post_init__(self) -> None:
+        _require_token(self.token, "session_v1_")
+        _require_bot_ref(self.bot_ref)
+        _require_generation(self.generation)
+
+
+@dataclass(frozen=True, slots=True)
+class SessionScope:
+    bot_ref: BotRef
+    persona_ref: PersonaRevisionRef
+    session_ref: SessionRef
+    storage_token: str
+    scope_generation: int
+
+    def __post_init__(self) -> None:
+        bot_ref = _require_bot_ref(self.bot_ref)
+        persona_ref = _require_persona_ref(self.persona_ref)
+        session_ref = _require_session_ref(self.session_ref)
+        _require_persona_belongs(bot_ref, persona_ref)
+        _require_session_belongs(bot_ref, session_ref)
+        _require_token(self.storage_token, "scope_v1_")
+        _require_generation(self.scope_generation, "scope_generation")
+
+    def storage_components(self) -> tuple[str, str, str]:
+        """Return only opaque storage partition components."""
+
+        return (self.bot_ref.token, self.persona_ref.token, self.session_ref.token)
+
+
+@dataclass(frozen=True, slots=True)
+class PersonaScope:
+    bot_ref: BotRef
+    persona_ref: PersonaRevisionRef
+
+    def __post_init__(self) -> None:
+        bot_ref = _require_bot_ref(self.bot_ref)
+        persona_ref = _require_persona_ref(self.persona_ref)
+        _require_persona_belongs(bot_ref, persona_ref)
+
+
+@dataclass(frozen=True, slots=True)
+class RelationRef:
+    token: str
+    bot_ref: BotRef
+
+    def __post_init__(self) -> None:
+        _require_token(self.token, "relation_v1_")
+        _require_bot_ref(self.bot_ref)
+
+
+@dataclass(frozen=True, slots=True)
+class RelationScope:
+    bot_ref: BotRef
+    persona_ref: PersonaRevisionRef
+    relation_ref: RelationRef
+    relation_generation: int
+
+    def __post_init__(self) -> None:
+        bot_ref = _require_bot_ref(self.bot_ref)
+        persona_ref = _require_persona_ref(self.persona_ref)
+        relation_ref = _require_relation_ref(self.relation_ref)
+        _require_persona_belongs(bot_ref, persona_ref)
+        if relation_ref.bot_ref != bot_ref:
+            raise ValueError("relation does not belong to bot")
+        _require_generation(self.relation_generation, "relation_generation")
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedTransportScope:
+    bot_ref: BotRef
+    session_ref: SessionRef
+    identity_quality: str | None
+    private_scope_enabled: bool
+    disabled_reason: str | None
+
+    def __post_init__(self) -> None:
+        bot_ref = _require_bot_ref(self.bot_ref)
+        session_ref = _require_session_ref(self.session_ref)
+        _require_session_belongs(bot_ref, session_ref)
+        _require_optional_text(self.identity_quality, "identity_quality")
+        _require_bool(self.private_scope_enabled, "private_scope_enabled")
+        _require_optional_text(self.disabled_reason, "disabled_reason")
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedScope:
+    scope: SessionScope | PersonaScope | RelationScope | None
+    persona_source: PersonaSource | None
+    identity_quality: str | None
+    resolution_source: str | None
+    resolved_at_ms: int
+    private_scope_enabled: bool
+    disabled_reason: str | None
+    turn_generation: int | None
+
+    def __post_init__(self) -> None:
+        if self.scope is not None and type(self.scope) not in (SessionScope, PersonaScope, RelationScope):
+            raise ValueError("scope must be a scope contract or None")
+        _require_optional_text(self.identity_quality, "identity_quality")
+        _require_optional_text(self.resolution_source, "resolution_source")
+        _require_generation(self.resolved_at_ms, "resolved_at_ms")
+        _require_bool(self.private_scope_enabled, "private_scope_enabled")
+        _require_optional_text(self.disabled_reason, "disabled_reason")
+        if self.turn_generation is not None:
+            _require_generation(self.turn_generation, "turn_generation")
+
+    @classmethod
+    def disabled(cls, reason: str, *, resolved_at_ms: int) -> ResolvedScope:
+        return cls(
+            scope=None,
+            persona_source=None,
+            identity_quality=None,
+            resolution_source=None,
+            resolved_at_ms=resolved_at_ms,
+            private_scope_enabled=False,
+            disabled_reason=reason,
+            turn_generation=None,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ScopeDiagnosticEcho:
+    """Bounded diagnostic projection; do not pass this object to public serializers."""
+
+    bot_ref: BotRef
+    persona_ref: PersonaRevisionRef
+    session_ref: SessionRef
+    scope_generation: int
+    resolved_at_ms: int
+
+    def __post_init__(self) -> None:
+        bot_ref = _require_bot_ref(self.bot_ref)
+        persona_ref = _require_persona_ref(self.persona_ref)
+        session_ref = _require_session_ref(self.session_ref)
+        _require_persona_belongs(bot_ref, persona_ref)
+        _require_session_belongs(bot_ref, session_ref)
+        _require_generation(self.scope_generation, "scope_generation")
+        _require_generation(self.resolved_at_ms, "resolved_at_ms")
+
+
+@dataclass(frozen=True, slots=True)
+class ScopeApiPathEcho:
+    bot_ref: BotRef
+    persona_ref: PersonaRevisionRef
+    session_ref: SessionRef
+
+    def __post_init__(self) -> None:
+        bot_ref = _require_bot_ref(self.bot_ref)
+        persona_ref = _require_persona_ref(self.persona_ref)
+        session_ref = _require_session_ref(self.session_ref)
+        _require_persona_belongs(bot_ref, persona_ref)
+        _require_session_belongs(bot_ref, session_ref)
+
+
+@dataclass(frozen=True, slots=True)
+class ScopeApiEcho:
+    scope: ScopeApiPathEcho
+    scope_generation: int
+    resolved_at_ms: int
+
+    def __post_init__(self) -> None:
+        if type(self.scope) is not ScopeApiPathEcho:
+            raise ValueError("scope must be a ScopeApiPathEcho")
+        _require_generation(self.scope_generation, "scope_generation")
+        _require_generation(self.resolved_at_ms, "resolved_at_ms")
+
+
+@dataclass(frozen=True, slots=True)
+class PersonaApiPathEcho:
+    bot_ref: BotRef
+    persona_ref: PersonaRevisionRef
+
+    def __post_init__(self) -> None:
+        bot_ref = _require_bot_ref(self.bot_ref)
+        persona_ref = _require_persona_ref(self.persona_ref)
+        _require_persona_belongs(bot_ref, persona_ref)
+
+
+@dataclass(frozen=True, slots=True)
+class PersonaApiEcho:
+    scope: PersonaApiPathEcho
+    scope_generation: int
+    resolved_at_ms: int
+
+    def __post_init__(self) -> None:
+        if type(self.scope) is not PersonaApiPathEcho:
+            raise ValueError("scope must be a PersonaApiPathEcho")
+        _require_generation(self.scope_generation, "scope_generation")
+        _require_generation(self.resolved_at_ms, "resolved_at_ms")
+
+
+@dataclass(frozen=True, slots=True)
+class TurnDeliveryLease:
+    transport_session_token: str
+    resolved_scope_token: str
+    session_generation: int
+    scope_generation: int
+    turn_generation: int
+
+    def __post_init__(self) -> None:
+        _require_token(self.transport_session_token, "session_v1_")
+        _require_token(self.resolved_scope_token, "scope_v1_")
+        _require_generation(self.session_generation, "session_generation")
+        _require_generation(self.scope_generation, "scope_generation")
+        _require_generation(self.turn_generation, "turn_generation")
+
+
+@dataclass(frozen=True, slots=True)
+class ProactiveDeliveryLease:
+    transport_session_token: str
+    resolved_scope_token: str
+    expected_persona_token: str
+    persona_lifecycle_generation: int
+    session_generation: int
+    scope_generation: int
+    expected_turn_generation: int
+    expires_at_ms: int
+
+    def __post_init__(self) -> None:
+        _require_token(self.transport_session_token, "session_v1_")
+        _require_token(self.resolved_scope_token, "scope_v1_")
+        _require_token(self.expected_persona_token, "persona_v1_")
+        _require_generation(self.persona_lifecycle_generation, "persona_lifecycle_generation")
+        _require_generation(self.session_generation, "session_generation")
+        _require_generation(self.scope_generation, "scope_generation")
+        _require_generation(self.expected_turn_generation, "expected_turn_generation")
+        _require_generation(self.expires_at_ms, "expires_at_ms")
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class BotDeliveryRef:
+    token: str
+    delivery_id: str
+    bot_ref: BotRef
+    persona_ref: PersonaRevisionRef
+    session_ref: SessionRef
+    platform_id: str = field(repr=False)
+    self_id: str = field(repr=False)
+    target_address: str = field(repr=False)
+    adapter_capability: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        _require_token(self.token, "delivery_v1_")
+        _require_text(self.delivery_id, "delivery_id")
+        bot_ref = _require_bot_ref(self.bot_ref)
+        persona_ref = _require_persona_ref(self.persona_ref)
+        session_ref = _require_session_ref(self.session_ref)
+        _require_persona_belongs(bot_ref, persona_ref)
+        _require_session_belongs(bot_ref, session_ref)
+        _require_text(self.platform_id, "platform_id")
+        _require_text(self.self_id, "self_id")
+        _require_text(self.target_address, "target_address")
+        _require_text(self.adapter_capability, "adapter_capability")
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class ProactiveIntentDraft:
+    delivery_ref: BotDeliveryRef
+    lease: ProactiveDeliveryLease
+    text: str = field(repr=False)
+    idempotent: bool
+    issuer_mac: str | bytes = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if type(self.delivery_ref) is not BotDeliveryRef:
+            raise ValueError("delivery_ref must be a BotDeliveryRef")
+        if type(self.lease) is not ProactiveDeliveryLease:
+            raise ValueError("lease must be a ProactiveDeliveryLease")
+        if type(self.text) is not str:
+            raise ValueError("text must be an exact str")
+        _require_bool(self.idempotent, "idempotent")
+        if type(self.issuer_mac) not in (str, bytes):
+            raise ValueError("issuer_mac must be exact str or bytes")
+
+
+__all__ = [
+    "BotDeliveryRef",
+    "BotRef",
+    "PersonaApiEcho",
+    "PersonaApiPathEcho",
+    "PersonaRevisionRef",
+    "PersonaScope",
+    "ProactiveDeliveryLease",
+    "ProactiveIntentDraft",
+    "RelationRef",
+    "RelationScope",
+    "ResolvedScope",
+    "ResolvedTransportScope",
+    "ScopeApiEcho",
+    "ScopeApiPathEcho",
+    "ScopeDiagnosticEcho",
+    "SessionRef",
+    "SessionScope",
+    "TurnDeliveryLease",
+]

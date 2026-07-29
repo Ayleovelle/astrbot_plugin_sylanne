@@ -18,6 +18,7 @@ _SESSION_DOMAIN = b"sylanne.v3bridge.session-ref.v1\x00"
 _CORRELATION_DOMAIN = b"sylanne.v3bridge.response-correlation.v1\x00"
 _SPEAKER_DOMAIN = b"sylanne.v3bridge.speaker-ref.v1\x00"
 _PERSISTENT_KEY_MAGIC = b"SYLANNE-V3-SESSION-IDENTITY\x01\x00"
+SCOPE_V1_AUTHORITY = False
 MAX_SIGNED_64 = (1 << 63) - 1
 SESSION_IDENTITY_MIN_SECRET_BYTES = 32
 SESSION_IDENTITY_MAX_SECRET_BYTES = 4096
@@ -602,6 +603,7 @@ def session_trace_fields(session_ref: SessionRef) -> dict[str, object]:
 
 __all__ = [
     "MAX_SIGNED_64",
+    "SCOPE_V1_AUTHORITY",
     "SESSION_IDENTITY_MAX_COMPONENT_BYTES",
     "SESSION_IDENTITY_MAX_KEY_ID_BYTES",
     "SESSION_IDENTITY_MAX_SECRET_BYTES",
