@@ -170,6 +170,45 @@ class PublicAPI:
     def _session_key(self, event: Any = None, session_key: str = "") -> str:
         return self._p._session_key(event, session_key)
 
+    def _bound_webui_session_key(self) -> str | None:
+        """Return the exact session named by an already-bound private scope.
+
+        HTTP routes do not carry an authenticated ``SessionScope`` yet.  They
+        therefore may only inspect a private owner when a caller has already
+        installed a live binding; choosing ``default`` or a recently active
+        owner would cross the scope boundary.
+        """
+
+        registry = getattr(self._p, "_scope_runtime_registry", None)
+        if registry is None:
+            return None
+        binding_getter = getattr(self._p, "_bound_runtime", None)
+        if not callable(binding_getter):
+            return None
+        try:
+            binding = binding_getter()
+        except Exception:  # noqa: BLE001 - a WebUI read must fail closed
+            return None
+        scope = getattr(binding, "scope", None)
+        if scope is None or not registry.is_live_session(scope):
+            return None
+        storage_token = getattr(scope, "storage_token", None)
+        return storage_token if isinstance(storage_token, str) and storage_token else None
+
+    def _legacy_observatory_session_key(self) -> str | None:
+        """Compatibility-only reader for registry-free test stubs.
+
+        This never invents a ``default`` session: callers without a real
+        scoped runtime can at most inspect an already-existing legacy owner.
+        """
+
+        try:
+            store = self._p._store
+            hosts = getattr(store, "hosts", {})
+            return next(iter(hosts), None) if hosts else None
+        except Exception:  # noqa: BLE001 - legacy diagnostics remain bounded
+            return None
+
     # ------------------------------------------------------------------
     # Observatory / Diagnostics group
     # ------------------------------------------------------------------
@@ -292,10 +331,22 @@ class PublicAPI:
         }
 
     async def _observatory_route_handler(self) -> dict[str, Any]:
-        session_key = "default"
-        if len(self._p._store.hosts):
-            session_key = next(iter(self._p._store.hosts.keys()))
+        session_key = self._bound_webui_session_key()
+        if session_key is None and getattr(self._p, "_scope_runtime_registry", None) is None:
+            session_key = self._legacy_observatory_session_key()
+        if session_key is None:
+            return {"ok": False, "error": "scope_unavailable"}
         return await self.sylanne_observatory(session_key=session_key)
+
+    def _lineage_observatory_route_payload(self) -> dict[str, Any]:
+        """Build the lineage payload only for the exact bound session owner."""
+
+        session_key = self._bound_webui_session_key()
+        if session_key is None and getattr(self._p, "_scope_runtime_registry", None) is None:
+            session_key = self._legacy_observatory_session_key()
+        if session_key is None:
+            return {"ok": False, "error": "scope_unavailable"}
+        return self._sylanne_lineage_observatory_page_payload(session_key)
 
     def _sylanne_lineage_observatory_page_payload(
         self, session_key: str
@@ -345,28 +396,27 @@ class PublicAPI:
             诊断数据字典。
         """
         p = self._p
-        if isinstance(event, str):
+        registry = getattr(p, "_scope_runtime_registry", None)
+        scoped_runtime = registry is not None
+        if scoped_runtime:
+            session_key = self._bound_webui_session_key()
+            if session_key is None or (
+                isinstance(event, str) and event != session_key
+            ):
+                return {"ok": False, "error": "scope_unavailable"}
+        elif isinstance(event, str):
             session_key = event
         else:
             session_key = self._session_key(event)
-        _BudgetCls = (
-            type(next(iter(p._store.last_request_budgets.values()), None))
-            if len(p._store.last_request_budgets)
-            else None
-        )
-        default_budget = (
-            _BudgetCls()
-            if _BudgetCls
-            else SimpleNamespace(
-                compat_mode="",
-                context_owner="",
-                max_added_chars=0,
-                added_chars=0,
-                injected=[],
-                skipped=[],
-                appended=[],
-                warnings=[],
-            )
+        default_budget = SimpleNamespace(
+            compat_mode="",
+            context_owner="",
+            max_added_chars=0,
+            added_chars=0,
+            injected=[],
+            skipped=[],
+            appended=[],
+            warnings=[],
         )
         budget = p._store.last_request_budgets.get(session_key, default_budget)
         cfg = p.config or {}
@@ -382,9 +432,13 @@ class PublicAPI:
                 "warnings": list(budget.warnings),
             }
         }
-        closed_loop = getattr(p, "_last_understanding_closed_loop", {})
-        if isinstance(closed_loop, dict) and session_key in closed_loop:
-            loop_data = closed_loop[session_key]
+        closed_loop = (
+            p._store.last_understanding_closed_loop
+            if scoped_runtime
+            else getattr(p, "_last_understanding_closed_loop", {})
+        )
+        if hasattr(closed_loop, "get") and session_key in closed_loop:
+            loop_data = closed_loop.get(session_key, {})
             ledger = getattr(p, "_conversation_event_ledger", None)
             if ledger is not None:
                 recent_fn = getattr(ledger, "recent", None) or getattr(
@@ -405,16 +459,20 @@ class PublicAPI:
         bg_dead_letters = p._store.background_post_dead_letters
         bg_latest = p._store.background_post_latest_enqueued
         bg_committed = p._store.background_post_last_committed
-        bg_skipped = getattr(p, "_background_post_skipped", {})
+        bg_skipped = {} if scoped_runtime else getattr(p, "_background_post_skipped", {})
         _bg_sequence = p._store.background_post_sequence
-        has_bg_data = bool(bg_queues or bg_active or bg_dead_letters)
+        queue = bg_queues.get(session_key, collections.deque())
+        active = bg_active.get(session_key, {})
+        dead_letters = bg_dead_letters.get(session_key, collections.deque())
+        latest_enqueued = bg_latest.get(session_key, 0)
+        last_committed = bg_committed.get(session_key, 0)
+        skipped = bg_skipped.get(session_key, set())
+        has_bg_data = (
+            bool(queue or active or dead_letters)
+            if scoped_runtime
+            else bool(bg_queues or bg_active or bg_dead_letters)
+        )
         if include_sessions or has_bg_data:
-            queue = bg_queues.get(session_key, collections.deque())
-            active = bg_active.get(session_key, {})
-            dead_letters = bg_dead_letters.get(session_key, collections.deque())
-            latest_enqueued = bg_latest.get(session_key, 0)
-            last_committed = bg_committed.get(session_key, 0)
-            skipped = bg_skipped.get(session_key, set())
             retrying = [j for j in queue if j.attempts > 0]
             now = time.time()
             expired_lease = [
@@ -502,8 +560,10 @@ class PublicAPI:
             }
             result["background_post_assessment"] = bg_assessment
             if include_sessions:
-                result["sessions"] = list(
-                    set(list(bg_queues.keys()) + list(bg_active.keys()))
+                result["sessions"] = (
+                    [session_key]
+                    if scoped_runtime
+                    else list(set(list(bg_queues.keys()) + list(bg_active.keys())))
                 )
         return result
 
@@ -1345,10 +1405,19 @@ class PublicAPI:
         """观测用户消息撤回事件：递增 input_epoch，清除相关状态。"""
         p = self._p
         event = args[0] if args else None
-        session_key = kwargs.get("session_key", "")
+        supplied_session_key = str(kwargs.get("session_key", "") or "")
+        registry = getattr(p, "_scope_runtime_registry", None)
+        if registry is not None:
+            session_key = self._bound_webui_session_key()
+            if session_key is None or (
+                supplied_session_key and supplied_session_key != session_key
+            ):
+                return {"ok": False, "error": "scope_unavailable"}
+        else:
+            session_key = supplied_session_key
         message_id = kwargs.get("message_id", "")
         reason = kwargs.get("reason", "")
-        if event and not session_key:
+        if registry is None and event and not session_key:
             session_key = str(getattr(event, "unified_msg_origin", "") or "")
             raw = getattr(event, "raw_message", None) or {}
             if not raw:

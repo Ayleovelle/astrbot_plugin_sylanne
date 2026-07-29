@@ -33,7 +33,13 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from sylanne_alpha.host import SylanneAlphaHost
+    from sylanne_alpha.scope_contracts import SessionScope
     from sylanne_alpha.scope_identity import ScopeResolver
+    from sylanne_alpha.scope_runtime import (
+        PersonaRuntime,
+        ScopeRuntimeRegistry,
+        ScopedSessionRuntime,
+    )
     from sylanne_alpha.session_state_store import SessionStateStore
     from sylanne_alpha.memory_system import MemorySystem
 
@@ -60,12 +66,13 @@ class PluginConfig(Protocol):
 class PluginSessionAccess(Protocol):
     """会话管理 + 运行时态访问接口。
 
-    会话态容器已收拢于 `_store`（SessionStateStore，CP8-P2），不再散落于插件实例；
-    模块经 `self._p._store.<容器>.<语义方法>` 访问，经 release_session 统一清理。
-    本协议暴露 _store 句柄 + session_key 解析 / host / 记忆系统取用等方法。
+    生产私有路径先取得冻结 ``SessionScope``，再通过 registry 绑定其唯一的
+    PersonaRuntime/ScopedSessionRuntime。``_store``、``_host``、``_session_key``
+    仅可在这个绑定内部使用；没有 scope 的兼容桩必须走名称明确的 legacy reader。
     """
 
     _store: SessionStateStore
+    _scope_runtime_registry: ScopeRuntimeRegistry
     _scope_resolver_v1: ScopeResolver | None
     _background_tasks: list[asyncio.Task]
     _computation_logs: collections.deque
@@ -73,6 +80,11 @@ class PluginSessionAccess(Protocol):
     def _session_key(self, event: Any = None, session_key: str = "") -> str: ...
     def _host(self, session_key: str) -> SylanneAlphaHost: ...
     def _memory_system_for_session(self, session_key: str) -> MemorySystem: ...
+    def _runtime_for_event(self, event: Any) -> PersonaRuntime: ...
+    def _session_runtime_for_event(self, event: Any) -> ScopedSessionRuntime: ...
+    def _host_for_scope(self, scope: SessionScope) -> SylanneAlphaHost: ...
+    def _memory_system_for_scope(self, scope: SessionScope) -> MemorySystem: ...
+    def _bound_runtime(self) -> Any | None: ...
     async def observe_response(
         self,
         session_key: str,

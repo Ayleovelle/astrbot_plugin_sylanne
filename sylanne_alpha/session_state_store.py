@@ -180,6 +180,15 @@ class SessionStateStore:
         # 共用同一 key——两种 pending 语义不同，共用会互相覆盖）。
         self.pending_qzone_draft: SessionMap = self._reg("pending_qzone_draft", BoundedDict(maxsize=50))
         self.proactive_candidate_sessions: SessionMap = self._reg("proactive_candidate_sessions", BoundedDict(maxsize=100))
+        # The proactive dispatch feedback and one-shot amnesia cue belong to the
+        # exact session owner.  Keeping them as registered SessionMaps makes
+        # release_session/reset_all fence both values with the rest of the token.
+        self.proactive_dispatch_audit: SessionMap = self._reg(
+            "proactive_dispatch_audit", BoundedDict(maxsize=100)
+        )
+        self.amnesia_pending: SessionMap = self._reg(
+            "amnesia_pending", BoundedDict(maxsize=200)
+        )
         self.session_origins: SessionMap = self._reg("session_origins", {})
         # ---- Phase 2B：关系类型层（PR-G 写 / PR-H 读）----
         # 壳层关系层累积态：{session_key: {sender_id, romantic_conf, friendly_conf,
@@ -255,6 +264,13 @@ class SessionStateStore:
     # ------------------------------------------------------------------
     def release_session(self, session_key: str) -> None:
         """释放某会话在所有已登记 SessionMap 中的态。漏登记 = 容器不在 = 立即暴露。"""
+        checkpoint_task = self.background_post_checkpoint_tasks.get(session_key)
+        cancel = getattr(checkpoint_task, "cancel", None)
+        if callable(cancel):
+            try:
+                cancel()
+            except Exception:
+                pass
         conv_sync_umo = self._conv_sync_session_umos.pop(session_key, None)
         for m in self._maps:
             m.pop(session_key, None)

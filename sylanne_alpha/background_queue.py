@@ -120,13 +120,14 @@ class BackgroundPostQueue:
     负责自适应工作者调度、租约过期回收、检查点持久化、排空处理和队列恢复。
     """
 
-    def __init__(self, plugin: PluginHost) -> None:
+    def __init__(self, plugin: PluginHost, *, owner_persona_ref: Any = None) -> None:
         """初始化队列管理器。
 
         Args:
             plugin: Sylanne 插件实例。
         """
         self._p = plugin
+        self._owner_persona_ref = owner_persona_ref
 
     # ------------------------------------------------------------------
     # 辅助方法
@@ -135,6 +136,44 @@ class BackgroundPostQueue:
     def _observed_now(self) -> float:
         """获取当前观测时间（支持基准测试时间偏移）。"""
         return self._p._observed_now()
+
+    def _scope_for_session(self, session_key: str) -> Any | None:
+        """Return the exact live scope for a queue operation, if scope mode is on.
+
+        A queue is constructed per PersonaRuntime, but callbacks may outlive the
+        request ContextVar that created them.  In scoped mode a raw token alone is
+        therefore never authority to read, recover, or persist queue state.
+        """
+
+        registry = getattr(self._p, "_scope_runtime_registry", None)
+        if registry is None:
+            return None
+        getter = getattr(self._p, "_bound_runtime", None)
+        if not callable(getter):
+            return None
+        try:
+            binding = getter()
+        except Exception:
+            return None
+        if binding is None:
+            return None
+        if getattr(binding.persona_runtime, "background_queue", None) is not self:
+            return None
+        if (
+            self._owner_persona_ref is not None
+            and binding.persona_runtime.persona_ref != self._owner_persona_ref
+        ):
+            return None
+        scope = binding.scope
+        if scope.storage_token != session_key:
+            return None
+        return scope if registry.is_live_session(scope) else None
+
+    def _requires_scope(self) -> bool:
+        return getattr(self._p, "_scope_runtime_registry", None) is not None
+
+    def _may_access_session(self, session_key: str) -> bool:
+        return not self._requires_scope() or self._scope_for_session(session_key) is not None
 
     def checkpoint_kv_key(self, session_key: str) -> str:
         """生成指定 session 的检查点 KV 存储键。
@@ -192,6 +231,20 @@ class BackgroundPostQueue:
         Returns:
             决策结果字典，包含 desired_workers/dispatch_workers/reasons 等。
         """
+        if not self._may_access_session(session_key):
+            return {
+                "desired_workers": 0,
+                "dynamic_extra_workers": 0,
+                "reasons": ["scope_unavailable"],
+                "idle_workers_close_automatically": True,
+                "queue_target_workers": 0,
+                "target_workers": 0,
+                "dispatch_workers": 0,
+                "global_worker_cap": 6,
+                "global_active_other_workers": 0,
+                "resource_pressure": {"level": "unknown", "reason": "scope_unavailable"},
+                "scale_state": {"committed": False},
+            }
         cfg = self._p.config or {}
         dynamic_enabled = bool(cfg.get("enable_dynamic_background_workers"))
         queue = self._p._store.background_post_queues.get(session_key, collections.deque())
@@ -345,6 +398,8 @@ class BackgroundPostQueue:
         Returns:
             回收的任务数量。
         """
+        if not self._may_access_session(session_key):
+            return 0
         active = self._p._store.background_post_active.get(session_key, {})
         queue = self._p._store.background_post_queues.get_or_create(
             session_key, lambda: collections.deque(maxlen=500)
@@ -390,6 +445,9 @@ class BackgroundPostQueue:
         Args:
             session_key: 会话标识。
         """
+        scope = self._scope_for_session(session_key)
+        if self._requires_scope() and scope is None:
+            return
         checkpoint_tasks = self._p._store.background_post_checkpoint_tasks
         debounce = float(
             (self._p.config or {}).get(
@@ -403,9 +461,20 @@ class BackgroundPostQueue:
 
         async def _debounced_save() -> None:
             await asyncio.sleep(debounce)
+            if scope is not None:
+                registry = getattr(self._p, "_scope_runtime_registry", None)
+                if registry is None or not registry.is_live_session(scope):
+                    return
             await self.save_checkpoint(session_key)
 
         task = safe_ensure_future(_debounced_save(), name="checkpoint_debounced_save")
+        if task is None:
+            return
+        if scope is not None:
+            registry = getattr(self._p, "_scope_runtime_registry", None)
+            if registry is None or not registry.track_session_task(scope, task):
+                task.cancel()
+                return
         checkpoint_tasks.set(session_key, task)
 
         def _on_done(t: asyncio.Task) -> None:
@@ -427,11 +496,15 @@ class BackgroundPostQueue:
         Args:
             session_key: 会话标识。
         """
+        if not self._may_access_session(session_key):
+            return
         queue = self._p._store.background_post_queues.get(session_key)
         if not queue:
             return
         retry_jobs: list[BackgroundPostJob] = []
         while queue:
+            if not self._may_access_session(session_key):
+                return
             job = queue.popleft()
             try:
                 assess_fn = getattr(self._p, "_assess_emotion", None)
@@ -479,6 +552,8 @@ class BackgroundPostQueue:
         Args:
             session_key: 会话标识。
         """
+        if not self._may_access_session(session_key):
+            return
         put_fn = getattr(self._p, "put_kv_data", None)
         delete_fn = getattr(self._p, "delete_kv_data", None)
         if not put_fn or not callable(put_fn):
@@ -493,6 +568,8 @@ class BackgroundPostQueue:
         # 队列和死信都为空时，删除 KV 条目
         if not queue and not dead_letters:
             if delete_fn and callable(delete_fn):
+                if not self._may_access_session(session_key):
+                    return
                 await delete_fn(kv_key)
             return
         jobs = [self.job_to_dict(j) for j in queue]
@@ -513,6 +590,10 @@ class BackgroundPostQueue:
             "jobs": jobs,
             "dead_letters": dead,
         }
+        # A release/recreation can race the async KV boundary.  Re-check the
+        # exact runtime before the write; stale callbacks then become no-ops.
+        if not self._may_access_session(session_key):
+            return
         await put_fn(kv_key, checkpoint)
 
     # ------------------------------------------------------------------
@@ -532,6 +613,8 @@ class BackgroundPostQueue:
         Returns:
             True 表示成功恢复，False 表示无数据或恢复失败。
         """
+        if not self._may_access_session(session_key):
+            return False
         get_fn = getattr(self._p, "get_kv_data", None)
         if not get_fn or not callable(get_fn):
             return False
@@ -581,6 +664,10 @@ class BackgroundPostQueue:
             job.leased_at = 0.0
             job.lease_until = 0.0
             dead_queue.append(job)
+        # Re-check after IO: a callback from a released/recreated generation must
+        # never repopulate the replacement scope's queue maps.
+        if not self._may_access_session(session_key):
+            return False
         # 恢复到 store 的状态容器中
         self._p._store.background_post_queues.set(session_key, queue)
         self._p._store.background_post_dead_letters.set(session_key, dead_queue)

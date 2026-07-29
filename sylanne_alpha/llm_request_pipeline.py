@@ -738,34 +738,86 @@ class LLMRequestPipeline:
         if not hasattr(self._p, "_cached_system_prompts"):
             self._p._cached_system_prompts = {}
 
-    def _most_recent_host_key(self) -> str:
-        """返回最近活跃的 host session_key（按 last_event.now 排序）。
+    def _active_scope(self) -> Any | None:
+        """Return the request-bound frozen scope, never a recent-session guess."""
 
-        若所有 host 的 last_event.now 均为 0，回退到字典首项。
-        调用前需确保 p._store.hosts 非空。
-        """
-        p = self._p
-        best_key = ""
-        best_time = 0.0
-        for sk, host in p._store.hosts.items():
-            last_now = float(host.kernel.last_event.get("now") or 0.0)
-            if last_now > best_time:
-                best_time = last_now
-                best_key = sk
-        if not best_key:
-            best_key = next(iter(p._store.hosts.keys()))
-        return best_key
+        getter = getattr(self._p, "_bound_runtime", None)
+        if not callable(getter):
+            return None
+        try:
+            binding = getter()
+        except Exception:
+            return None
+        return getattr(binding, "scope", None) if binding is not None else None
+
+    def _active_session_runtime(self, session_key: str) -> Any | None:
+        """Return the exact bound session owner, never a raw-key substitute."""
+
+        getter = getattr(self._p, "_bound_runtime", None)
+        if not callable(getter):
+            return None
+        try:
+            binding = getter()
+        except Exception:
+            return None
+        if binding is None:
+            return None
+        scope = getattr(binding, "scope", None)
+        runtime = getattr(binding, "session_runtime", None)
+        if (
+            scope is None
+            or runtime is None
+            or getattr(scope, "storage_token", None) != session_key
+            or getattr(runtime, "storage_token", None) != session_key
+        ):
+            return None
+        return runtime
+
+    def _requires_scoped_runtime(self) -> bool:
+        """Whether raw session-key compatibility would be an isolation violation."""
+
+        return getattr(self._p, "_scope_runtime_registry", None) is not None
+
+    def _take_amnesia_pending(self, session_key: str) -> bool:
+        """Consume only the current bound session's one-shot amnesia cue."""
+
+        session_runtime = self._active_session_runtime(session_key)
+        if session_runtime is not None:
+            return bool(session_runtime.store.amnesia_pending.pop(session_key, False))
+        if self._requires_scoped_runtime():
+            return False
+        # Narrow registry-free compatibility for historical test doubles.
+        amnesia_sessions = getattr(self._p, "_amnesia_sessions", set())
+        if session_key not in amnesia_sessions:
+            return False
+        amnesia_sessions.discard(session_key)
+        return True
 
     def _most_recent_intimate_host_key(self) -> str:
         """Phase 2B / PR-I：返回最近活跃的**亲密私聊** host session_key，无则 ""。
 
-        与 _most_recent_host_key 区别（不改后者，它另有 5 个 last-active 调用方）：
+        作用域运行时启用时只检查当前冻结会话；旧的跨会话“最近活跃”选择仅保留给
+        没有 scope registry 的窄兼容桩。
         - 排除群 session_key（is_group_context_by_key）——亲密私推绝不投群（防广播泄露）。
         - 仅 relationship_layer.is_romantic 为真的会话（身份门控在 is_romantic 内）。
         - 无候选时返回 ""（调用方据此不投、不存 pending、不回退 last-active，杜绝漂移）。
         """
         p = self._p
         try:
+            active_scope = self._active_scope()
+            if getattr(p, "_scope_runtime_registry", None) is not None:
+                if active_scope is None:
+                    return ""
+                sk = active_scope.storage_token
+                host = p._store.hosts.get(sk)
+                if host is None:
+                    return ""
+                from sylanne_alpha import relationship_layer as _rl
+
+                sf = getattr(p, "_social_field", None)
+                if sf is not None and sf.is_group_context_by_key(sk):
+                    return ""
+                return sk if _rl.is_romantic(p, sk) else ""
             from sylanne_alpha import relationship_layer as _rl
             sf = getattr(p, "_social_field", None)
             best_key = ""
@@ -1827,7 +1879,10 @@ class LLMRequestPipeline:
                         peek_percept_recalled_texts,
                     )
 
-                    _percept_texts = peek_percept_recalled_texts(p, session_key)
+                    _percept_texts = peek_percept_recalled_texts(
+                        p,
+                        self._active_scope() or session_key,
+                    )
                 except Exception:
                     _percept_texts = set()
                 if _percept_texts:
@@ -2257,9 +2312,7 @@ class LLMRequestPipeline:
 
         # === Layer 2: _no_save assistant message（优先级预算注入） ===
         amnesia_fragment = ""
-        amnesia_sessions = p._amnesia_sessions
-        if session_key in amnesia_sessions:
-            amnesia_sessions.discard(session_key)
+        if self._take_amnesia_pending(session_key):
             amnesia_fragment = "……我好像忘记了什么很重要的事，但怎么也想不起来。"
 
         raw_fragments: dict[str, str] = {
@@ -2339,6 +2392,11 @@ class LLMRequestPipeline:
         p = self._p
         from sylanne_alpha.host import SylanneAlphaHostEvent
 
+        scope = self._active_scope()
+        if getattr(p, "_scope_runtime_registry", None) is not None:
+            if scope is None or scope.storage_token != session_key:
+                return
+
         try:
             # 前台评价由 v2core PERCEPT 本地生成并暂存；此处不再同步调用 LLM。
             host = p._host(session_key)
@@ -2367,7 +2425,7 @@ class LLMRequestPipeline:
             try:
                 from sylanne_alpha.v2core.integration import consume_pending_assessment
 
-                _v2a = consume_pending_assessment(p, session_key)
+                _v2a = consume_pending_assessment(p, scope or session_key)
                 if _v2a:
                     pre_assessment = {**(pre_assessment or {}), **_v2a}
             except Exception as exc:
@@ -2378,7 +2436,7 @@ class LLMRequestPipeline:
             try:
                 from sylanne_alpha.v2core.integration import consume_pending_quality
 
-                _dq = consume_pending_quality(p, session_key)
+                _dq = consume_pending_quality(p, scope or session_key)
                 if _dq is not None:
                     event_values = {**event_values, "dialogue_quality": _dq}
             except Exception as exc:
@@ -3638,7 +3696,7 @@ class LLMRequestPipeline:
     def _record_dispatch_feedback(
         self, session_key: str, status: str, event_id: str = ""
     ) -> None:
-        """M8 audit 生产者：把一次主动发言反馈写进 _proactive_dispatch_audit[session_key]。
+        """M8 audit 生产者：写入当前冻结 session 的 dispatch audit。
 
         feedback_pressure（proactive_scheduler.derive_dispatch_policy）读此 audit，
         数 feedback_status in (cold_reply, unanswered) 的条数派生压力。这是 unanswered
@@ -3650,19 +3708,34 @@ class LLMRequestPipeline:
         必须传以闭环 dedup）。
         """
         try:
-            audit = getattr(self._p, "_proactive_dispatch_audit", None)
-            if audit is None:
+            # Call through the class so narrow legacy MethodType fixtures that
+            # bind only this producer retain their registry-free contract.
+            session_runtime = LLMRequestPipeline._active_session_runtime(
+                self, session_key
+            )
+            if session_runtime is not None:
+                hist = session_runtime.store.proactive_dispatch_audit.get_or_create(
+                    session_key,
+                    lambda: collections.deque(maxlen=_DISPATCH_AUDIT_PER_SESSION),
+                )
+            elif LLMRequestPipeline._requires_scoped_runtime(self):
+                # A real registry without the exact binding must not write a
+                # similarly named raw session bucket.
                 return
+            else:
+                # Narrow registry-free compatibility for historical test doubles.
+                audit = getattr(self._p, "_proactive_dispatch_audit", None)
+                if audit is None:
+                    return
+                hist = audit.get(session_key)
+                if hist is None:
+                    hist = collections.deque(maxlen=_DISPATCH_AUDIT_PER_SESSION)
+                    audit[session_key] = hist
             entry = {
                 "feedback_status": status,
                 "ts": time.time(),
                 "event_id": event_id,
             }
-            hist = audit.get(session_key)
-            if hist is None:
-                # 每会话最近 N 条（deque 自动淘汰旧条，防无界增长）
-                hist = collections.deque(maxlen=_DISPATCH_AUDIT_PER_SESSION)
-                audit[session_key] = hist
             hist.append(entry)
         except Exception as e:
             logger.debug("Sylanne dispatch feedback record skipped: %s", e)
@@ -3695,17 +3768,19 @@ class LLMRequestPipeline:
             return ""
 
     def _life_sim_emotion(self) -> dict[str, float]:
-        """获取最近活跃 host 的情感状态，供生命模拟器参考。
+        """获取当前冻结会话的情感状态，供生命模拟器参考。
 
         Returns:
             情感状态字典（warmth/tension/coherence 等），无活跃 host 返回空字典。
         """
         p = self._p
-        if not len(p._store.hosts):
+        scope = self._active_scope()
+        if scope is None:
             return {}
-        best_key = self._most_recent_host_key()
-        host = p._store.hosts.get(best_key)
         try:
+            host = p._store.hosts.get(scope.storage_token)
+            if host is None:
+                return {}
             return host.kernel.computation.engine.observe()
         except Exception:
             return {}
@@ -3727,13 +3802,15 @@ class LLMRequestPipeline:
         return ""
 
     def _life_sim_body_delta(self, delta: dict[str, float]) -> None:
-        """将生命模拟器的情绪增量注入到最近活跃 host 的身体状态。"""
+        """将生命模拟器的情绪增量注入到当前冻结会话的身体状态。"""
         p = self._p
-        if not len(p._store.hosts):
+        scope = self._active_scope()
+        if scope is None:
             return
-        best_key = self._most_recent_host_key()
-        host = p._store.hosts.get(best_key)
         try:
+            host = p._store.hosts.get(scope.storage_token)
+            if host is None:
+                return
             body = host.kernel.body
             if body and hasattr(body, "apply_vector_delta"):
                 mapped = {}

@@ -234,7 +234,7 @@ class StatePersistence:
 
     def _current_memory_occupant(self, session_key: str) -> Any:
         """返回某 session 在 store 里当前占位的 MemorySystem（占位者权威兜底用）。"""
-        store = getattr(self._p, "_store", None)
+        store = self._active_store_or_none()
         systems = getattr(store, "memory_systems", None) if store is not None else None
         if systems is None:
             return None
@@ -243,9 +243,18 @@ class StatePersistence:
         except Exception:  # noqa: BLE001
             return None
 
-    def _wire_memory_eviction_persistence(self) -> None:
+    def _active_store_or_none(self) -> Any | None:
+        """Read only an already-bound store; construction has no default owner."""
+
+        try:
+            return getattr(self._p, "_store", None)
+        except Exception:
+            return None
+
+    def _wire_memory_eviction_persistence(self, store: Any | None = None) -> None:
         """把 memory_systems 的 LRU 驱逐接到落盘回调（幂等，可重复调用）。"""
-        store = getattr(self._p, "_store", None)
+        if store is None:
+            store = self._active_store_or_none()
         memory_map = getattr(store, "memory_systems", None)
         set_on_evict = getattr(memory_map, "set_on_evict", None)
         if callable(set_on_evict):
@@ -2362,8 +2371,15 @@ class StatePersistence:
         retrieved" 噪音（详见 _on_memory_system_evicted 同款模式的 MINOR-1 注释）。
         """
         p = self._p
+        if getattr(p, "_scope_runtime_registry", None) is not None:
+            # ConversationManager supplies only a raw key here.  With scope runtime
+            # enabled that is insufficient authority to select a private owner.
+            # A lifecycle adapter with a frozen SessionScope performs the release.
+            logger.debug(
+                "Sylanne session delete ignored without frozen scope: %s", session_key
+            )
+            return
         p._store.release_session(session_key)
-        p._amnesia_sessions.discard(session_key)
         # bump 在 release 之后：占位者已 pop → occupant=None → 不 restamp → 旧引用全出局。
         self._throat.bump_epoch(
             session_key, occupant=self._current_memory_occupant(session_key)
@@ -3129,6 +3145,25 @@ class StatePersistence:
             await self.flush_pending_kernel_persists()
         except Exception as e:
             logger.warning(f"Sylanne kernel flush on terminate: {e}", exc_info=True)
+        registry = getattr(p, "_scope_runtime_registry", None)
+        if registry is not None:
+            # Shutdown has no request binding.  Work only over explicit runtime
+            # snapshots; never read a default or raw-key private store.
+            for runtime in registry.live_persona_runtimes():
+                task = runtime.proactive_scheduler_task
+                if task and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                runtime.proactive_scheduler_task = None
+                runtime.store.proactive_candidate_sessions.clear()
+                runtime.store.proactive_scheduler_locks.clear()
+                runtime.store.background_post_queues.clear()
+                runtime.store.background_post_sequence.clear()
+            p._terminating = True
+            return
         task = getattr(p, "_proactive_scheduler_task", None)
         if task and not task.done():
             task.cancel()

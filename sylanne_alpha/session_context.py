@@ -414,14 +414,14 @@ class SessionContext:
             plugin: Sylanne 插件实例，通过 self._p 访问其内部状态。
         """
         self._p = plugin
-        # 关系年龄追踪：session_key → 首次交互时间戳
-        self._first_interaction_times: dict[str, float] = {}
-        # Item 103: 设备指纹追踪：session_key → 上次 User-Agent
-        self._device_fingerprints: dict[str, str] = {}
-        # 第一印象锚定：session_key → FirstImpression
-        self._first_impressions: dict[str, FirstImpression] = {}
-        # Item 153: 关系仪式注册表
-        self._ritual_registry = RitualRegistry()
+        # Raw-key maps survive only as a compatibility reader for narrow plugin
+        # stubs which do not implement ScopeRuntimeRegistry.  Production state is
+        # owned by RelationRuntime / ScopedSessionRuntime and is never initialized
+        # here as a default bucket.
+        self._legacy_first_interaction_times: dict[str, float] | None = None
+        self._legacy_device_fingerprints: dict[str, str] | None = None
+        self._legacy_first_impressions: dict[str, FirstImpression] | None = None
+        self._legacy_ritual_registry: RitualRegistry | None = None
         cfg = (
             self._p.config
             if hasattr(self._p, "_config")
@@ -432,7 +432,10 @@ class SessionContext:
             self._observation_history_limit_bytes,
         )
         self._observation_sink = self._observation_history_store.append_snapshot
-        hosts = getattr(getattr(self._p, "_store", None), "hosts", None)
+        try:
+            hosts = getattr(getattr(self._p, "_store", None), "hosts", None)
+        except Exception:
+            hosts = None
         snapshot_items = getattr(hosts, "snapshot_items", None)
         if callable(snapshot_items):
             for _, host in snapshot_items():
@@ -470,6 +473,55 @@ class SessionContext:
         if callable(setter):
             setter(self._observation_sink)
 
+    def _uses_scope_runtime(self) -> bool:
+        return hasattr(self._p, "_scope_runtime_registry")
+
+    def _active_relation_runtime(self) -> Any | None:
+        getter = getattr(self._p, "_active_relation_runtime", None)
+        if not callable(getter):
+            return None
+        try:
+            return getter()
+        except Exception:
+            return None
+
+    def _active_session_runtime(self) -> Any | None:
+        getter = getattr(self._p, "_active_scoped_session_runtime", None)
+        if not callable(getter):
+            return None
+        try:
+            return getter()
+        except Exception:
+            return None
+
+    def _legacy_first_times(self) -> dict[str, float] | None:
+        if self._uses_scope_runtime():
+            return None
+        if self._legacy_first_interaction_times is None:
+            self._legacy_first_interaction_times = {}
+        return self._legacy_first_interaction_times
+
+    def _legacy_impressions(self) -> dict[str, FirstImpression] | None:
+        if self._uses_scope_runtime():
+            return None
+        if self._legacy_first_impressions is None:
+            self._legacy_first_impressions = {}
+        return self._legacy_first_impressions
+
+    def _legacy_devices(self) -> dict[str, str] | None:
+        if self._uses_scope_runtime():
+            return None
+        if self._legacy_device_fingerprints is None:
+            self._legacy_device_fingerprints = {}
+        return self._legacy_device_fingerprints
+
+    def _legacy_rituals(self) -> RitualRegistry | None:
+        if self._uses_scope_runtime():
+            return None
+        if self._legacy_ritual_registry is None:
+            self._legacy_ritual_registry = RitualRegistry()
+        return self._legacy_ritual_registry
+
     # ------------------------------------------------------------------
     # 关系年龄（Item 125 / Item 130）
     # ------------------------------------------------------------------
@@ -485,9 +537,15 @@ class SessionContext:
         Returns:
             首次交互的 Unix 时间戳（秒）。
         """
-        if session_key not in self._first_interaction_times:
-            self._first_interaction_times[session_key] = time.time()
-        return self._first_interaction_times[session_key]
+        relation = self._active_relation_runtime()
+        if relation is not None:
+            return relation.first_interaction_times.setdefault("_relation", time.time())
+        legacy = self._legacy_first_times()
+        if legacy is None:
+            # A verified SessionScope alone is not an authenticated relationship.
+            # Do not create a session/default relation bucket.
+            return time.time()
+        return legacy.setdefault(session_key, time.time())
 
     def set_first_interaction_time(self, session_key: str, ts: float) -> None:
         """显式设置首次交互时间（用于从持久化数据恢复）。
@@ -496,7 +554,13 @@ class SessionContext:
             session_key: 会话标识。
             ts: Unix 时间戳（秒）。
         """
-        self._first_interaction_times[session_key] = ts
+        relation = self._active_relation_runtime()
+        if relation is not None:
+            relation.first_interaction_times["_relation"] = ts
+            return
+        legacy = self._legacy_first_times()
+        if legacy is not None:
+            legacy[session_key] = ts
 
     def relationship_stage(self, session_key: str) -> str:
         """获取指定会话的关系阶段。
@@ -522,11 +586,20 @@ class SessionContext:
         intensity = max(0.0, min(1.0, intensity))
         acceleration_hours = intensity * 24  # 最多等效 1 天
         # 确保 first_interaction_time 已初始化
+        relation = self._active_relation_runtime()
+        if relation is None and self._uses_scope_runtime():
+            return
         real_first = self.first_interaction_time(session_key)
         # 下界：不早于真实首次交互前 30 天
         floor = real_first - 30 * 86400
-        new_time = self._first_interaction_times[session_key] - acceleration_hours * 3600
-        self._first_interaction_times[session_key] = max(floor, new_time)
+        if relation is not None:
+            new_time = relation.first_interaction_times["_relation"] - acceleration_hours * 3600
+            relation.first_interaction_times["_relation"] = max(floor, new_time)
+            return
+        legacy = self._legacy_first_times()
+        if legacy is not None:
+            new_time = legacy[session_key] - acceleration_hours * 3600
+            legacy[session_key] = max(floor, new_time)
 
     # ------------------------------------------------------------------
     # Item 103: 设备切换感知问候
@@ -542,8 +615,16 @@ class SessionContext:
         Returns:
             设备切换问候语，或 None（无变化时）。
         """
-        last_ua = self._device_fingerprints.get(session_key, "")
-        self._device_fingerprints[session_key] = current_ua
+        session = self._active_session_runtime()
+        if session is not None:
+            last_ua = session.device_fingerprints.get("user_agent", "")
+            session.device_fingerprints["user_agent"] = current_ua
+        else:
+            legacy = self._legacy_devices()
+            if legacy is None:
+                return None
+            last_ua = legacy.get(session_key, "")
+            legacy[session_key] = current_ua
         if not last_ua or last_ua == current_ua:
             return None
         # 简单判断：mobile vs desktop
@@ -578,9 +659,18 @@ class SessionContext:
             user_style: 用户风格（brief/verbose/emotional/factual）。
             quality: 互动质量 0-1。
         """
-        if session_key in self._first_impressions:
+        relation = self._active_relation_runtime()
+        if relation is not None:
+            impressions = relation.first_impressions
+            key = "_relation"
+        else:
+            impressions = self._legacy_impressions()
+            if impressions is None:
+                return
+            key = session_key
+        if key in impressions:
             return  # 第一印象不可覆盖
-        self._first_impressions[session_key] = FirstImpression(
+        impressions[key] = FirstImpression(
             valence=max(-1.0, min(1.0, valence)),
             topic_type=topic_type,
             user_style=user_style,
@@ -597,7 +687,14 @@ class SessionContext:
             (FirstImpression, anchor_weight) 元组。
             如果无第一印象记录，返回 (None, 0.0)。
         """
-        impression = self._first_impressions.get(session_key)
+        relation = self._active_relation_runtime()
+        if relation is not None:
+            impression = relation.first_impressions.get("_relation")
+        else:
+            impressions = self._legacy_impressions()
+            if impressions is None:
+                return (None, 0.0)
+            impression = impressions.get(session_key)
         if impression is None:
             return (None, 0.0)
         first_ts = self.first_interaction_time(session_key)
@@ -751,6 +848,13 @@ class SessionContext:
         Returns:
             派生出的会话标识字符串。
         """
+        if self._uses_scope_runtime():
+            runtime = self._active_session_runtime()
+            if runtime is None:
+                raise ValueError("scoped session key requires a frozen runtime")
+            if session_key and session_key != runtime.storage_token:
+                raise ValueError("scoped session key does not match frozen storage_token")
+            return runtime.storage_token
         if session_key:
             return session_key
         if event is not None:
@@ -852,8 +956,20 @@ class SessionContext:
             session_key: 显式指定的会话键。
 
         Returns:
-            公共会话标识，无法确定时返回 "global"。
+            仅 legacy 模式可从传输数据导出公共会话标识；scoped 模式只返回
+            当前已绑定的 storage token。
         """
+        if self._uses_scope_runtime():
+            runtime = self._active_session_runtime()
+            storage_token = getattr(runtime, "storage_token", None)
+            if not isinstance(storage_token, str) or not storage_token:
+                raise ValueError("scoped public session lookup requires a live binding")
+            if session_key and session_key != storage_token:
+                raise ValueError("raw public session key does not match the bound scope")
+            return storage_token
+
+        # Registry-free compatibility reader only.  Production hooks and HTTP
+        # routes resolve an authenticated SessionScope before they reach here.
         if session_key:
             return session_key
         if event is not None:
@@ -886,8 +1002,24 @@ class SessionContext:
             hour: 当前小时（0-23）。
             pattern: 行为模式描述（如 "morning_greeting"、"night_farewell"）。
         """
-        self._ritual_registry.observe_pattern(session_key, hour, pattern)
-        ritual = self._ritual_registry.get_ritual(session_key, pattern)
+        relation = self._active_relation_runtime()
+        if relation is not None:
+            registry = relation.ritual_registry
+            if registry is None:
+                registry = RitualRegistry()
+                relation.ritual_registry = registry
+            ritual_key = "_relation"
+            scheduler_key = relation.scope.relation_ref.token
+        else:
+            registry = self._legacy_rituals()
+            if registry is None:
+                # Missing authenticated RelationScope: relationship observations
+                # are intentionally no-ops, never session/global fallbacks.
+                return
+            ritual_key = session_key
+            scheduler_key = session_key
+        registry.observe_pattern(ritual_key, hour, pattern)
+        ritual = registry.get_ritual(ritual_key, pattern)
         if not ritual:
             return
         scheduler = getattr(self._p, "_proactive_scheduler", None)
@@ -895,20 +1027,24 @@ class SessionContext:
         if callable(register):
             try:
                 register(
-                    session_key,
+                    scheduler_key,
                     str(ritual.get("pattern", pattern)),
                     int(ritual.get("hour_start", hour)),
                     int(ritual.get("hour_end", (hour + 1) % 24)),
                 )
             except Exception as e:
                 logger.debug(f"Sylanne ritual register_ritual skipped: {e}")
-        if hasattr(self._p, "_has_kv_api") and self._p._has_kv_api():
+        if (
+            not self._uses_scope_runtime()
+            and hasattr(self._p, "_has_kv_api")
+            and self._p._has_kv_api()
+        ):
             try:
                 from sylanne_alpha.utils import safe_ensure_future
 
                 safe_ensure_future(
                     self._p.put_kv_data(
-                        _RITUAL_REGISTRY_KV_KEY, self._ritual_registry.to_dict()
+                        _RITUAL_REGISTRY_KV_KEY, registry.to_dict()
                     ),
                     name=f"ritual_registry_save_{session_key}",
                 )
@@ -962,6 +1098,8 @@ class SessionContext:
             该会话对应的 MemorySystem 实例。
         """
         if not session_key:
+            if self._uses_scope_runtime():
+                raise ValueError("scoped memory lookup requires storage_token")
             session_key = "default"
         systems = self._p._store.memory_systems
         if not systems.has(session_key):
@@ -1116,6 +1254,10 @@ class SessionContext:
         Returns:
             去重后的会话标识列表。
         """
+        if self._uses_scope_runtime():
+            # WebUI calls have no authenticated scope in Task 5; never select or
+            # enumerate a default/recent session as a substitute.
+            return []
         sessions: list[str] = []
 
         def add(value: Any) -> None:
@@ -1157,8 +1299,6 @@ class SessionContext:
                     add(path.name[: -len(".alpha.json")])
         except Exception as e:
             logger.debug(f"Sylanne skip: {e}")
-        if not sessions:
-            add("default")
         return sessions
 
     # ------------------------------------------------------------------
@@ -1182,6 +1322,8 @@ class SessionContext:
             该会话对应的 SylanneAlphaHost 实例。
         """
         if not session_key:
+            if self._uses_scope_runtime():
+                raise ValueError("scoped host lookup requires storage_token")
             session_key = "default"
         hosts = self._p._store.hosts
         # 用 .get() 单次取值：BoundedDict 的 __contains__ 不查 TTL 而
@@ -1543,6 +1685,8 @@ class SessionContext:
             该会话对应的 OfflineBuffer 实例。
         """
         if not session_key:
+            if self._uses_scope_runtime():
+                raise ValueError("scoped offline buffer requires storage_token")
             session_key = "default"
         buffers = getattr(self._p, "_offline_buffers", None)
         if buffers is None:

@@ -46,6 +46,9 @@ import random
 import time
 from typing import Any
 
+from sylanne_alpha.scope_contracts import ResolvedScope, SessionScope
+from sylanne_alpha.scope_runtime import ScopeMismatch, ScopeUnavailable
+
 logger = logging.getLogger("astrbot_plugin_sylanne")
 
 _DOMAIN_STATE_KEY_FMT = "sylanne_v2core_domains:{safe}"
@@ -62,7 +65,8 @@ _WINDDOWN_HOLD_BIAS = 0.30    # 窗口内叠加进 g_hold 的固定偏置（独�
 _NIGHT_WAKE_GAP_S = 3600.0    # T1-03③ 夜间"首条消息"判定：距上次请求超过此值才算重新搭话
 _NIGHT_WAKE_CUE_PROB = 0.25   # T1-03③ 命中"首条夜间消息"时，附加"刚被叫醒"线索的概率
 
-# 落盘任务的模块级强引用锚（防 fire-and-forget task 被 GC 提前回收）
+# Narrow compatibility anchor for old test/plugin stubs which do not expose a
+# scoped registry.  Production tasks belong to PersonaRuntime instead.
 _PENDING_SAVES: set[Any] = set()
 
 
@@ -74,6 +78,45 @@ def _kv(plugin: Any) -> Any:
     if hasattr(plugin, "get_kv_data") and hasattr(plugin, "put_kv_data"):
         return plugin
     return None
+
+
+def _frozen_scope(event: Any) -> SessionScope | None:
+    getter = getattr(event, "get_extra", None)
+    if not callable(getter):
+        return None
+    try:
+        resolved = getter("_sylanne_resolved_scope_v1")
+    except Exception:
+        return None
+    if (
+        type(resolved) is not ResolvedScope
+        or resolved.private_scope_enabled is not True
+        or type(resolved.scope) is not SessionScope
+    ):
+        return None
+    return resolved.scope
+
+
+def _requires_frozen_scope(plugin: Any) -> bool:
+    """Main plugin owns a registry; its active V2 path never permits raw keys."""
+
+    return getattr(plugin, "_scope_runtime_registry", None) is not None
+
+
+def _runtime_context_for_event(
+    plugin: Any, event: Any
+) -> tuple[SessionScope | None, str, dict[str, Any]] | None:
+    """Return exact scoped state, or the named legacy reader for narrow stubs."""
+
+    scope = _frozen_scope(event)
+    if scope is not None:
+        return scope, scope.storage_token, _runtime_for_scope(plugin, scope)
+    if _requires_frozen_scope(plugin):
+        return None
+    session_key = plugin._session_key(event)
+    if not isinstance(session_key, str) or not session_key:
+        return None
+    return None, session_key, _legacy_runtime_for_raw_session(plugin, session_key)
 
 
 def _session_lock(plugin: Any, session_key: str) -> Any:
@@ -161,22 +204,91 @@ async def _save_domains(plugin: Any, session_key: str, domains: dict[str, Any],
         logger.debug("Sylanne v2core 域状态写入失败 [%s]: %s", session_key, exc)
 
 
-def _schedule_domain_save(plugin: Any, session_key: str, domains: dict[str, Any],
-                          behavior_last_fired: dict[str, float] | None = None) -> None:
-    """fire-and-forget 落盘。模块级 _PENDING_SAVES 强引用锚定（防 GC）。
+async def _save_scoped_domains(
+    plugin: Any,
+    scope: SessionScope,
+    domains: dict[str, Any],
+    behavior_last_fired: dict[str, float] | None = None,
+) -> None:
+    """Persist only while this exact scope generation is still live.
 
-    与旧版的差别：不再挂 plugin._background_tasks——terminate() 对那张表做的是
-    cancel（取消在途存档=反向 bug）。停机排干走本模块 drain_pending_saves()。
+    The per-storage-token lock provides write ordering across generations.  An old
+    callback that resumes after a replacement generation has been installed sees
+    ``is_live_session == False`` and cannot overwrite its successor's snapshot.
     """
-    coro = _save_domains(plugin, session_key, domains, behavior_last_fired)
+
+    registry = getattr(plugin, "_scope_runtime_registry", None)
+    if registry is None or not registry.is_live_session(scope):
+        return
+    try:
+        persona_runtime = registry.for_scope(scope)
+    except ScopeMismatch:
+        return
+    lock = persona_runtime.v2core_save_locks.get(scope.storage_token)
+    if lock is None:
+        lock = asyncio.Lock()
+        persona_runtime.v2core_save_locks[scope.storage_token] = lock
+    async with lock:
+        if not registry.is_live_session(scope):
+            return
+        await _save_domains(
+            plugin,
+            scope.storage_token,
+            domains,
+            behavior_last_fired,
+        )
+
+
+def _pending_save_bucket(plugin: Any, scope: SessionScope | None) -> set[Any] | None:
+    if scope is None:
+        return None if _requires_frozen_scope(plugin) else _PENDING_SAVES
+    registry = getattr(plugin, "_scope_runtime_registry", None)
+    if registry is None or not registry.is_live_session(scope):
+        return None
+    try:
+        return registry.for_scope(scope).v2core_pending_saves
+    except ScopeMismatch:
+        return None
+
+
+def _schedule_domain_save(
+    plugin: Any,
+    scope_or_session: SessionScope | str,
+    domains: dict[str, Any],
+    behavior_last_fired: dict[str, float] | None = None,
+) -> None:
+    """Fire-and-forget persistence owned by an exact Persona runtime.
+
+    Raw session keys are retained only for narrow registry-free compatibility
+    stubs.  A real plugin without a frozen SessionScope deliberately schedules
+    nothing rather than guessing an owner.
+    """
+
+    scope = scope_or_session if type(scope_or_session) is SessionScope else None
+    if scope is None:
+        if _requires_frozen_scope(plugin) or not isinstance(scope_or_session, str):
+            return
+        session_key = scope_or_session
+        coro = _save_domains(plugin, session_key, domains, behavior_last_fired)
+    else:
+        session_key = scope.storage_token
+        coro = _save_scoped_domains(plugin, scope, domains, behavior_last_fired)
+    bucket = _pending_save_bucket(plugin, scope)
+    if bucket is None:
+        coro.close()
+        return
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
     if loop is not None:
         task = loop.create_task(coro)
-        _PENDING_SAVES.add(task)
-        task.add_done_callback(_PENDING_SAVES.discard)
+        bucket.add(task)
+        task.add_done_callback(bucket.discard)
+        if scope is not None:
+            registry = getattr(plugin, "_scope_runtime_registry", None)
+            if registry is None or not registry.track_session_task(scope, task):
+                task.cancel()
     else:
         try:
             asyncio.run(coro)
@@ -184,9 +296,18 @@ def _schedule_domain_save(plugin: Any, session_key: str, domains: dict[str, Any]
             coro.close()
 
 
-async def drain_pending_saves(timeout: float = 5.0) -> None:
+async def drain_pending_saves(plugin: Any | None = None, timeout: float = 5.0) -> None:
     """停机/卸载前排干在途域状态落盘（main.terminate 在 cancel 后台任务【之前】调用）。"""
-    pending = [t for t in _PENDING_SAVES if not t.done()]
+    scoped_plugin = plugin is not None and _requires_frozen_scope(plugin)
+    if scoped_plugin:
+        pending = [
+            task
+            for runtime in plugin._scope_runtime_registry.live_persona_runtimes()
+            for task in runtime.v2core_pending_saves
+            if not task.done()
+        ]
+    else:
+        pending = [t for t in _PENDING_SAVES if not t.done()]
     if not pending:
         return
     try:
@@ -197,6 +318,31 @@ async def drain_pending_saves(timeout: float = 5.0) -> None:
 
 async def save_all_domains(plugin: Any) -> None:
     """终扫：把所有活跃会话的域状态同步落盘一遍（terminate 兜底）。"""
+    registry = getattr(plugin, "_scope_runtime_registry", None)
+    if registry is not None:
+        for persona_runtime in registry.live_persona_runtimes():
+            for rt in list(persona_runtime.v2core_runtimes.values()):
+                if not isinstance(rt, dict):
+                    continue
+                scope = rt.get("scope")
+                domains = rt.get("domains")
+                if (
+                    type(scope) is not SessionScope
+                    or not isinstance(domains, dict)
+                    or not domains
+                    or not registry.is_live_session(scope)
+                ):
+                    continue
+                try:
+                    await _save_scoped_domains(
+                        plugin,
+                        scope,
+                        domains,
+                        rt.get("behavior_last_fired"),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Sylanne v2core scoped 终扫落盘失败 [%s]: %s", scope.storage_token, exc)
+        return
     cache = getattr(plugin, "_v2core_runtimes", None)
     if not isinstance(cache, dict):
         return
@@ -214,8 +360,73 @@ async def save_all_domains(plugin: Any) -> None:
 # 运行态构建
 # ===========================================================================
 
-def _runtime_for(plugin: Any, session_key: str) -> dict[str, Any]:
-    """取/建该会话的 v2core 运行态（SelfCore + 领域束 + TurnRunner）。"""
+def _runtime_for_scope(plugin: Any, scope: SessionScope) -> dict[str, Any]:
+    """Build/read V2 state from the exact frozen ``scope.storage_token``."""
+
+    if type(scope) is not SessionScope:
+        raise ScopeUnavailable("v2core requires a frozen SessionScope")
+    registry = getattr(plugin, "_scope_runtime_registry", None)
+    if registry is None:
+        raise ScopeUnavailable("scoped v2core registry is unavailable")
+    # This rejects an old scope generation before it can reuse a same-token V2
+    # cache entry from a newer session incarnation.
+    registry.exact_session(scope)
+    persona_runtime = registry.for_scope(scope)
+    return _build_runtime(
+        plugin,
+        scope.storage_token,
+        persona_runtime.v2core_runtimes,
+        scope=scope,
+    )
+
+
+def runtime_for(plugin: Any, scope: SessionScope) -> dict[str, Any]:
+    """Public exact-scope V2 runtime lookup used by scoped callers/tests."""
+
+    return _runtime_for_scope(plugin, scope)
+
+
+def _legacy_runtime_for_raw_session(plugin: Any, session_key: str) -> dict[str, Any]:
+    """Explicit compatibility reader for test stubs without a scope registry."""
+
+    cache = getattr(plugin, "_v2core_runtimes", None)
+    if cache is None:
+        cache = {}
+        plugin._v2core_runtimes = cache
+    return _build_runtime(plugin, session_key, cache, scope=None)
+
+
+def _runtime_from_scope_or_legacy(
+    plugin: Any, scope_or_session: SessionScope | str
+) -> dict[str, Any] | None:
+    """Resolve an explicit scope, or a named registry-free compatibility reader."""
+
+    if type(scope_or_session) is SessionScope:
+        try:
+            return _runtime_for_scope(plugin, scope_or_session)
+        except ScopeMismatch:
+            return None
+    if _requires_frozen_scope(plugin) or not isinstance(scope_or_session, str):
+        return None
+    return _legacy_runtime_for_raw_session(plugin, scope_or_session)
+
+
+def _runtime_cache_key(storage_token: str, scope: SessionScope | None) -> str:
+    """Keep same-token replacement generations as independent V2 runtimes."""
+
+    if scope is None:
+        return storage_token
+    return f"{storage_token}\x1f{scope.scope_generation}"
+
+
+def _build_runtime(
+    plugin: Any,
+    storage_token: str,
+    cache: dict[str, dict[str, Any]],
+    *,
+    scope: SessionScope | None,
+) -> dict[str, Any]:
+    """Construct one V2 bundle; caller already selected its only legal cache."""
     from sylanne_alpha.v2core.body_port_v2 import CanonicalKernelBodyPort
     from sylanne_alpha.v2core.capabilities.expression import ExpressionCapability
     from sylanne_alpha.v2core.capabilities.ignition import IgnitionArbiter
@@ -240,16 +451,19 @@ def _runtime_for(plugin: Any, session_key: str) -> dict[str, Any]:
     from sylanne_alpha.v2core.self_core import SelfCore
     from sylanne_alpha.v2core.turn_runner import TurnRunner
 
-    cache = getattr(plugin, "_v2core_runtimes", None)
-    if cache is None:
-        cache = {}
-        plugin._v2core_runtimes = cache
-    rt = cache.get(session_key)
+    cache_key = _runtime_cache_key(storage_token, scope)
+    rt = cache.get(cache_key)
     if rt is not None:
         return rt
 
-    host = plugin._host(session_key)
-    bp = CanonicalKernelBodyPort.from_host(host, session_key)
+    if scope is None:
+        host = plugin._host(storage_token)
+    else:
+        host_getter = getattr(plugin, "_host_for_scope", None)
+        if not callable(host_getter):
+            raise ScopeUnavailable("scoped host reader is unavailable")
+        host = host_getter(scope)
+    bp = CanonicalKernelBodyPort.from_host(host, storage_token)
     sc = SelfCore(bp)
     # 注册序即拍内执行序：
     # PERCEPT    — mentalize(预判你) / appraisal(评价你这条消息)
@@ -276,9 +490,13 @@ def _runtime_for(plugin: Any, session_key: str) -> dict[str, Any]:
         "adaptation": AdaptationDomain(),
     }
     try:
-        ms_getter = getattr(plugin, "_memory_system_for_session", None)
+        ms_getter = (
+            getattr(plugin, "_memory_system_for_scope", None)
+            if scope is not None
+            else getattr(plugin, "_memory_system_for_session", None)
+        )
         if callable(ms_getter):
-            ms = ms_getter(session_key)
+            ms = ms_getter(scope) if scope is not None else ms_getter(storage_token)
             if ms is not None:
                 domains["memory"] = MemoryDomain(ms)
     except Exception as exc:  # noqa: BLE001
@@ -292,8 +510,11 @@ def _runtime_for(plugin: Any, session_key: str) -> dict[str, Any]:
         "pending_assessment": None,   # 待请求 tick 合并的评价
         "pending_quality": None,      # 待下轮 request tick 注入的对话质量分(float, 滞后反馈)
         "loaded": False,
+        "storage_token": storage_token,
+        "scope_generation": scope.scope_generation if scope is not None else None,
+        "scope": scope,
     }
-    cache[session_key] = rt
+    cache[cache_key] = rt
     return rt
 
 
@@ -397,7 +618,9 @@ async def _percept_recall(
         pass
 
 
-def peek_percept_recalled_texts(plugin: Any, session_key: str) -> set[str]:
+def peek_percept_recalled_texts(
+    plugin: Any, scope_or_session: SessionScope | str
+) -> set[str]:
     """只读窥视本轮 PERCEPT 已召回的记忆原文集合（不新建/不触发 v2core 运行态）。
 
     供请求管线 [记忆参考] 格式化前做同轮跨路径去重：PERCEPT
@@ -410,10 +633,22 @@ def peek_percept_recalled_texts(plugin: Any, session_key: str) -> set[str]:
     请求管线的记忆注入主路径）。
     """
     try:
-        cache = getattr(plugin, "_v2core_runtimes", None)
-        if not isinstance(cache, dict):
-            return set()
-        rt = cache.get(session_key)
+        if type(scope_or_session) is SessionScope:
+            registry = getattr(plugin, "_scope_runtime_registry", None)
+            if registry is None or not registry.is_live_session(scope_or_session):
+                return set()
+            cache = registry.for_scope(scope_or_session).v2core_runtimes
+            rt = cache.get(
+                _runtime_cache_key(
+                    scope_or_session.storage_token,
+                    scope_or_session,
+                )
+            )
+        else:
+            if _requires_frozen_scope(plugin) or not isinstance(scope_or_session, str):
+                return set()
+            cache = getattr(plugin, "_v2core_runtimes", None)
+            rt = cache.get(scope_or_session) if isinstance(cache, dict) else None
         if not isinstance(rt, dict):
             return set()
         pending = rt.get("pending")
@@ -609,6 +844,20 @@ def _start_winddown_window(
     rt["winddown_until"] = now + duration_s
     rt["winddown_return_notified"] = False   # 新窗口开了，允许下次窗口结束再提醒一次
 
+    scope = rt.get("scope")
+    if type(scope) is SessionScope:
+        registry = getattr(plugin, "_scope_runtime_registry", None)
+        if registry is None or not registry.is_live_session(scope):
+            return
+        coro = _winddown_return_after(plugin, scope, duration_s)
+        try:
+            task = asyncio.get_running_loop().create_task(coro)
+        except RuntimeError:
+            coro.close()
+            return
+        registry.track_session_task(scope, task)
+        return
+
     scheduler = getattr(getattr(plugin, "_realtime_dispatch", None), "schedule_background_task", None)
     if callable(scheduler):
         coro = _winddown_return_after(plugin, session_key, duration_s)
@@ -621,7 +870,11 @@ def _start_winddown_window(
             coro.close()
 
 
-async def _winddown_return_after(plugin: Any, session_key: str, delay_s: float) -> None:
+async def _winddown_return_after(
+    plugin: Any,
+    scope_or_session: SessionScope | str,
+    delay_s: float,
+) -> None:
     """T2-03⑥：收尾窗口结束后尝试主动"回来接着聊"。
 
     background-task 模式（realtime_dispatch.schedule_background_task 同款：异常吞掉、
@@ -636,7 +889,21 @@ async def _winddown_return_after(plugin: Any, session_key: str, delay_s: float) 
         await asyncio.sleep(max(0.0, delay_s))
     except asyncio.CancelledError:
         raise
-    try:
+    scope = scope_or_session if type(scope_or_session) is SessionScope else None
+    if scope is not None:
+        registry = getattr(plugin, "_scope_runtime_registry", None)
+        if registry is None or not registry.is_live_session(scope):
+            return
+        binder = getattr(plugin, "_bind_runtime_for_scope", None)
+        if not callable(binder):
+            return
+        session_key = scope.storage_token
+    else:
+        if _requires_frozen_scope(plugin) or not isinstance(scope_or_session, str):
+            return
+        session_key = scope_or_session
+
+    async def _dispatch_return() -> None:
         bridge = getattr(plugin, "_proactive_bridge", None)
         if bridge is None or not bridge.available():
             return
@@ -648,6 +915,13 @@ async def _winddown_return_after(plugin: Any, session_key: str, delay_s: float) 
             reason_code="life_rhythm", session_key=session_key,
         )
         await bridge.dispatch(session_key, motivation)
+
+    try:
+        if scope is None:
+            await _dispatch_return()
+        else:
+            with binder(scope):
+                await _dispatch_return()
     except Exception as exc:  # noqa: BLE001
         logger.debug("Sylanne T2-03 winddown 返场触达失败 [%s]: %s", session_key, exc)
 
@@ -675,11 +949,13 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
     if request is None or _is_cron_event(event):
         return
     try:
-        session_key = plugin._session_key(event)
+        runtime_context = _runtime_context_for_event(plugin, event)
+        if runtime_context is None:
+            return
+        scope, session_key, rt = runtime_context
         text = _user_text(plugin, event)
         if not text.strip():
             return
-        rt = _runtime_for(plugin, session_key)
         await _ensure_loaded(plugin, session_key, rt)
 
         ctx = rt["runner"].run_percept_stage(
@@ -741,16 +1017,17 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
 
         # Phase 2B / PR-G：关系类型分类（off-path，不阻塞请求）。低频 gated；
         # 经后台任务调 LLM 判关系语域、累积进壳层 store。绝不 inline await、不进 SDK 域。
-        try:
-            from sylanne_alpha.v2core import rel_register as _relreg
-            if _relreg.should_classify(rt, time.time()):
-                from sylanne_alpha.infra import safe_ensure_future
-                safe_ensure_future(
-                    _relreg.classify_and_store(plugin, session_key, event, text),
-                    name="rel_register_classify",
-                )
-        except Exception as _exc:  # noqa: BLE001 - 分类失败绝不影响请求
-            logger.debug("Sylanne rel_register dispatch skipped: %s", _exc)
+        if not _requires_frozen_scope(plugin):
+            try:
+                from sylanne_alpha.v2core import rel_register as _relreg
+                if _relreg.should_classify(rt, time.time()):
+                    from sylanne_alpha.infra import safe_ensure_future
+                    safe_ensure_future(
+                        _relreg.classify_and_store(plugin, session_key, event, text),
+                        name="rel_register_classify",
+                    )
+            except Exception as _exc:  # noqa: BLE001 - 分类失败绝不影响请求
+                logger.debug("Sylanne rel_register dispatch skipped: %s", _exc)
 
         # 生活底色（Wave 5）+ T2-03 去忙收尾信号：两者都读同一个 _life_simulator，
         # 合并一次取用（life_sim_signals 必须在下面 select_behavior 之前就绪，behavior.py
@@ -859,13 +1136,14 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
         logger.error("Sylanne v2core request stage failed（继续请求管线）: %s", exc, exc_info=True)
 
 
-def consume_pending_assessment(plugin: Any, session_key: str) -> dict[str, Any] | None:
+def consume_pending_assessment(
+    plugin: Any, scope_or_session: SessionScope | str
+) -> dict[str, Any] | None:
     """请求管线在 host.on_request 前调用：取走本轮 v2core 评价（合并进 assessment）。
 
     一次性语义（取走即清），同步零 IO。无暂存 → None（请求管线行为不变）。
     """
-    cache = getattr(plugin, "_v2core_runtimes", None)
-    rt = cache.get(session_key) if isinstance(cache, dict) else None
+    rt = _runtime_from_scope_or_legacy(plugin, scope_or_session)
     if not isinstance(rt, dict):
         return None
     a = rt.get("pending_assessment")
@@ -873,7 +1151,9 @@ def consume_pending_assessment(plugin: Any, session_key: str) -> dict[str, Any] 
     return a if isinstance(a, dict) and a else None
 
 
-def consume_pending_quality(plugin: Any, session_key: str) -> float | None:
+def consume_pending_quality(
+    plugin: Any, scope_or_session: SessionScope | str
+) -> float | None:
     """请求管线在构造 request tick event 前调用：取走上一轮自评的对话质量分。
 
     一次性语义（取走即清），同步零 IO。无暂存/陈旧 → None。注入进 event.values
@@ -885,8 +1165,7 @@ def consume_pending_quality(plugin: Any, session_key: str) -> float | None:
     新话题），陈旧分丢弃返 None——否则陈旧高质量分注入不相关新话题，且 _drift_embodiment 的
     dt 巨大会放大这次错漂移。裸 float（旧格式/测试直塞）向后兼容，视为不过期。
     """
-    cache = getattr(plugin, "_v2core_runtimes", None)
-    rt = cache.get(session_key) if isinstance(cache, dict) else None
+    rt = _runtime_from_scope_or_legacy(plugin, scope_or_session)
     if not isinstance(rt, dict):
         return None
     q = rt.get("pending_quality")
@@ -951,15 +1230,16 @@ def _compose_dispatch_modulators(ctx: Any) -> dict[str, float]:
     }
 
 
-def consume_dispatch_modulators(plugin: Any, session_key: str) -> dict[str, float] | None:
+def consume_dispatch_modulators(
+    plugin: Any, scope_or_session: SessionScope | str
+) -> dict[str, float] | None:
     """投递管线（llm_response_pipeline，没有 ctx）取走本轮 T3-01 派发调制器。
 
     一次性语义（取走即清，同 consume_pending_quality）。无暂存/陈旧
     （> _DISPATCH_MOD_TTL，防跨轮串味——rt 是跨轮持久字典）→ None，调用方按中性
     默认（1.0/1.0/0.0）处理，零力学变化。
     """
-    cache = getattr(plugin, "_v2core_runtimes", None)
-    rt = cache.get(session_key) if isinstance(cache, dict) else None
+    rt = _runtime_from_scope_or_legacy(plugin, scope_or_session)
     if not isinstance(rt, dict):
         return None
     mods = rt.get("turn_dispatch_modulators")
@@ -1018,13 +1298,15 @@ async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
         from sylanne_alpha.message_dispatch import normalize_completion_text
         from sylanne_alpha.v2core.contracts import ReplyKind
 
-        session_key = plugin._session_key(event)
+        runtime_context = _runtime_context_for_event(plugin, event)
+        if runtime_context is None:
+            return False
+        scope, session_key, rt = runtime_context
         # T3 防护：completion_text 可能是 content-parts 列表/repr（provider tool 轮产物），
         # 在这第一道读边界就归一为纯文本——既不漏进正文，也防写回 AstrBot 历史被 repr 污染。
         draft_raw = normalize_completion_text(getattr(response, "completion_text", ""))
         draft = draft_raw if draft_raw.strip() else None
 
-        rt = _runtime_for(plugin, session_key)
         # T3-01 防陈旧串味：先重置成中性，再往下走。若本轮后续步骤（_ensure_loaded/
         # percept 补跑/decision stage）中途抛异常触发下面的兜底 `except → return False`
         # 继续投递管线时会 consume_dispatch_modulators——这里先清空，保证
@@ -1194,7 +1476,12 @@ async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
             "Sylanne v2core turn: session=%s kind=%s suppress_delivery=%s",
             session_key, reply.kind.value, suppress_delivery,
         )
-        _schedule_domain_save(plugin, session_key, rt["domains"], rt.get("behavior_last_fired"))
+        _schedule_domain_save(
+            plugin,
+            scope if scope is not None else session_key,
+            rt["domains"],
+            rt.get("behavior_last_fired"),
+        )
         return suppress_delivery
     except Exception as exc:  # noqa: BLE001
         logger.error(
@@ -1210,11 +1497,11 @@ async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
 # ===========================================================================
 
 async def merge_idle_reach_into_decision(
-    plugin: Any, session_key: str, decision: dict[str, Any]
+    plugin: Any, scope_or_session: SessionScope | str, decision: dict[str, Any]
 ) -> dict[str, Any]:
     """若 v2core 空闲触达胜出，升格 decision.action=reach_out（live + scheduler 共用）。"""
     try:
-        reach = await consult_idle_reach(plugin, session_key)
+        reach = await consult_idle_reach(plugin, scope_or_session)
         decision["v2core_reach"] = reach
         if reach.get("reach") and decision.get("allowed", True):
             decision["action"] = "reach_out"
@@ -1226,7 +1513,9 @@ async def merge_idle_reach_into_decision(
     return decision
 
 
-async def consult_idle_reach(plugin: Any, session_key: str) -> dict[str, Any]:
+async def consult_idle_reach(
+    plugin: Any, scope_or_session: SessionScope | str
+) -> dict[str, Any]:
     """空闲轮咨询：reach 想不想赢？零写、零 tick、零 LLM——纯读决策。
 
     消费者：ProactiveScheduler.get_speech_decision（外部主动桥轮询它）。
@@ -1234,7 +1523,14 @@ async def consult_idle_reach(plugin: Any, session_key: str) -> dict[str, Any]:
     """
     out = {"reach": False, "g_reach": 0.0, "action": "hold"}
     try:
-        rt = _runtime_for(plugin, session_key)
+        rt = _runtime_from_scope_or_legacy(plugin, scope_or_session)
+        if rt is None:
+            return out
+        session_key = (
+            scope_or_session.storage_token
+            if type(scope_or_session) is SessionScope
+            else scope_or_session
+        )
         await _ensure_loaded(plugin, session_key, rt)
         # T2-03⑤ MAJOR 修复（红队 finding）：忙线窗口内不该一边"要去忙了"一边又高频
         # 主动找你——旧实现想通过 _apply_winddown_window_scratch 把 winddown_hold_bias

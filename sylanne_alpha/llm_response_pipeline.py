@@ -159,6 +159,16 @@ class LLMResponsePipeline:
     def __init__(self, plugin: PluginHost) -> None:
         self._p = plugin
 
+    def _active_scope(self) -> Any | None:
+        getter = getattr(self._p, "_bound_runtime", None)
+        if not callable(getter):
+            return None
+        try:
+            binding = getter()
+        except Exception:
+            return None
+        return getattr(binding, "scope", None) if binding is not None else None
+
     # ------------------------------------------------------------------
     # Injection defense
     # ------------------------------------------------------------------
@@ -1389,7 +1399,10 @@ class LLMResponsePipeline:
         try:
             from sylanne_alpha.v2core.integration import consume_dispatch_modulators
 
-            dispatch_mods = consume_dispatch_modulators(self._p, session_key)
+            dispatch_mods = consume_dispatch_modulators(
+                self._p,
+                self._active_scope() or session_key,
+            )
         except Exception:
             dispatch_mods = None
         default_cps, default_max_part, extra_predelay = self._apply_dispatch_modulators(

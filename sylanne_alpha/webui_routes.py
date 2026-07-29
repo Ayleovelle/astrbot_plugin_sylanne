@@ -358,6 +358,53 @@ class WebUIRoutes:
     def __init__(self, plugin: PluginHost) -> None:
         self._p = plugin
 
+    def _bound_webui_session_key(self, requested_session: str = "") -> str | None:
+        """Resolve only the exact session already bound to this request context.
+
+        The WebUI query string is not an authenticated ``SessionScope``.  Once
+        scope runtime ownership is active, it must never select ``default``, an
+        overview, or a sibling session merely because a raw string was supplied.
+        """
+
+        registry = getattr(self._p, "_scope_runtime_registry", None)
+        if registry is None:
+            return None
+        binding_getter = getattr(self._p, "_bound_runtime", None)
+        if not callable(binding_getter):
+            return None
+        try:
+            binding = binding_getter()
+        except Exception:  # noqa: BLE001 - HTTP reads must fail closed
+            return None
+        scope = getattr(binding, "scope", None)
+        if scope is None or not registry.is_live_session(scope):
+            return None
+        storage_token = getattr(scope, "storage_token", None)
+        if not isinstance(storage_token, str) or not storage_token:
+            return None
+        if requested_session and requested_session != storage_token:
+            return None
+        return storage_token
+
+    def _webui_scope_gate(
+        self, requested_session: str = ""
+    ) -> tuple[bool, str | None]:
+        """Return the exact permitted session for a scoped HTTP request.
+
+        The boolean distinguishes normal registry-free compatibility from a
+        scoped request that must fail closed.  Callers must return
+        :meth:`_scope_unavailable_payload` before touching private state when
+        ``scoped`` is true and ``session_key`` is ``None``.
+        """
+
+        if getattr(self._p, "_scope_runtime_registry", None) is None:
+            return False, None
+        return True, self._bound_webui_session_key(requested_session)
+
+    @staticmethod
+    def _scope_unavailable_payload() -> dict[str, Any]:
+        return {"ok": False, "error": "scope_unavailable"}
+
     # ------------------------------------------------------------------
     # Memory settings & lineage observatory
     # ------------------------------------------------------------------
@@ -372,8 +419,7 @@ class WebUIRoutes:
         return await self._p._update_sylanne_memory_settings_from_page(body)
 
     async def lineage_observatory_handler(self) -> dict[str, Any]:
-        session_key = "default"
-        return self._p._sylanne_lineage_observatory_page_payload(session_key)
+        return await self._p._lineage_observatory_handler()
 
     # ------------------------------------------------------------------
     # WebUI page & state
@@ -407,28 +453,36 @@ class WebUIRoutes:
         from astrbot.api.web import request
 
         requested_session = str(request.query.get("session") or "").strip()
-        all_sessions = self._p._known_webui_sessions(requested_session)
-        # For overview (empty/default), use the most recently active session
-        if (
-            not requested_session
-            or requested_session == "default"
-            or requested_session not in all_sessions
-        ):
-            # Find session with highest tick count (most active)
-            best_session = "default"
-            best_ticks = -1
-            for sk, h in (getattr(self._p, "_hosts", {}) or {}).items():
-                ticks = getattr(h.kernel.computation, "_tick_count", 0)
-                if ticks > best_ticks:
-                    best_ticks = ticks
-                    best_session = sk
-            session_key = (
-                best_session
-                if best_ticks > 0
-                else (all_sessions[0] if all_sessions else "default")
-            )
+        scoped, scoped_session = self._webui_scope_gate(requested_session)
+        if scoped:
+            session_key = scoped_session
+            if session_key is None:
+                return self._scope_unavailable_payload()
+            all_sessions = [session_key]
         else:
-            session_key = requested_session
+            # Registry-free compatibility only: historic WebUI state pages used
+            # an overview/default selector and are exercised by narrow test stubs.
+            all_sessions = self._p._known_webui_sessions(requested_session)
+            if (
+                not requested_session
+                or requested_session == "default"
+                or requested_session not in all_sessions
+            ):
+                # Find session with highest tick count (most active)
+                best_session = "default"
+                best_ticks = -1
+                for sk, h in (getattr(self._p, "_hosts", {}) or {}).items():
+                    ticks = getattr(h.kernel.computation, "_tick_count", 0)
+                    if ticks > best_ticks:
+                        best_ticks = ticks
+                        best_session = sk
+                session_key = (
+                    best_session
+                    if best_ticks > 0
+                    else (all_sessions[0] if all_sessions else "default")
+                )
+            else:
+                session_key = requested_session
         host = self._p._host(session_key)
         comp = host.kernel.computation
         logger.info(
@@ -595,7 +649,17 @@ class WebUIRoutes:
             "spine_layers": self._frontend_spine_layers(comp),
             "theme": {"base": "#F3A7C8", "source": "emotion", "mode": "soft"},
             "feedback": feedback,
-            "sessions": _webui_session_items(self._p, all_sessions),
+            "sessions": (
+                [
+                    {
+                        "id": session_key,
+                        "name": session_key,
+                        "tick_count": int(getattr(comp, "_tick_count", 0) or 0),
+                    }
+                ]
+                if scoped
+                else _webui_session_items(self._p, all_sessions)
+            ),
             "life_simulation": self._p._life_simulator.to_dict(),
         }
 
@@ -604,8 +668,17 @@ class WebUIRoutes:
 
         from astrbot.api.web import request
 
+        requested_session = str(request.query.get("session") or "").strip()
+        scoped, scoped_session = self._webui_scope_gate(requested_session)
+        if scoped:
+            if scoped_session is None:
+                return self._scope_unavailable_payload()
+            query: Mapping[str, Any] = dict(request.query)
+            query["session"] = scoped_session
+        else:
+            query = request.query
         try:
-            return build_observation_history_payload(self._p, request.query)
+            return build_observation_history_payload(self._p, query)
         except (RuntimeError, ValueError) as exc:
             return {"error": str(exc)}
 
@@ -754,6 +827,11 @@ class WebUIRoutes:
         except (TypeError, ValueError):
             limit = 50
         requested_session = str(request.query.get("session") or "").strip()
+        scoped, scoped_session = self._webui_scope_gate(requested_session)
+        if scoped:
+            if scoped_session is None:
+                return self._scope_unavailable_payload()
+            requested_session = scoped_session
         logs = list(self._p._computation_logs)
         if requested_session:
             logs = [
@@ -764,7 +842,7 @@ class WebUIRoutes:
         entries = logs[-limit:]
         return {
             "logs": entries,
-            "total": len(self._p._computation_logs),
+            "total": len(logs) if scoped else len(self._p._computation_logs),
             "total_for_session": len(logs),
             "session": requested_session or "",
         }
@@ -846,22 +924,34 @@ class WebUIRoutes:
             return bool(list(getattr(state, "records", []) or []))
 
         limit = _bounded_limit(request.query.get("limit", "50"))
-        session_key = str(request.query.get("session") or "").strip()
-        all_sessions = self._p._known_webui_sessions(session_key)
-        overview_requested = not session_key or session_key == "default"
-        if session_key and session_key not in all_sessions:
-            all_sessions.append(session_key)
-        if not session_key or (
-            session_key not in all_sessions and session_key != "default"
-        ):
-            session_key = all_sessions[0] if all_sessions else "default"
-        source_sessions = (
-            [item for item in all_sessions if item]
-            if overview_requested
-            else [session_key]
-        )
-        if not source_sessions:
-            source_sessions = [session_key or "default"]
+        requested_session = str(request.query.get("session") or "").strip()
+        scoped, scoped_session = self._webui_scope_gate(requested_session)
+        if scoped:
+            session_key = scoped_session
+            if session_key is None:
+                return self._scope_unavailable_payload()
+            all_sessions = [session_key]
+            overview_requested = False
+            source_sessions = [session_key]
+        else:
+            # Registry-free compatibility only: the legacy overview endpoint may
+            # aggregate already-known sessions, but scoped runtime never does.
+            session_key = requested_session
+            all_sessions = self._p._known_webui_sessions(session_key)
+            overview_requested = not session_key or session_key == "default"
+            if session_key and session_key not in all_sessions:
+                all_sessions.append(session_key)
+            if not session_key or (
+                session_key not in all_sessions and session_key != "default"
+            ):
+                session_key = all_sessions[0] if all_sessions else "default"
+            source_sessions = (
+                [item for item in all_sessions if item]
+                if overview_requested
+                else [session_key]
+            )
+            if not source_sessions:
+                source_sessions = [session_key or "default"]
 
         state = await self._p._load_sylanne_memory_state(session_key)
 
@@ -1179,6 +1269,12 @@ class WebUIRoutes:
             return {"ok": False, "error": "invalid_body"}
         session = str(body.get("session", "")).strip()
         nonce = str(body.get("nonce", "") or body.get("token", "")).strip()
+        scoped, _scoped_session = self._webui_scope_gate(session)
+        if scoped:
+            # HTTP input names only a raw session string.  Until the WebUI has an
+            # authenticated SessionScope resolver it must not mutate a private
+            # session owner (including its one-shot amnesia flag).
+            return self._scope_unavailable_payload()
         # S4 fix: validate ONLY against server-side stored nonce — never trust
         # client-supplied expected_token (allows trivial bypass).
         server_nonce = getattr(self._p, "_meltdown_nonces", {}).get(session, "")
@@ -1213,7 +1309,8 @@ class WebUIRoutes:
         if sp is not None and hasattr(sp, "purge_session_after_meltdown"):
             await sp.purge_session_after_meltdown(session)
         logger.info(f"Sylanne MEMORY MELTDOWN: session={session} — all memory cleared")
-        # Set amnesia flag so next LLM response expresses memory loss
+        # Registry-free legacy path: retain the historical raw-key cue for test
+        # doubles.  The scoped path returned above rather than selecting a session.
         if not hasattr(self._p, "_amnesia_sessions"):
             self._p._amnesia_sessions: set[str] = set()
         self._p._amnesia_sessions.add(session)
@@ -1230,6 +1327,11 @@ class WebUIRoutes:
         from astrbot.api.web import request
 
         session = str(request.query.get("session") or "").strip()
+        scoped, _scoped_session = self._webui_scope_gate(session)
+        if scoped:
+            # Nonces are a legacy process-global map; do not recreate that owner
+            # from a raw HTTP session string while scoped runtime is active.
+            return self._scope_unavailable_payload()
         nonce = self.generate_meltdown_nonce(session)
         return {"nonce": nonce}
 
@@ -1249,6 +1351,11 @@ class WebUIRoutes:
         session = str(body.get("session", "")).strip()
         if not session:
             return {"ok": False, "error": "missing session param"}
+        scoped, scoped_session = self._webui_scope_gate(session)
+        if scoped:
+            if scoped_session is None:
+                return self._scope_unavailable_payload()
+            session = scoped_session
         try:
             plugin = self._p
             mem_sys = (
@@ -1281,6 +1388,11 @@ class WebUIRoutes:
         session = str(request.query.get("session") or "").strip()
         if not session:
             return {"ok": False, "error": "missing session param"}
+        scoped, scoped_session = self._webui_scope_gate(session)
+        if scoped:
+            if scoped_session is None:
+                return self._scope_unavailable_payload()
+            session = scoped_session
 
         # 获取该会话的记忆系统实例
         mem_sys = (
@@ -1311,6 +1423,9 @@ class WebUIRoutes:
 
     async def life_status_handler(self) -> dict[str, Any]:
         """GET /api/life/status — 只读生活状态概览（节律/活动/最近事件/分布/prompt 预览）。"""
+        scoped, scoped_session = self._webui_scope_gate()
+        if scoped and scoped_session is None:
+            return self._scope_unavailable_payload()
         life_sim = getattr(self._p, "_life_simulator", None)
         if life_sim is None:
             return {"enabled": False, "available": False}
@@ -1383,6 +1498,9 @@ class WebUIRoutes:
 
     async def life_events_handler(self) -> dict[str, Any]:
         """GET /api/life/events — 最近 20 条生活事件（含归属字段）。"""
+        scoped, scoped_session = self._webui_scope_gate()
+        if scoped and scoped_session is None:
+            return self._scope_unavailable_payload()
         life_sim = getattr(self._p, "_life_simulator", None)
         if life_sim is None:
             return {"events": [], "available": False}
@@ -1412,6 +1530,9 @@ class WebUIRoutes:
 
     async def life_projects_handler(self) -> dict[str, Any]:
         """GET /api/life/projects — 活跃项目 + 技能库。"""
+        scoped, scoped_session = self._webui_scope_gate()
+        if scoped and scoped_session is None:
+            return self._scope_unavailable_payload()
         life_sim = getattr(self._p, "_life_simulator", None)
         if life_sim is None:
             return {"projects": [], "skills": [], "available": False}
@@ -1434,6 +1555,9 @@ class WebUIRoutes:
 
     async def life_audit_handler(self) -> dict[str, Any]:
         """GET /api/life/audit — outreach 审计日志。"""
+        scoped, scoped_session = self._webui_scope_gate()
+        if scoped and scoped_session is None:
+            return self._scope_unavailable_payload()
         life_sim = getattr(self._p, "_life_simulator", None)
         if life_sim is None:
             return {"audit": {}, "available": False}
@@ -1448,6 +1572,9 @@ class WebUIRoutes:
 
     async def life_diagnostics_handler(self) -> dict[str, Any]:
         """GET /api/life/diagnostics — 一键完整状态导出（含 prompt fragment 预览）。"""
+        scoped, scoped_session = self._webui_scope_gate()
+        if scoped and scoped_session is None:
+            return self._scope_unavailable_payload()
         life_sim = getattr(self._p, "_life_simulator", None)
         if life_sim is None:
             return {"available": False}
@@ -1470,6 +1597,9 @@ class WebUIRoutes:
         """POST /api/life/controls — 用户控制（开关 / 强度 / 清除 journal/projects/plan）。"""
         from astrbot.api.web import request
 
+        scoped, scoped_session = self._webui_scope_gate()
+        if scoped and scoped_session is None:
+            return self._scope_unavailable_payload()
         life_sim = getattr(self._p, "_life_simulator", None)
         if life_sim is None:
             return {"error": "life sim not available"}
@@ -1549,6 +1679,11 @@ class WebUIRoutes:
         session_key = str(request.query.get("session_key") or "").strip()
         if not session_key:
             return {"ok": False, "error": "missing session_key param"}
+        scoped, scoped_session = self._webui_scope_gate(session_key)
+        if scoped:
+            if scoped_session is None:
+                return self._scope_unavailable_payload()
+            session_key = scoped_session
 
         export: dict[str, Any] = {"session_key": session_key}
 
@@ -1580,10 +1715,14 @@ class WebUIRoutes:
                 ],
             }
 
-        # Personality & computation state
-        hosts = getattr(self._p, "_hosts", {}) or {}
-        if session_key in hosts:
-            host = hosts[session_key]
+        # Personality & computation state.  Scoped runtime may read only its
+        # bound host; registry-free compatibility retains the raw host map.
+        if scoped:
+            host = self._p._host(session_key)
+        else:
+            hosts = getattr(self._p, "_hosts", {}) or {}
+            host = hosts.get(session_key)
+        if host is not None:
             comp = host.kernel.computation
             export["personality"] = dict(comp._personality)
             export["computation"] = comp.to_dict()
@@ -1613,6 +1752,12 @@ class WebUIRoutes:
         session_key = str(request.query.get("session_key") or "").strip()
         if not session_key:
             return {"ok": False, "error": "missing session_key param"}
+        scoped, _scoped_session = self._webui_scope_gate(session_key)
+        if scoped:
+            # Deletion still fans out through legacy raw-key persistence and
+            # host cleanup paths.  Keep it disabled until a scoped delete API
+            # exists rather than risking a cross-owner purge.
+            return self._scope_unavailable_payload()
 
         purged: list[str] = []
 
@@ -1865,8 +2010,13 @@ class WebUIRoutes:
         from sylanne_alpha.webui_server import _start_time, _get_process_memory_mb
 
         uptime_s = int(time.time() - _start_time)
-        hosts_dict = getattr(self._p, "_hosts", {}) or {}
-        sessions_count = len(hosts_dict) if isinstance(hosts_dict, dict) else 0
+        if getattr(self._p, "_scope_runtime_registry", None) is not None:
+            # Health is process-level; do not enumerate legacy host maps in a
+            # scoped plugin merely to report a cross-session count.
+            sessions_count = 0
+        else:
+            hosts_dict = getattr(self._p, "_hosts", {}) or {}
+            sessions_count = len(hosts_dict) if isinstance(hosts_dict, dict) else 0
         memory_mb = _get_process_memory_mb()
         return {
             "status": "ok",
@@ -1945,6 +2095,11 @@ class WebUIRoutes:
         """返回 AstrBot 管理面板状态卡片数据。"""
         from sylanne_alpha.webui_server import _build_widget_state
 
+        scoped, _scoped_session = self._webui_scope_gate()
+        if scoped:
+            # The shared widget builder is aggregate-only; no scoped projection
+            # exists yet, so never let it inspect sibling owners.
+            return self._scope_unavailable_payload()
         return _build_widget_state(self._p)
 
     # ------------------------------------------------------------------
@@ -1958,6 +2113,11 @@ class WebUIRoutes:
         from sylanne_alpha.webui_server import _v2core_state_payload
 
         session = str(request.query.get("session") or "").strip()
+        scoped, scoped_session = self._webui_scope_gate(session)
+        if scoped:
+            if scoped_session is None:
+                return self._scope_unavailable_payload()
+            session = scoped_session
         return _v2core_state_payload(self._p, session=session)
 
     # ------------------------------------------------------------------
@@ -1972,6 +2132,11 @@ class WebUIRoutes:
         from sylanne_alpha.webui_server import _admin_inspect_payload
 
         session = str(request.query.get("session") or "").strip()
+        scoped, scoped_session = self._webui_scope_gate(session)
+        if scoped:
+            if scoped_session is None:
+                return self._scope_unavailable_payload()
+            session = scoped_session
         return await _admin_inspect_payload(self._p, session=session)
 
     async def admin_quarantine_view_handler(self) -> dict[str, Any]:
@@ -1981,12 +2146,22 @@ class WebUIRoutes:
         from sylanne_alpha.webui_server import _admin_quarantine_view_payload
 
         session = str(request.query.get("session") or "").strip()
+        scoped, scoped_session = self._webui_scope_gate(session)
+        if scoped:
+            if scoped_session is None:
+                return self._scope_unavailable_payload()
+            session = scoped_session
         return await _admin_quarantine_view_payload(self._p, session=session)
 
     async def admin_pending_deletes_handler(self) -> dict[str, Any]:
         """GET /api/admin/pending_deletes — 跨重启 pending-delete 索引镜像快照。"""
         from sylanne_alpha.webui_server import _admin_pending_deletes_payload
 
+        scoped, _scoped_session = self._webui_scope_gate()
+        if scoped:
+            # This payload aggregates a process-wide mirror and has no exact
+            # session projection, so scoped runtime deliberately exposes none.
+            return self._scope_unavailable_payload()
         return _admin_pending_deletes_payload(self._p)
 
     # ------------------------------------------------------------------
@@ -2003,6 +2178,11 @@ class WebUIRoutes:
         rating = str(body.get("rating", "")).strip()
         if not session_key or not rating or rating not in ("positive", "negative"):
             return {"ok": False, "error": "invalid_params"}
+        scoped, scoped_session = self._webui_scope_gate(session_key)
+        if scoped:
+            if scoped_session is None:
+                return self._scope_unavailable_payload()
+            session_key = scoped_session
         scheduler = getattr(self._p, "_proactive_scheduler", None)
         if scheduler is not None and hasattr(scheduler, "record_feedback"):
             scheduler.record_feedback(session_key, timestamp, rating)
@@ -2016,6 +2196,10 @@ class WebUIRoutes:
         """返回过去 7 天的周报统计数据。"""
         from sylanne_alpha.analytics import generate_weekly_report
 
+        scoped, _scoped_session = self._webui_scope_gate()
+        if scoped:
+            # The report is an aggregate with no exact-session contract.
+            return self._scope_unavailable_payload()
         return generate_weekly_report(self._p)
 
     # ------------------------------------------------------------------
@@ -2032,15 +2216,28 @@ class WebUIRoutes:
         if not memory_id:
             return {"ok": False, "error": "missing memory_id param"}
 
-        # 在所有会话的记忆系统中查找目标记忆
+        scoped, scoped_session = self._webui_scope_gate()
+        if scoped and scoped_session is None:
+            return self._scope_unavailable_payload()
+
+        # Scoped mode searches only the exact bound memory owner.  The legacy
+        # compatibility path below retains the historical cross-session scan.
         target_memory = None
-        hosts = getattr(self._p, "_hosts", {}) or {}
-        for sk in list(hosts.keys()):
-            mem_sys = (
-                self._p._memory_system_for_session(sk)
+        if scoped:
+            memory_systems = [
+                self._p._memory_system_for_session(scoped_session)
                 if hasattr(self._p, "_memory_system_for_session")
                 else None
-            )
+            ]
+        else:
+            hosts = getattr(self._p, "_hosts", {}) or {}
+            memory_systems = [
+                self._p._memory_system_for_session(session_key)
+                if hasattr(self._p, "_memory_system_for_session")
+                else None
+                for session_key in list(hosts.keys())
+            ]
+        for mem_sys in memory_systems:
             if mem_sys is None:
                 continue
             for pool in (
@@ -2101,10 +2298,17 @@ class WebUIRoutes:
 
         包含 Embodiment Five、Sylanne Six、漂移历史摘要。
         """
-        # 获取最活跃会话的人格数据
-        hosts = getattr(self._p, "_hosts", {}) or {}
+        scoped, scoped_session = self._webui_scope_gate()
+        if scoped and scoped_session is None:
+            return self._scope_unavailable_payload()
+
+        # Scoped mode reads only its exact host, never the first active host.
+        if scoped:
+            hosts = [self._p._host(scoped_session)]
+        else:
+            hosts = list((getattr(self._p, "_hosts", {}) or {}).values())
         personality: dict[str, Any] = {}
-        for h in hosts.values():
+        for h in hosts:
             try:
                 personality = (
                     h.kernel._personality()
@@ -2145,10 +2349,18 @@ class WebUIRoutes:
         if not isinstance(embodiment_five, dict) and not isinstance(sylanne_six, dict):
             return {"ok": False, "error": "missing embodiment_five or sylanne_six"}
 
-        # 应用到所有活跃 host 的人格参数
-        hosts = getattr(self._p, "_hosts", {}) or {}
+        scoped, scoped_session = self._webui_scope_gate()
+        if scoped and scoped_session is None:
+            return self._scope_unavailable_payload()
+
+        # Scoped mode mutates only the exact bound host; registry-free stubs keep
+        # the historical all-host import behavior.
+        if scoped:
+            hosts = [(scoped_session, self._p._host(scoped_session))]
+        else:
+            hosts = list((getattr(self._p, "_hosts", {}) or {}).items())
         updated_sessions: list[str] = []
-        for sk, h in hosts.items():
+        for sk, h in hosts:
             try:
                 comp = h.kernel.computation
                 personality = comp._personality

@@ -60,6 +60,29 @@ class ProactiveScheduler:
         # Item 6: 主动发言反馈历史（限制最近 200 条防止无界增长）
         self._feedback_history: collections.deque = collections.deque(maxlen=200)
 
+    def _bound_session_runtime(self, session_key: str) -> Any | None:
+        """Resolve only the session already authenticated by the active binding."""
+
+        getter = getattr(self._p, "_bound_runtime", None)
+        if not callable(getter):
+            return None
+        try:
+            binding = getter()
+        except Exception:
+            return None
+        if binding is None:
+            return None
+        scope = getattr(binding, "scope", None)
+        runtime = getattr(binding, "session_runtime", None)
+        if (
+            scope is None
+            or runtime is None
+            or getattr(scope, "storage_token", None) != session_key
+            or getattr(runtime, "storage_token", None) != session_key
+        ):
+            return None
+        return runtime
+
     # ------------------------------------------------------------------
     # Policy & feedback
     # ------------------------------------------------------------------
@@ -83,15 +106,30 @@ class ProactiveScheduler:
         """
         cfg = self._p.config or {}
         cooldown = float(cfg.get("proactive_speech_dispatch_cooldown_seconds", 1800.0))
+        scoped_runtime_required = (
+            getattr(self._p, "_scope_runtime_registry", None) is not None
+        )
+        session_runtime = self._bound_session_runtime(session_key)
+        if scoped_runtime_required and session_runtime is None:
+            return {
+                "should_dispatch": False,
+                "reason": "scope_unavailable",
+                "cooldown_seconds": cooldown,
+                "feedback_pressure": 0.0,
+            }
         # 根据历史反馈计算压力：冷淡/未回复越多，冷却时间越长
         feedback_pressure = 0.0
         cold_count = 0
         # 第一轮 review 修复：两份 audit（pipeline 视角 + life_sim 视角）可能记同一个
         # event 的同一次未回复，按 event_id 去重，避免 cold_count 双数据源双罚。
         seen_event_ids: set[str] = set()
-        # ① pipeline 视角（Phase 2C 数据源，BoundedDict[session_key] → deque）
-        audit = getattr(self._p, "_proactive_dispatch_audit", None) or {}
-        history = audit.get(session_key) if session_key else None
+        # ① pipeline 视角（当前冻结 SessionStateStore → deque）。真实插件
+        # 只能读当前 binding；原始 key 查表仅保留给没有 registry 的历史桩。
+        if session_runtime is not None:
+            history = session_runtime.store.proactive_dispatch_audit.get(session_key)
+        else:
+            audit = getattr(self._p, "_proactive_dispatch_audit", None) or {}
+            history = audit.get(session_key) if session_key else None
         if history:
             for entry in history:
                 if not isinstance(entry, dict):

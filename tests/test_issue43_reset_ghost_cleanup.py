@@ -12,12 +12,24 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import sys
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from sylanne_alpha.memory_system import ConversationBuffer, MemorySystem
+from sylanne_alpha.scope_contracts import (
+    BotRef,
+    PersonaRevisionRef,
+    ResolvedScope,
+    SessionRef,
+    SessionScope,
+)
+from sylanne_alpha.scope_identity import PersonaSource
+from sylanne_alpha.scope_runtime import ScopeUnavailable
 
 
 # ---------------------------------------------------------------------------
@@ -113,52 +125,106 @@ def _make_plugin(main_mod):
     return main_mod.EmotionalStatePlugin(context=SimpleNamespace(), config={})
 
 
+def _scope_for_reset(label: str) -> SessionScope:
+    suffix = hashlib.sha256(label.encode("utf-8")).hexdigest()[:20]
+    bot = BotRef(token=f"bot_v1_{suffix}", generation=0)
+    persona = PersonaRevisionRef(
+        token=f"persona_v1_{suffix}",
+        bot_ref=bot,
+        persona_id_digest="a" * 64,
+        source_fingerprint="b" * 64,
+        lifecycle_generation=0,
+    )
+    return SessionScope(
+        bot_ref=bot,
+        persona_ref=persona,
+        session_ref=SessionRef(token=f"session_v1_{suffix}", bot_ref=bot, generation=0),
+        storage_token=f"scope_v1_{suffix}",
+        scope_generation=0,
+    )
+
+
+def _resolved_scope(scope: SessionScope) -> ResolvedScope:
+    return ResolvedScope(
+        scope=scope,
+        persona_source=PersonaSource(
+            persona_id="issue43-test",
+            prompt="quiet",
+            begin_dialogs=(),
+            tools=None,
+            skills=None,
+            resolution_source="test",
+        ),
+        identity_quality="verified",
+        resolution_source="test",
+        resolved_at_ms=int(time.time() * 1000),
+        private_scope_enabled=True,
+        disabled_reason=None,
+        turn_generation=0,
+    )
+
+
+def test_unbound_private_session_access_fails_closed_without_runtime_growth():
+    main_mod = _load_main_module()
+    plugin = _make_plugin(main_mod)
+    registry = plugin._scope_runtime_registry
+
+    with pytest.raises(ScopeUnavailable):
+        _ = plugin._store
+    with pytest.raises(ScopeUnavailable):
+        plugin._memory_system_for_session("raw-session")
+
+    assert registry.persona_count == 0
+    assert registry.session_count == 0
+
+
 def test_on_session_reset_clears_l1_epoch_and_buffers_preserves_l2():
     main_mod = _load_main_module()
     plugin = _make_plugin(main_mod)
-    session_key = "room:reset_test"
+    scope = _scope_for_reset("reset")
 
-    mem = plugin._memory_system_for_session(session_key)
-    mem.write_summary("幽灵话题：去日本旅行", session_key=session_key)
-    ghost_item = mem._l1[-1]
-    mem._l2.append(ghost_item)  # 模拟已下沉的一份
+    with plugin._bind_runtime_for_scope(scope):
+        session_key = scope.storage_token
+        mem = plugin._memory_system_for_scope(scope)
+        mem.write_summary("幽灵话题：去日本旅行", session_key=session_key)
+        ghost_item = mem._l1[-1]
+        mem._l2.append(ghost_item)  # 模拟已下沉的一份
 
-    conv_buf = plugin._store.conversation_buffers.get_or_create(
-        session_key, lambda: ConversationBuffer(session_key=session_key)
-    )
-    conv_buf.append("user", "还记得日本旅行吗")
-    assert conv_buf.messages
+        conv_buf = plugin._store.conversation_buffers.get_or_create(
+            session_key, lambda: ConversationBuffer(session_key=session_key)
+        )
+        conv_buf.append("user", "还记得日本旅行吗")
+        assert conv_buf.messages
 
-    plugin._store.pending_outreach_context.set(
-        session_key, {"reason": "life_event ghost", "mood": "开心", "event_id": "e1"}
-    )
+        plugin._store.pending_outreach_context.set(
+            session_key, {"reason": "life_event ghost", "mood": "开心", "event_id": "e1"}
+        )
+        plugin._on_session_reset(session_key)
 
-    plugin._on_session_reset(session_key)
-
-    # L1 清空
-    assert len(mem._l1) == 0
-    # 纪元边界已推进（非零）
-    assert mem._recall_epoch_boundary > 0.0
-    # ConversationBuffer 已清空
-    assert conv_buf.messages == []
-    # pending_outreach_context 已清除
-    assert plugin._store.pending_outreach_context.get(session_key) is None
-    # 非破坏：L2 条目仍然存在（只是纪元门控，不删除）
-    assert any("日本旅行" in it.text for it in mem._l2)
-    # 门控确实生效：unrelated query 不再自动召回该 L2 条目
-    after = mem.recall(query="今天天气如何", current_warmth=0.0, limit=5)
-    assert not any("日本旅行" in r.text for r in after)
+        # L1 清空
+        assert len(mem._l1) == 0
+        # 纪元边界已推进（非零）
+        assert mem._recall_epoch_boundary > 0.0
+        # ConversationBuffer 已清空
+        assert conv_buf.messages == []
+        # pending_outreach_context 已清除
+        assert plugin._store.pending_outreach_context.get(session_key) is None
+        # 非破坏：L2 条目仍然存在（只是纪元门控，不删除）
+        assert any("日本旅行" in it.text for it in mem._l2)
+        # 门控确实生效：unrelated query 不再自动召回该 L2 条目
+        after = mem.recall(query="今天天气如何", current_warmth=0.0, limit=5)
+        assert not any("日本旅行" in r.text for r in after)
 
 
 def test_after_message_sent_hook_triggers_on_clean_ltm_session_extra():
     """钩子只在 event.get_extra('_clean_ltm_session') 为真时才触发清理。"""
     main_mod = _load_main_module()
     plugin = _make_plugin(main_mod)
-    session_key = "room:hook_test"
-
-    mem = plugin._memory_system_for_session(session_key)
-    mem.write_summary("幽灵：上次聊的项目", session_key=session_key)
-    assert len(mem._l1) == 1
+    scope = _scope_for_reset("hook")
+    with plugin._bind_runtime_for_scope(scope):
+        mem = plugin._memory_system_for_scope(scope)
+        mem.write_summary("幽灵：上次聊的项目", session_key=scope.storage_token)
+        assert len(mem._l1) == 1
 
     class _FakeEvent:
         def __init__(self, extra: dict, session_id: str):
@@ -170,14 +236,20 @@ def test_after_message_sent_hook_triggers_on_clean_ltm_session_extra():
             return self._extra.get(key, default)
 
     # 未设置标记：不应清理。
-    ev_noop = _FakeEvent({}, session_key)
+    ev_noop = _FakeEvent({"_sylanne_resolved_scope_v1": _resolved_scope(scope)}, "raw")
     asyncio.run(
         plugin.on_after_message_sent_reset_ghost_cleanup(ev_noop)
     )
     assert len(mem._l1) == 1, "未设置 _clean_ltm_session 时不应清理"
 
     # 设置标记（复刻 AstrBot 内置 /reset 的 set_extra 行为）：应清理。
-    ev_reset = _FakeEvent({"_clean_ltm_session": True}, session_key)
+    ev_reset = _FakeEvent(
+        {
+            "_clean_ltm_session": True,
+            "_sylanne_resolved_scope_v1": _resolved_scope(scope),
+        },
+        "raw",
+    )
     asyncio.run(
         plugin.on_after_message_sent_reset_ghost_cleanup(ev_reset)
     )
@@ -189,19 +261,20 @@ def test_on_session_reset_does_not_touch_l3_nodes_object_identity():
     """L3 图谱节点对象本身不被清空/替换（只在门控条件下不再入池，不动数据结构）。"""
     main_mod = _load_main_module()
     plugin = _make_plugin(main_mod)
-    session_key = "room:l3_test"
-    mem = plugin._memory_system_for_session(session_key)
+    scope = _scope_for_reset("l3")
+    with plugin._bind_runtime_for_scope(scope):
+        mem = plugin._memory_system_for_scope(scope)
 
-    from sylanne_alpha.memory_system import GraphNode
+        from sylanne_alpha.memory_system import GraphNode
 
-    node = GraphNode(
-        id="n1", label="日本旅行", type="event", temporal_type="episodic",
-        clarity=0.9, emotion_weight=0.5, created_at=time.time(),
-        last_recalled_ts=0.0, recall_count=0,
-    )
-    mem._l3_nodes["n1"] = node
+        node = GraphNode(
+            id="n1", label="日本旅行", type="event", temporal_type="episodic",
+            clarity=0.9, emotion_weight=0.5, created_at=time.time(),
+            last_recalled_ts=0.0, recall_count=0,
+        )
+        mem._l3_nodes["n1"] = node
 
-    plugin._on_session_reset(session_key)
+        plugin._on_session_reset(scope.storage_token)
 
-    assert "n1" in mem._l3_nodes
-    assert mem._l3_nodes["n1"] is node
+        assert "n1" in mem._l3_nodes
+        assert mem._l3_nodes["n1"] is node
