@@ -26,6 +26,7 @@ from sylanne_alpha.scope_contracts import (
     SessionScope,
     TurnDeliveryLease,
 )
+from sylanne_alpha.scope_identity import PersonaSource
 
 
 def _bot() -> BotRef:
@@ -44,6 +45,17 @@ def _persona(bot: BotRef | None = None) -> PersonaRevisionRef:
 
 def _session(bot: BotRef | None = None) -> SessionRef:
     return SessionRef(token="session_v1_S", bot_ref=bot or _bot(), generation=5)
+
+
+def _persona_source() -> PersonaSource:
+    return PersonaSource(
+        persona_id="persona.main",
+        prompt="A concise assistant.",
+        begin_dialogs=("hello",),
+        tools=None,
+        skills=None,
+        resolution_source="catalog",
+    )
 
 
 def test_session_scope_uses_only_opaque_storage_components_and_is_frozen() -> None:
@@ -246,3 +258,121 @@ def test_api_diagnostics_and_delivery_contracts_keep_sensitive_fields_redacted()
         )
     assert all(secret not in repr(delivery) for secret in ("platform-secret", "self-secret", "target-secret", "send-secret"))
     assert all(secret not in repr(draft) for secret in ("message-secret", "mac-secret"))
+
+
+def test_resolved_scope_accepts_only_complete_success_or_disabled_states() -> None:
+    bot = _bot()
+    scope = SessionScope(
+        bot_ref=bot,
+        persona_ref=_persona(bot),
+        session_ref=_session(bot),
+        storage_token="scope_v1_X",
+        scope_generation=3,
+    )
+    source = _persona_source()
+
+    resolved = ResolvedScope(
+        scope=scope,
+        persona_source=source,
+        identity_quality="verified",
+        resolution_source="catalog",
+        resolved_at_ms=12,
+        private_scope_enabled=True,
+        disabled_reason=None,
+        turn_generation=0,
+    )
+
+    assert resolved.scope is scope
+    assert resolved.persona_source is source
+    assert ResolvedScope.disabled("unverified", resolved_at_ms=12).private_scope_enabled is False
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"persona_source": None},
+        {"identity_quality": None},
+        {"resolution_source": None},
+        {"private_scope_enabled": False},
+        {"disabled_reason": "mixed-state"},
+        {"turn_generation": None},
+    ],
+)
+def test_resolved_scope_rejects_mixed_success_states(overrides: dict[str, object]) -> None:
+    bot = _bot()
+    values: dict[str, object] = {
+        "scope": SessionScope(
+            bot_ref=bot,
+            persona_ref=_persona(bot),
+            session_ref=_session(bot),
+            storage_token="scope_v1_X",
+            scope_generation=3,
+        ),
+        "persona_source": _persona_source(),
+        "identity_quality": "verified",
+        "resolution_source": "catalog",
+        "resolved_at_ms": 12,
+        "private_scope_enabled": True,
+        "disabled_reason": None,
+        "turn_generation": 0,
+    }
+    values.update(overrides)
+
+    with pytest.raises(ValueError):
+        ResolvedScope(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"persona_source": _persona_source()},
+        {"identity_quality": "verified"},
+        {"resolution_source": "catalog"},
+        {"private_scope_enabled": True},
+        {"disabled_reason": None},
+        {"disabled_reason": ""},
+        {"turn_generation": 0},
+    ],
+)
+def test_resolved_scope_rejects_mixed_disabled_states(overrides: dict[str, object]) -> None:
+    values: dict[str, object] = {
+        "scope": None,
+        "persona_source": None,
+        "identity_quality": None,
+        "resolution_source": None,
+        "resolved_at_ms": 12,
+        "private_scope_enabled": False,
+        "disabled_reason": "unverified",
+        "turn_generation": None,
+    }
+    values.update(overrides)
+
+    with pytest.raises(ValueError):
+        ResolvedScope(**values)  # type: ignore[arg-type]
+
+
+def test_resolved_scope_rejects_untrusted_persona_source_without_leaking_repr() -> None:
+    marker = "PRIVATE-PROMPT-MARKER"
+    bot = _bot()
+
+    with pytest.raises(ValueError) as captured:
+        ResolvedScope(
+            scope=SessionScope(
+                bot_ref=bot,
+                persona_ref=_persona(bot),
+                session_ref=_session(bot),
+                storage_token="scope_v1_X",
+                scope_generation=3,
+            ),
+            persona_source={"prompt": marker},  # type: ignore[arg-type]
+            identity_quality="verified",
+            resolution_source="catalog",
+            resolved_at_ms=12,
+            private_scope_enabled=True,
+            disabled_reason=None,
+            turn_generation=0,
+        )
+
+    assert str(captured.value) == "persona_source must be a PersonaSource"
+    assert marker not in str(captured.value)
+    assert marker not in repr(captured.value)

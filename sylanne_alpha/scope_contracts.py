@@ -196,7 +196,7 @@ class ResolvedTransportScope:
 @dataclass(frozen=True, slots=True)
 class ResolvedScope:
     scope: SessionScope | None
-    persona_source: PersonaSource | None
+    persona_source: PersonaSource | None = field(repr=False)
     identity_quality: str | None
     resolution_source: str | None
     resolved_at_ms: int
@@ -205,15 +205,33 @@ class ResolvedScope:
     turn_generation: int | None
 
     def __post_init__(self) -> None:
-        if self.scope is not None and type(self.scope) is not SessionScope:
-            raise ValueError("scope must be a SessionScope or None")
-        _require_optional_text(self.identity_quality, "identity_quality")
-        _require_optional_text(self.resolution_source, "resolution_source")
         _require_generation(self.resolved_at_ms, "resolved_at_ms")
         _require_bool(self.private_scope_enabled, "private_scope_enabled")
-        _require_optional_text(self.disabled_reason, "disabled_reason")
-        if self.turn_generation is not None:
-            _require_generation(self.turn_generation, "turn_generation")
+
+        if self.scope is None:
+            if (
+                self.persona_source is not None
+                or self.identity_quality is not None
+                or self.resolution_source is not None
+                or self.private_scope_enabled is not False
+                or self.turn_generation is not None
+            ):
+                raise ValueError("invalid disabled resolved scope state")
+            _require_text(self.disabled_reason, "disabled_reason")
+            return
+
+        if type(self.scope) is not SessionScope:
+            raise ValueError("scope must be a SessionScope or None")
+
+        from .scope_identity import PersonaSource
+
+        if type(self.persona_source) is not PersonaSource:
+            raise ValueError("persona_source must be a PersonaSource")
+        _require_text(self.identity_quality, "identity_quality")
+        _require_text(self.resolution_source, "resolution_source")
+        if self.private_scope_enabled is not True or self.disabled_reason is not None:
+            raise ValueError("invalid successful resolved scope state")
+        _require_generation(self.turn_generation, "turn_generation")
 
     @classmethod
     def disabled(cls, reason: str, *, resolved_at_ms: int) -> ResolvedScope:
