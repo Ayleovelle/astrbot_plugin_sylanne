@@ -17,10 +17,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger("astrbot_plugin_sylanne")
 
 class SelfCore:
-    """自主 worker 编排器与进化状态仓（全局单例）。"""
+    """自主 worker 编排器与进化状态仓（每个 Persona 独立拥有）。"""
 
-    def __init__(self, plugin: PluginHost) -> None:
+    def __init__(self, plugin: PluginHost, *, store: Any | None = None) -> None:
         self._p = plugin
+        self._store = store
         self._agents: list[CognitiveAgent] = []
         # 自我进化（CP8-P4-C）：per-session 进化档案仓 + 反应式学习器
         self._evo_stores: dict[str, Any] = {}
@@ -166,9 +167,11 @@ class SelfCore:
         """按空闲时长（距上次用户消息）判会话三态。阈值是人格函数的占位实现，
         后续可随关系亲密度调（越在意的关系退休越慢）。"""
         try:
-            last = float(
-                self._p._store.last_user_message_time.get(session_key, 0.0) or 0.0
-            )
+            store = self._store
+            if store is None:
+                # Registry-free compatibility only.
+                store = self._p._store
+            last = float(store.last_user_message_time.get(session_key, 0.0) or 0.0)
         except Exception:
             last = 0.0
         idle = now - last

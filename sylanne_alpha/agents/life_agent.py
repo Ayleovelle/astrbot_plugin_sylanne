@@ -13,8 +13,18 @@ class LifeAgent(CognitiveAgent):
     name = "life"
     phases = (AUTONOMOUS,)
 
+    def __init__(self, plugin: Any, *, life_simulator: Any = None) -> None:
+        super().__init__(plugin)
+        self._scoped_life_simulator = life_simulator
+
+    def _simulator(self) -> Any:
+        if self._scoped_life_simulator is not None:
+            return self._scoped_life_simulator
+        # Registry-free compatibility only.
+        return getattr(self._p, "_life_simulator", None)
+
     def perceive(self, surface: dict[str, Any]) -> dict[str, Any]:
-        sim = getattr(self._p, "_life_simulator", None)
+        sim = self._simulator()
         enabled = False
         due = False
         if sim is not None:
@@ -34,7 +44,7 @@ class LifeAgent(CognitiveAgent):
     async def act(
         self, session_key: str, mode: str, perceived: dict[str, Any]
     ) -> None:
-        sim = getattr(self._p, "_life_simulator", None)
+        sim = self._simulator()
         if sim is None or not perceived.get("autonomy_due"):
             return
         try:

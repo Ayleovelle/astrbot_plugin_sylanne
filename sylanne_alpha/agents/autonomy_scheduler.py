@@ -1,12 +1,12 @@
 """AutonomyScheduler：全局自驱心跳（CP8-P3b）。
 
-让 Sylanne「没人说话也活着」——全局单 task 后台循环，定期：
+让 Sylanne「没人说话也活着」——每个 Persona 一个后台循环，定期：
 1. 全局演化一次：驱动 LifeAgent（作息/生活事件，一个 bot 一套）。
 2. 三态扫会话：对每个活跃会话按 AWAKE/DROWSY/RETIRED 决定是否自驱演化
    （空 event 驱动 host 计算 + run_autonomous_cycle）。
 
 防死锁纪律（避免 3.0 回归）：
-- 单 task，while True + sleep + try/except CancelledError（对齐现有循环模式）。
+- Persona 内单 task，while True + sleep + try/except CancelledError（对齐现有循环模式）。
 - 不用全局锁——按会话 session_lock 串行化（与 reactive 后台 observe 同锁），
   对同一会话串行、不同会话并行，无交叉等待。
 - 临界区（持锁期间）只做同步 tick，自主 worker 在锁外运行。
@@ -28,38 +28,118 @@ import asyncio
 import functools
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from sylanne_alpha.agents.self_core import SelfCore
     from sylanne_alpha.protocols import PluginHost
+    from sylanne_alpha.scope_runtime import PersonaRuntime
 
 logger = logging.getLogger("astrbot_plugin_sylanne")
 
 
-class AutonomyScheduler:
-    """全局自驱心跳。单例，由 main 在 initialize 启动、terminate 回收。"""
+class _PersonaRuntimePluginView:
+    """Expose one captured Persona runtime to legacy autonomy engines.
 
-    def __init__(self, plugin: PluginHost, self_core: SelfCore) -> None:
-        self._p = plugin
+    The engines predate scoped runtimes and expect plugin-shaped attributes.
+    This view keeps their mutable reads exact while delegating stateless host
+    services (configuration, provider calls, and KV APIs) to the real plugin.
+    """
+
+    def __init__(
+        self,
+        plugin: PluginHost,
+        runtime: PersonaRuntime,
+        self_core: SelfCore,
+    ) -> None:
+        self._plugin = plugin
+        self._runtime = runtime
+        self._self_core_owner = self_core
+
+    @property
+    def config(self) -> Any:
+        return self._plugin.config
+
+    @property
+    def _store(self) -> Any:
+        return self._runtime.store
+
+    @property
+    def _self_core(self) -> SelfCore:
+        return self._self_core_owner
+
+    @property
+    def _life_simulator(self) -> Any:
+        return self._runtime.life_simulator
+
+    @property
+    def _v2core_runtimes(self) -> dict[str, Any]:
+        return self._runtime.v2core_runtimes
+
+    def _session_lock(self, session_key: str) -> asyncio.Lock:
+        return self._runtime.store.session_locks.get_or_create(
+            session_key,
+            asyncio.Lock,
+        )
+
+    def _memory_system_for_session(self, session_key: str) -> Any:
+        existing = self._runtime.store.memory_systems.get(session_key)
+        if existing is not None:
+            return existing
+        return self._runtime.memory_systems.get(session_key)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._plugin, name)
+
+
+class AutonomyScheduler:
+    """Persona-owned autonomy heartbeat over one captured runtime."""
+
+    def __init__(
+        self,
+        plugin: PluginHost,
+        self_core: SelfCore,
+        *,
+        persona_runtime: PersonaRuntime | None = None,
+    ) -> None:
         self._sc = self_core
+        self._persona_runtime = persona_runtime
+        self._p = (
+            _PersonaRuntimePluginView(plugin, persona_runtime, self_core)
+            if persona_runtime is not None
+            else plugin
+        )
         self._task: asyncio.Task | None = None
         self._tick_count = 0
         # 深睡巩固引擎（CP8-P4-D 层次3，零 LLM）：RETIRED 前沉淀经验
         from sylanne_alpha.agents.learning import ConsolidationEngine, ReflectionEngine
-        self._consolidation = ConsolidationEngine(plugin)
+        self._consolidation = ConsolidationEngine(self._p)
         # Phase 2 核心：生活巩固引擎（夜间零 LLM）——当天 LifeEvent → 次日 LifePlan + 关系摘要。
         # 与对话策略 ConsolidationEngine 独立命名/预算/KV namespace（proposal §4.4）。
         from sylanne_alpha.life_consolidation import LifeConsolidationEngine
-        self._life_consolidation = LifeConsolidationEngine(plugin)
+        self._life_consolidation = LifeConsolidationEngine(self._p)
         # 反思引擎（CP8-P4-E 层次2，低频 LLM）：AWAKE→DROWSY 首拍触发一次元认知
-        self._reflection = ReflectionEngine(plugin, self_core)
+        self._reflection = ReflectionEngine(self._p, self_core)
         # Phase 2 核心：生活反思引擎（白天/入睡前低频 LLM）——产次日计划建议 next_plan_hint。
         # 活在生活模拟域，与对话策略 ReflectionEngine 独立预算/KV（proposal §4.4 防污染）。
         from sylanne_alpha.life_reflection import LifeReflectionEngine
-        self._life_reflection = LifeReflectionEngine(plugin)
+        self._life_reflection = LifeReflectionEngine(self._p)
         # 上一拍各会话相位（检测 AWAKE→DROWSY 跳变 = 反思首拍闸）
         self._prev_phase: dict[str, str] = {}
+
+    @property
+    def self_core(self) -> SelfCore:
+        return self._sc
+
+    def _captured_store(self) -> Any:
+        if self._persona_runtime is not None:
+            return self._persona_runtime.store
+        # Registry-free compatibility only.
+        return self._p._store
+
+    def _captured_session_lock(self, session_key: str) -> asyncio.Lock:
+        store = self._captured_store()
+        return store.session_locks.get_or_create(session_key, asyncio.Lock)
 
     @property
     def _base_interval(self) -> float:
@@ -96,19 +176,24 @@ class AutonomyScheduler:
         except Exception:
             return 3
 
-    def start(self) -> None:
+    def start(self) -> asyncio.Task | None:
         if self._task is not None and not self._task.done():
-            return
+            return self._task
         try:
             loop = asyncio.get_running_loop()
             self._task = loop.create_task(self._loop(), name="autonomy_scheduler")
+            if self._persona_runtime is not None:
+                self._persona_runtime.autonomy_scheduler_task = self._task
         except RuntimeError:
-            pass  # 无运行中的 loop（测试/同步上下文），跳过
+            return None  # 无运行中的 loop（测试/同步上下文），跳过
+        return self._task
 
     def stop(self) -> None:
         if self._task is not None and not self._task.done():
             self._task.cancel()
         self._task = None
+        if self._persona_runtime is not None:
+            self._persona_runtime.autonomy_scheduler_task = None
 
     def forget_session(self, session_key: str) -> None:
         """释放某会话在自驱层的残留态（CP8-P6：会话删除/驱逐时清理，防无界增长）。
@@ -153,7 +238,7 @@ class AutonomyScheduler:
 
         # 2. 三态扫各会话：AWAKE 降频 / DROWSY 降频 / RETIRED 跳过。
         try:
-            sessions = self._p._store.hosts.snapshot_items()
+            sessions = self._captured_store().hosts.snapshot_items()
         except Exception:
             sessions = []
         ticked = 0
@@ -216,7 +301,17 @@ class AutonomyScheduler:
             await asyncio.sleep(0)
 
     async def _global_autonomy(self, now: float) -> None:
-        """驱动全局演化（LifeAgent AUTONOMOUS）。用 default 会话 surface 作上下文。"""
+        """Drive Persona autonomy without selecting any Session as a fallback."""
+        if self._persona_runtime is not None:
+            try:
+                await self._sc.run_autonomous_cycle(
+                    self._persona_runtime.persona_ref.token,
+                    {},
+                )
+            except Exception as exc:
+                logger.debug("Sylanne persona autonomy: %s", exc)
+            return
+        # Registry-free compatibility only.
         try:
             host = self._p._store.hosts.get("default")
             if host is None:
@@ -234,7 +329,7 @@ class AutonomyScheduler:
         host.on_request(None) 跑在 executor 里防阻塞事件循环（2c2g 适配）。
         锁仍持有保证串行化，但 executor 让出 GIL 使其他协程可调度。
         """
-        lock = self._p._session_lock(session_key)
+        lock = self._captured_session_lock(session_key)
         try:
             loop = asyncio.get_running_loop()
             async with lock:

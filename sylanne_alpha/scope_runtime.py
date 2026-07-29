@@ -12,7 +12,12 @@ from dataclasses import dataclass, field
 import inspect
 from typing import Any
 
-from sylanne_alpha.scope_contracts import PersonaRevisionRef, RelationScope, SessionScope
+from sylanne_alpha.scope_contracts import (
+    PersonaRevisionRef,
+    RelationScope,
+    ResolvedTransportScope,
+    SessionScope,
+)
 from sylanne_alpha.session_state_store import SessionStateStore
 
 
@@ -27,6 +32,7 @@ class ScopeUnavailable(ScopeMismatch):
 PersonaKey = tuple[str, str, int]
 SessionKey = tuple[str, str, int, str, int]
 RelationKey = tuple[str, str, int, str, int]
+TransportKey = tuple[str, int, str, int]
 
 
 def _require_scope(scope: object) -> SessionScope:
@@ -63,6 +69,22 @@ def _relation_key(scope: RelationScope) -> RelationKey:
     )
 
 
+def _transport_key(transport: ResolvedTransportScope) -> TransportKey:
+    if (
+        type(transport) is not ResolvedTransportScope
+        or transport.private_scope_enabled is not True
+        or transport.bot_ref is None
+        or transport.session_ref is None
+    ):
+        raise ScopeMismatch("an authenticated transport scope is required")
+    return (
+        transport.bot_ref.token,
+        transport.bot_ref.generation,
+        transport.session_ref.token,
+        transport.session_ref.generation,
+    )
+
+
 @dataclass(slots=True)
 class RelationRuntime:
     """Mutable relationship state belonging to exactly one Persona + relation.
@@ -94,6 +116,9 @@ class PersonaRuntime:
     social_field: object | None = None
     proactive_scheduler: object | None = None
     proactive_scheduler_task: Any | None = field(default=None, repr=False)
+    self_core: object | None = None
+    autonomy_scheduler: object | None = None
+    autonomy_scheduler_task: Any | None = field(default=None, repr=False)
     background_queue: object | None = None
     background_post_recovered_sessions: set[str] = field(default_factory=set)
     life_simulator_started: bool = False
@@ -158,6 +183,15 @@ class ScopedSessionRuntime:
         return self.scope.storage_token
 
 
+@dataclass(frozen=True, slots=True)
+class TransportRuntimeOwner:
+    """Non-creating transport lookup result for one already-frozen runtime."""
+
+    scope: SessionScope
+    persona_runtime: PersonaRuntime
+    session_runtime: ScopedSessionRuntime
+
+
 class ScopeRuntimeRegistry:
     """Registry with no default, most-recent, or sibling selection behavior."""
 
@@ -172,6 +206,7 @@ class ScopeRuntimeRegistry:
         self._highest_session_generations: dict[tuple[PersonaKey, str], int] = {}
         self._released_sessions: set[SessionKey] = set()
         self._retired_personas: set[PersonaKey] = set()
+        self._transport_owners: dict[TransportKey, SessionKey] = {}
 
     @property
     def persona_count(self) -> int:
@@ -263,6 +298,87 @@ class ScopeRuntimeRegistry:
         except ScopeMismatch:
             return None
 
+    def publish_transport_owner(
+        self,
+        transport: ResolvedTransportScope,
+        scope: SessionScope,
+    ) -> bool:
+        """Publish one already-frozen runtime for exact pre-request safety work.
+
+        This method is deliberately non-creating.  The caller must have completed
+        Persona freeze and constructed the exact session runtime first.  A raw
+        transport identifier can never create, select, or bind private state.
+        """
+
+        try:
+            scope = _require_scope(scope)
+            transport_key = _transport_key(transport)
+        except ScopeMismatch:
+            return False
+        if (
+            transport.bot_ref != scope.bot_ref
+            or transport.session_ref != scope.session_ref
+        ):
+            return False
+        session_key = _session_key(scope)
+        session_runtime = self._sessions.get(session_key)
+        persona_runtime = self._personas.get(_persona_key(scope))
+        if (
+            session_runtime is None
+            or persona_runtime is None
+            or session_runtime.scope != scope
+            or session_runtime.store is not persona_runtime.store
+            or not self.is_live_session(scope)
+        ):
+            return False
+        # A higher authenticated SessionRef generation supersedes all older
+        # publications for this opaque bot/session pair.
+        bot_token, bot_generation, session_token, _generation = transport_key
+        for key in list(self._transport_owners):
+            if (
+                key[0] == bot_token
+                and key[1] == bot_generation
+                and key[2] == session_token
+                and key != transport_key
+            ):
+                self._transport_owners.pop(key, None)
+        self._transport_owners[transport_key] = session_key
+        return True
+
+    def transport_owner_or_none(
+        self,
+        transport: ResolvedTransportScope,
+    ) -> TransportRuntimeOwner | None:
+        """Resolve an exact published owner without creating or guessing one."""
+
+        try:
+            transport_key = _transport_key(transport)
+        except ScopeMismatch:
+            return None
+        session_key = self._transport_owners.get(transport_key)
+        if session_key is None:
+            return None
+        session_runtime = self._sessions.get(session_key)
+        if session_runtime is None:
+            self._transport_owners.pop(transport_key, None)
+            return None
+        scope = session_runtime.scope
+        persona_runtime = self._personas.get(_persona_key(scope))
+        if (
+            persona_runtime is None
+            or transport.bot_ref != scope.bot_ref
+            or transport.session_ref != scope.session_ref
+            or session_runtime.store is not persona_runtime.store
+            or not self.is_live_session(scope)
+        ):
+            self._transport_owners.pop(transport_key, None)
+            return None
+        return TransportRuntimeOwner(
+            scope=scope,
+            persona_runtime=persona_runtime,
+            session_runtime=session_runtime,
+        )
+
     def is_live_session(self, scope: SessionScope) -> bool:
         """Whether ``scope`` still names the current exact session owner.
 
@@ -340,6 +456,9 @@ class ScopeRuntimeRegistry:
         if runtime is None:
             return
         session_key = _session_key(scope)
+        for transport_key, owner_key in list(self._transport_owners.items()):
+            if owner_key == session_key:
+                self._transport_owners.pop(transport_key, None)
         self._released_sessions.add(session_key)
         self._cancel_tasks(runtime.session_background_tasks.pop(session_key, set()))
         self._sessions.pop(session_key, None)
@@ -347,6 +466,13 @@ class ScopeRuntimeRegistry:
         current_key = self._latest_sessions.get(latest_key)
         if current_key is not None and current_key != session_key:
             return
+        for owner in (runtime.self_core, runtime.autonomy_scheduler):
+            forget = getattr(owner, "forget_session", None)
+            if callable(forget):
+                try:
+                    forget(scope.storage_token)
+                except Exception:
+                    pass
         runtime.store.release_session(scope.storage_token)
         runtime.memory_systems.pop(scope.storage_token, None)
         for cache_key, value in list(runtime.v2core_runtimes.items()):
@@ -383,6 +509,9 @@ class ScopeRuntimeRegistry:
             self._latest_sessions.pop(latest_key, None)
         for generation_key in [item for item in self._highest_session_generations if item[0] == key]:
             self._highest_session_generations.pop(generation_key, None)
+        for transport_key, session_key in list(self._transport_owners.items()):
+            if session_key[:3] == key:
+                self._transport_owners.pop(transport_key, None)
         self._released_sessions = {
             item for item in self._released_sessions if item[:3] != key
         }
@@ -403,6 +532,8 @@ class ScopeRuntimeRegistry:
         candidates: list[Any] = list(runtime.background_tasks)
         if runtime.proactive_scheduler_task is not None:
             candidates.append(runtime.proactive_scheduler_task)
+        if runtime.autonomy_scheduler_task is not None:
+            candidates.append(runtime.autonomy_scheduler_task)
         candidates.extend(
             task
             for tasks in runtime.session_background_tasks.values()
@@ -411,6 +542,7 @@ class ScopeRuntimeRegistry:
         candidates.extend(runtime.store.background_post_checkpoint_tasks.values())
         ScopeRuntimeRegistry._cancel_tasks(candidates)
         runtime.proactive_scheduler_task = None
+        runtime.autonomy_scheduler_task = None
         runtime.session_background_tasks.clear()
         scheduler = runtime.proactive_scheduler
         stop = getattr(scheduler, "stop", None)
@@ -420,6 +552,13 @@ class ScopeRuntimeRegistry:
         if callable(stop) and not inspect.iscoroutinefunction(stop):
             try:
                 stop()
+            except Exception:
+                pass
+        autonomy_scheduler = runtime.autonomy_scheduler
+        autonomy_stop = getattr(autonomy_scheduler, "stop", None)
+        if callable(autonomy_stop) and not inspect.iscoroutinefunction(autonomy_stop):
+            try:
+                autonomy_stop()
             except Exception:
                 pass
 
@@ -450,4 +589,5 @@ __all__ = [
     "ScopeRuntimeRegistry",
     "ScopeUnavailable",
     "ScopedSessionRuntime",
+    "TransportRuntimeOwner",
 ]

@@ -2,23 +2,345 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import sys
 from dataclasses import replace
 from types import ModuleType, SimpleNamespace
+from unittest.mock import ANY, AsyncMock, Mock
 
 import pytest
 
+from main import EmotionalStatePlugin
 from sylanne_alpha._engine.sylanne_core.compute.host import SylanneAlphaHost
 from sylanne_alpha.background_queue import BackgroundPostQueue
 from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline
 from sylanne_alpha.proactive_scheduler import ProactiveScheduler
 from sylanne_alpha.public_api import PublicAPI
-from sylanne_alpha.scope_contracts import RelationRef, RelationScope
-from sylanne_alpha.scope_runtime import ScopeMismatch, ScopeRuntimeRegistry
+from sylanne_alpha.scope_contracts import (
+    RelationRef,
+    RelationScope,
+    ResolvedScope,
+    ResolvedTransportScope,
+    SessionRef,
+)
+from sylanne_alpha.scope_identity import PersonaSource
+from sylanne_alpha.scope_runtime import (
+    ScopeMismatch,
+    ScopeRuntimeRegistry,
+    ScopeUnavailable,
+)
 from sylanne_alpha.session_context import SessionContext
 from sylanne_alpha.v2core import integration
 from sylanne_alpha.webui_routes import WebUIRoutes
 from tests.scope_fixtures import scopes
+
+
+def _transport_scope(scope) -> ResolvedTransportScope:
+    return ResolvedTransportScope(
+        bot_ref=scope.bot_ref,
+        session_ref=scope.session_ref,
+        identity_quality="fixture_exact",
+        private_scope_enabled=True,
+        disabled_reason=None,
+    )
+
+
+def _resolved_scope(scope) -> ResolvedScope:
+    return ResolvedScope(
+        scope=scope,
+        persona_source=PersonaSource(
+            persona_id="scope-runtime-test",
+            prompt="quiet",
+            begin_dialogs=(),
+            tools=None,
+            skills=None,
+            resolution_source="test",
+        ),
+        identity_quality="verified",
+        resolution_source="test",
+        resolved_at_ms=1,
+        private_scope_enabled=True,
+        disabled_reason=None,
+        turn_generation=0,
+    )
+
+
+def _persona_plugin() -> EmotionalStatePlugin:
+    plugin = object.__new__(EmotionalStatePlugin)
+    plugin.config = {
+        "sylanne_alpha_autonomy_awake_divisor": 1,
+        "sylanne_alpha_autonomy_scan_interval_seconds": 3600,
+    }
+    plugin._config = plugin.config
+    plugin._scope_runtime_binding = contextvars.ContextVar(
+        "test_scope_runtime_binding",
+        default=None,
+    )
+    plugin._state_persistence = SimpleNamespace(
+        _wire_memory_eviction_persistence=lambda _store: None,
+        terminate=AsyncMock(),
+    )
+    plugin._session_ctx = SimpleNamespace(
+        memory_system_for_session=lambda _session: object(),
+    )
+    noop = lambda *_args, **_kwargs: None
+    plugin._llm_request_pipeline = SimpleNamespace(
+        _life_sim_llm_call=noop,
+        _life_sim_outreach=noop,
+        _life_sim_emotion=noop,
+        _life_sim_body_delta=noop,
+        _life_sim_persona_getter=noop,
+        _life_sim_memory_summary=noop,
+        _qzone_candidate_handler=noop,
+    )
+    plugin._scope_runtime_registry = ScopeRuntimeRegistry(
+        plugin._create_persona_runtime,
+    )
+    plugin._background_tasks = []
+    plugin._emotion_spirit_bridge = None
+    plugin._qzone_audit = None
+    plugin._qzone_http_session = None
+    plugin._v3_shadow = SimpleNamespace(
+        begin_shutdown=Mock(),
+        terminate=AsyncMock(),
+    )
+    return plugin
+
+
+def test_transport_safety_uses_only_published_exact_runtime_and_fences_stale(
+    scopes,
+) -> None:
+    registry = ScopeRuntimeRegistry.for_test()
+    scope = scopes.bot_a_persona_a
+    runtime = registry.for_scope(scope)
+    session_runtime = registry.exact_session(scope)
+    transport = _transport_scope(scope)
+
+    class _Turn:
+        interrupted = 0
+
+        def interrupt(self) -> None:
+            self.interrupted += 1
+
+    turn = _Turn()
+    runtime.store.conversation_input_epoch.set(scope.storage_token, 4)
+    runtime.store.segmented_delivery_turns.set(scope.storage_token, turn)
+    event = SimpleNamespace(
+        extras={},
+        set_extra=lambda key, value: event.extras.__setitem__(key, value),
+    )
+    plugin = SimpleNamespace(_scope_runtime_registry=registry)
+
+    # A frozen runtime is not transport authority until publication succeeds.
+    EmotionalStatePlugin._advance_transport_delivery_fence(plugin, event, transport)
+    assert runtime.store.conversation_input_epoch.get(scope.storage_token) == 4
+    assert turn.interrupted == 0
+
+    assert registry.publish_transport_owner(transport, scope) is True
+    owner = registry.transport_owner_or_none(transport)
+    assert owner is not None
+    assert owner.scope == scope
+    assert owner.persona_runtime is runtime
+    assert owner.session_runtime is session_runtime
+
+    EmotionalStatePlugin._advance_transport_delivery_fence(plugin, event, transport)
+    assert runtime.store.conversation_input_epoch.get(scope.storage_token) == 5
+    assert event.extras["_syl_input_epoch"] == 5
+    assert turn.interrupted == 1
+
+    unknown_transport = replace(
+        transport,
+        session_ref=SessionRef(
+            token=transport.session_ref.token,
+            bot_ref=transport.bot_ref,
+            generation=transport.session_ref.generation + 1,
+        ),
+    )
+    EmotionalStatePlugin._advance_transport_delivery_fence(
+        plugin,
+        event,
+        unknown_transport,
+    )
+    assert runtime.store.conversation_input_epoch.get(scope.storage_token) == 5
+    assert turn.interrupted == 1
+
+    registry.release_session(scope)
+    assert registry.transport_owner_or_none(transport) is None
+    EmotionalStatePlugin._advance_transport_delivery_fence(plugin, event, transport)
+    assert turn.interrupted == 1
+
+
+def test_registry_free_store_seam_cannot_bypass_a_scoped_registry(scopes) -> None:
+    plugin = object.__new__(EmotionalStatePlugin)
+    legacy_store = SimpleNamespace(owner="registry-free")
+
+    plugin._store = legacy_store
+    assert plugin._store is legacy_store
+
+    plugin._scope_runtime_registry = ScopeRuntimeRegistry.for_test()
+    plugin._scope_runtime_registry.exact_session(scopes.bot_a_persona_a)
+    plugin._scope_runtime_binding = contextvars.ContextVar(
+        "test_registry_store_binding",
+        default=None,
+    )
+
+    with pytest.raises(ScopeUnavailable):
+        _ = plugin._store
+    with pytest.raises(ScopeUnavailable):
+        plugin._store = SimpleNamespace(owner="forbidden")
+
+
+@pytest.mark.asyncio
+async def test_persona_autonomy_owners_activate_independently_and_retire_exactly(
+    scopes,
+    monkeypatch,
+) -> None:
+    plugin = _persona_plugin()
+
+    left_scope = scopes.bot_a_persona_a
+    right_scope = scopes.bot_a_persona_b
+    left = plugin._scope_runtime_registry.for_scope(left_scope)
+    right = plugin._scope_runtime_registry.for_scope(right_scope)
+    plugin._scope_runtime_registry.exact_session(left_scope)
+    plugin._scope_runtime_registry.exact_session(right_scope)
+
+    assert left.self_core is not right.self_core
+    assert left.autonomy_scheduler is not right.autonomy_scheduler
+
+    async def _freeze(_plugin, event, _request):
+        return event.resolved_scope
+
+    async def _ready(*_args):
+        return True
+
+    async def _scope_tail(*_args):
+        return None
+
+    monkeypatch.setattr(EmotionalStatePlugin, "_freeze_scope_persona", _freeze)
+    monkeypatch.setattr(
+        EmotionalStatePlugin,
+        "_on_message_after_scope_frozen",
+        _ready,
+    )
+    monkeypatch.setattr(
+        EmotionalStatePlugin,
+        "_on_scope_ready_llm_request",
+        _scope_tail,
+    )
+    plugin._bind_runtime_for_event = lambda event: plugin._bind_runtime_for_scope(
+        event.resolved_scope.scope
+    )
+
+    def _event(scope):
+        transport = _transport_scope(scope)
+        return SimpleNamespace(
+            resolved_scope=_resolved_scope(scope),
+            get_extra=lambda key: (
+                transport if key == "_sylanne_transport_scope_v1" else None
+            ),
+        )
+
+    # Production request flow starts each frozen Persona owner exactly once.
+    await EmotionalStatePlugin._on_llm_request_inner(
+        plugin,
+        _event(left_scope),
+        object(),
+    )
+    await EmotionalStatePlugin._on_llm_request_inner(
+        plugin,
+        _event(right_scope),
+        object(),
+    )
+
+    left_task = left.autonomy_scheduler_task
+    right_task = right.autonomy_scheduler_task
+    assert left.life_simulator_started is True
+    assert right.life_simulator_started is True
+    assert left_task is not None and right_task is not None
+    assert left_task is not right_task
+    assert left_task.cancelled() is False
+    assert right_task.cancelled() is False
+
+    host = SimpleNamespace(kernel=SimpleNamespace(surface=lambda: {"owner": "right"}))
+    right.store.hosts.set(right_scope.storage_token, host)
+    tick = AsyncMock()
+    monkeypatch.setattr(right.autonomy_scheduler, "_tick_session", tick)
+    monkeypatch.setattr(
+        right.autonomy_scheduler.self_core,
+        "autonomy_phase",
+        lambda _session, _now: right.autonomy_scheduler.self_core.AWAKE,
+    )
+    run_cycle = AsyncMock()
+    monkeypatch.setattr(
+        right.autonomy_scheduler.self_core,
+        "run_autonomous_cycle",
+        run_cycle,
+    )
+
+    # The scheduler has no ambient request binding here.  It must still use only
+    # the captured PersonaRuntime store and a Persona owner token for global work.
+    right.autonomy_scheduler._tick_count = 1
+    await right.autonomy_scheduler._scan_once()
+    tick.assert_awaited_once()
+    assert tick.await_args.args[:2] == (right_scope.storage_token, host)
+    run_cycle.assert_awaited_once_with(right.persona_ref.token, {})
+
+    assert plugin._scope_runtime_registry.retire_persona(left_scope) is True
+    await asyncio.sleep(0)
+    assert left_task.done() is True
+    assert left.autonomy_scheduler._task is None
+    assert right_task.done() is False
+    assert plugin._scope_runtime_registry.for_scope(right_scope) is right
+
+    plugin._scope_runtime_registry.retire_persona(right_scope)
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_terminate_drains_and_consolidates_every_persona_autonomy_owner(
+    scopes,
+    monkeypatch,
+) -> None:
+    plugin = _persona_plugin()
+    left_scope = scopes.bot_a_persona_a
+    right_scope = scopes.bot_a_persona_b
+    left = plugin._scope_runtime_registry.for_scope(left_scope)
+    right = plugin._scope_runtime_registry.for_scope(right_scope)
+    plugin._scope_runtime_registry.exact_session(left_scope)
+    plugin._scope_runtime_registry.exact_session(right_scope)
+
+    with plugin._bind_runtime_for_scope(left_scope):
+        plugin._start_life_simulator()
+    with plugin._bind_runtime_for_scope(right_scope):
+        plugin._start_life_simulator()
+    left_task = left.autonomy_scheduler_task
+    right_task = right.autonomy_scheduler_task
+    assert left_task is not None and right_task is not None
+
+    left_consolidate = AsyncMock()
+    right_consolidate = AsyncMock()
+    left.autonomy_scheduler._consolidation = SimpleNamespace(
+        consolidate=left_consolidate,
+    )
+    right.autonomy_scheduler._consolidation = SimpleNamespace(
+        consolidate=right_consolidate,
+    )
+    stop_webui = AsyncMock()
+    monkeypatch.setattr("main.stop_webui_server", stop_webui)
+
+    # terminate() is intentionally unbound.  Reading the plugin-global
+    # _autonomy_scheduler property here would raise ScopeUnavailable.
+    await plugin.terminate()
+
+    assert left_task.done() is True
+    assert right_task.done() is True
+    assert left.autonomy_scheduler._task is None
+    assert right.autonomy_scheduler._task is None
+    left_consolidate.assert_awaited_once_with(left_scope.storage_token, ANY)
+    right_consolidate.assert_awaited_once_with(right_scope.storage_token, ANY)
+    plugin._state_persistence.terminate.assert_awaited_once()
+    stop_webui.assert_awaited_once()
 
 
 def test_persona_switch_restores_exact_runtime_without_cross_bot_aliasing(scopes) -> None:

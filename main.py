@@ -1350,11 +1350,8 @@ class EmotionalStatePlugin(Star):
         self._llm_response_pipeline = LLMResponsePipeline(self)
         self._llm_request_pipeline = LLMRequestPipeline(self)
         self._public_api = PublicAPI(self)
-        # SelfCore 自主生命周期：仅注册 LifeAgent。
-        self._self_core = SelfCore(self)
-        self._self_core.register(LifeAgent(self))
-        # 全局自驱心跳（CP8-P3b）：让她没人说话也演化。initialize 启动、terminate 回收。
-        self._autonomy_scheduler = AutonomyScheduler(self, self._self_core)
+        # SelfCore / AutonomyScheduler are PersonaRuntime owners.  Constructing
+        # either here would capture whichever Persona happened to bind first.
         # 主动发言调度器：基于身体需求和节律决定是否主动发言
         # 主动发言桥接器：把意图+生活素材交给大饼插件执行发送
         self._proactive_bridge = ProactiveBridge(self)
@@ -1649,6 +1646,15 @@ class EmotionalStatePlugin(Star):
             owner_persona_ref=scope.persona_ref,
         )
         runtime.proactive_scheduler = ProactiveScheduler(self)
+        runtime.self_core = SelfCore(self, store=runtime.store)
+        runtime.self_core.register(
+            LifeAgent(self, life_simulator=runtime.life_simulator)
+        )
+        runtime.autonomy_scheduler = AutonomyScheduler(
+            self,
+            runtime.self_core,
+            persona_runtime=runtime,
+        )
         # The persistence layer is constructed before any Persona runtime.  Attach
         # its LRU eviction callback to this exact store here, rather than borrowing
         # a default store during plugin construction.
@@ -1671,6 +1677,34 @@ class EmotionalStatePlugin(Star):
             scope=scope,
             persona_runtime=persona_runtime,
             session_runtime=self._scope_runtime_registry.exact_session(scope),
+        )
+
+    def _publish_transport_runtime_owner(
+        self,
+        event: Any,
+        resolved_scope: ResolvedScope,
+    ) -> bool:
+        """Publish only the exact successfully frozen runtime for transport safety."""
+
+        binding = self._bound_runtime()
+        scope = resolved_scope.scope
+        transport = ScopeResolver._event_extra(
+            event,
+            "_sylanne_transport_scope_v1",
+        )
+        if (
+            binding is None
+            or type(scope) is not SessionScope
+            or binding.scope != scope
+            or type(transport) is not ResolvedTransportScope
+            or transport.private_scope_enabled is not True
+            or transport.bot_ref != scope.bot_ref
+            or transport.session_ref != scope.session_ref
+        ):
+            return False
+        return self._scope_runtime_registry.publish_transport_owner(
+            transport,
+            scope,
         )
 
     @staticmethod
@@ -1755,10 +1789,22 @@ class EmotionalStatePlugin(Star):
 
     @property
     def _store(self) -> SessionStateStore:
+        if self.__dict__.get("_scope_runtime_registry") is None:
+            legacy_key = "_registry_free_legacy_store"
+            if legacy_key in self.__dict__:
+                return self.__dict__[legacy_key]
         binding = self._bound_runtime()
         if binding is None:
             raise ScopeUnavailable("private store requires a frozen scope runtime")
         return binding.persona_runtime.store
+
+    @_store.setter
+    def _store(self, value: SessionStateStore) -> None:
+        """Narrow compatibility seam for registry-free historical test hosts."""
+
+        if self.__dict__.get("_scope_runtime_registry") is not None:
+            raise ScopeUnavailable("scoped plugins cannot replace the private store")
+        self.__dict__["_registry_free_legacy_store"] = value
 
     @property
     def _life_simulator(self) -> LifeSimulator:
@@ -1798,6 +1844,26 @@ class EmotionalStatePlugin(Star):
         owner = binding.persona_runtime.proactive_scheduler if binding is not None else None
         if owner is None:
             raise ScopeUnavailable("proactive scheduler requires a frozen scope runtime")
+        return owner
+
+    @property
+    def _self_core(self) -> SelfCore:
+        binding = self._bound_runtime()
+        owner = binding.persona_runtime.self_core if binding is not None else None
+        if owner is None:
+            raise ScopeUnavailable("self core requires a frozen scope runtime")
+        return owner
+
+    @property
+    def _autonomy_scheduler(self) -> AutonomyScheduler:
+        binding = self._bound_runtime()
+        owner = (
+            binding.persona_runtime.autonomy_scheduler
+            if binding is not None
+            else None
+        )
+        if owner is None:
+            raise ScopeUnavailable("autonomy scheduler requires a frozen scope runtime")
         return owner
 
     @property
@@ -1865,11 +1931,25 @@ class EmotionalStatePlugin(Star):
         不到，故这里显式 fan-out。两个触发点：① 会话删除回调 ② host LRU 驱逐
         （驱逐后同 key 重建时 _restored 守卫须先清，否则学习成果不再从 KV 恢复）。
         """
-        for owner in (
-            getattr(self, "_self_core", None),
-            getattr(self, "_autonomy_scheduler", None),
-            getattr(self, "_proactive_bridge", None),
-        ):
+        binding = self._bound_runtime()
+        owners: list[Any] = []
+        if binding is not None:
+            owners.extend(
+                (
+                    binding.persona_runtime.self_core,
+                    binding.persona_runtime.autonomy_scheduler,
+                )
+            )
+        elif not hasattr(self, "_scope_runtime_registry"):
+            # Registry-free compatibility only.
+            owners.extend(
+                (
+                    self.__dict__.get("_self_core"),
+                    self.__dict__.get("_autonomy_scheduler"),
+                )
+            )
+        owners.append(getattr(self, "_proactive_bridge", None))
+        for owner in owners:
             fn = getattr(owner, "forget_session", None)
             if callable(fn):
                 try:
@@ -2294,12 +2374,27 @@ class EmotionalStatePlugin(Star):
     def _advance_transport_delivery_fence(
         self,
         event: Any,
-        session_key: str,
+        transport_or_session: Any,
     ) -> None:
-        """Advance only the realtime delivery fence and interrupt its old turn."""
+        """Advance one exact scoped delivery fence without creating private state."""
 
         set_extra = getattr(event, "set_extra", None)
-        epochs = getattr(self._store, "conversation_input_epoch", None)
+        registry = getattr(self, "_scope_runtime_registry", None)
+        if registry is not None:
+            owner = registry.transport_owner_or_none(transport_or_session)
+            if owner is None:
+                return
+            store = owner.persona_runtime.store
+            session_key = owner.scope.storage_token
+        else:
+            # Narrow registry-free compatibility for historical test doubles.
+            if type(transport_or_session) is not str or not transport_or_session:
+                return
+            store = getattr(self, "_store", None)
+            if store is None:
+                return
+            session_key = transport_or_session
+        epochs = getattr(store, "conversation_input_epoch", None)
         input_epoch = 0
         if epochs is not None:
             try:
@@ -2318,7 +2413,7 @@ class EmotionalStatePlugin(Star):
             except Exception:
                 pass
 
-        active_turns = getattr(self._store, "segmented_delivery_turns", None)
+        active_turns = getattr(store, "segmented_delivery_turns", None)
         if active_turns is None:
             return
         try:
@@ -2512,8 +2607,10 @@ class EmotionalStatePlugin(Star):
     def _on_transport_ready_safety(self, event: Any) -> None:
         """Run only event/delivery safety work before AstrBot's agent lock."""
 
-        if EmotionalStatePlugin._verified_transport_turn(self, event) is None:
+        verified = EmotionalStatePlugin._verified_transport_turn(self, event)
+        if verified is None:
             return
+        _resolver, transport, _turn = verified
         # Event-local stream mode must be fixed before AgentSubStage reads it.
         try:
             realtime_enabled, realtime_intercept = realtime_flags(self.config)
@@ -2524,12 +2621,17 @@ class EmotionalStatePlugin(Star):
         except Exception:
             pass
 
-        # Task 9 replaces this legacy raw-key bridge with opaque transport keys.
-        # Until then, never treat the locator as identity: accept only the exact
-        # non-default value independently reconstructed from this canonical event,
-        # and touch only the delivery epoch/interrupt registries.
         if EmotionalStatePlugin._verified_transport_turn(self, event) is None:
             return
+        if getattr(self, "_scope_runtime_registry", None) is not None:
+            EmotionalStatePlugin._advance_transport_delivery_fence(
+                self,
+                event,
+                transport,
+            )
+            return
+        # Registry-free compatibility only. Production never derives private
+        # ownership from this raw locator.
         locator = EmotionalStatePlugin._verified_legacy_delivery_locator(
             self,
             event,
@@ -2775,6 +2877,14 @@ class EmotionalStatePlugin(Star):
             )
             if legacy_ready is not True:
                 return
+            if getattr(self, "_scope_runtime_registry", None) is not None:
+                if not EmotionalStatePlugin._publish_transport_runtime_owner(
+                    self,
+                    event,
+                    resolved_scope,
+                ):
+                    return
+                EmotionalStatePlugin._start_life_simulator(self)
             return await EmotionalStatePlugin._on_scope_ready_llm_request(
                 self,
                 event,
@@ -4825,10 +4935,10 @@ class EmotionalStatePlugin(Star):
         return await self._proactive_scheduler.run_once()
 
     def _start_life_simulator(self) -> None:
-        """配置生命模拟器并启动全局自驱心跳（幂等）。
+        """配置生命模拟器并启动当前 Persona 的自驱心跳（幂等）。
 
         CP8-P3b：LifeSimulator 不再自跑 _loop（已纯函数化）。改由 AutonomyScheduler
-        全局心跳驱动 LifeAgent 的 AUTONOMOUS 时点调 simulate_tick。configure 仍需
+        Persona 心跳驱动 LifeAgent 的 AUTONOMOUS 时点调 simulate_tick。configure 仍需
         注入回调（simulate_tick 内部用 llm/outreach/body_delta 等）。
         """
         binding = self._bound_runtime()
@@ -4865,12 +4975,21 @@ class EmotionalStatePlugin(Star):
             state_dirty_callback=self._life_sim_throttled_save,
             qzone_candidate_callback=pipe._qzone_candidate_handler,
         )
-        # 启动全局自驱心跳（替代原 life_sim.start() 的后台循环）。
+        # 启动当前 Persona 的自驱心跳（替代原 life_sim.start() 的后台循环）。
         # LifeSim 持久化状态恢复在 async initialize 里 await（KV 读为异步）。
-        self._autonomy_scheduler.start()
+        scheduler = binding.persona_runtime.autonomy_scheduler
+        if scheduler is None:
+            binding.persona_runtime.life_simulator_started = False
+            return
+        scheduler.start()
+        binding.persona_runtime.autonomy_scheduler_task = getattr(
+            scheduler,
+            "_task",
+            None,
+        )
         logger.info(
             f"Sylanne autonomy: life_sim enabled={life_sim.enabled}, "
-            f"interval={life_sim.interval_seconds}s, scheduler started at initialize"
+            f"interval={life_sim.interval_seconds}s, scoped scheduler started"
         )
 
     async def initialize(self) -> None:
@@ -4960,6 +5079,8 @@ class EmotionalStatePlugin(Star):
                     )
         except Exception as e:
             logger.debug(f"Sylanne emotion_spirit bridge activation skipped: {e}")
+        # No frozen scope exists during initialize.  The first successful
+        # request freeze starts the matching Persona scheduler idempotently.
         try:
             self._start_life_simulator()
         except Exception as e:
@@ -5162,14 +5283,17 @@ class EmotionalStatePlugin(Star):
         # 它仍在下面那轮【通用 task 取消】之前完成；若 commit/fsync/线程退出永久卡住，facade
         # 会保留清理 task 但按上限返回，绝不能把 v2 与整个插件退出一起拖死。
         await self._v3_shadow.terminate()
-        # 收集所有需要取消的任务
+        # 收集所有需要取消的任务。Persona-owned heartbeat must be captured
+        # before stop() clears its task pointer, and every Persona is handled
+        # independently instead of consulting an unbound plugin-global owner.
+        persona_runtimes = self._scope_runtime_registry.live_persona_runtimes()
         tasks_to_cancel: list = []
         for task in list(self._background_tasks):
             if not task.done():
                 task.cancel()
                 tasks_to_cancel.append(task)
         self._background_tasks.clear()
-        for runtime in self._scope_runtime_registry.live_persona_runtimes():
+        for runtime in persona_runtimes:
             for task in list(runtime.store.background_post_checkpoint_tasks.values()):
                 if not task.done():
                     task.cancel()
@@ -5180,39 +5304,44 @@ class EmotionalStatePlugin(Star):
                 sched_task.cancel()
                 tasks_to_cancel.append(sched_task)
             runtime.proactive_scheduler_task = None
+            autonomy = runtime.autonomy_scheduler
+            autonomy_task = runtime.autonomy_scheduler_task
+            if autonomy_task is None and autonomy is not None:
+                autonomy_task = getattr(autonomy, "_task", None)
+            if autonomy_task is not None and not autonomy_task.done():
+                autonomy_task.cancel()
+                tasks_to_cancel.append(autonomy_task)
+            stop_autonomy = getattr(autonomy, "stop", None)
+            if callable(stop_autonomy):
+                stop_autonomy()
+            runtime.autonomy_scheduler_task = None
         # 等待所有取消的任务完成（带超时保护）
         if tasks_to_cancel:
             await asyncio.wait(tasks_to_cancel, timeout=10)
-        # 停止全局自驱心跳（CP8-P3b：替代原 life_simulator.stop）
-        sched = getattr(self, "_autonomy_scheduler", None)
-        if sched is not None:
-            sched_self_task = sched._task
-            sched.stop()
-            # 等自驱 task 真正收尾，消除「stop 仅 cancel 未 await」与下方
-            # 退出巩固之间的并发窗口（避免重入 session_lock 的潜在竞态）。
-            if sched_self_task is not None and not sched_self_task.done():
+        # CP8-P4-D：每个 Persona 的 scheduler 独立终扫自己的活跃会话。
+        # 绑定精确 SessionScope 仅为兼容仍需插件 host API 的持久化调用；
+        # mutable engine/store owner 始终来自 scheduler 捕获的 PersonaRuntime。
+        session_runtimes = self._scope_runtime_registry.live_session_runtimes()
+        now = time.time()
+        for runtime in persona_runtimes:
+            consol = getattr(runtime.autonomy_scheduler, "_consolidation", None)
+            if consol is None:
+                continue
+            for session_runtime in session_runtimes:
+                if session_runtime.scope.persona_ref != runtime.persona_ref:
+                    continue
                 try:
-                    await asyncio.wait_for(
-                        asyncio.shield(sched_self_task), timeout=5
+                    with self._bind_runtime_for_scope(session_runtime.scope):
+                        await consol.consolidate(
+                            session_runtime.storage_token,
+                            now,
+                        )
+                except Exception as e:
+                    logger.debug(
+                        "Sylanne terminate consolidate skipped [%s]: %s",
+                        session_runtime.storage_token,
+                        e,
                     )
-                except (asyncio.CancelledError, asyncio.TimeoutError):
-                    pass
-                except Exception as e:
-                    logger.debug(f"Sylanne autonomy task drain: {e}")
-            # CP8-P4-D：退出前对活跃会话做一次最终巩固（tick_decay + 进化档案落盘），
-            # 保证反应式学习累积的门控偏置不随关机丢失。零 LLM、绕 needs 守卫强制落盘。
-            consol = getattr(sched, "_consolidation", None)
-            if consol is not None:
-                try:
-                    now = time.time()
-                    for session_runtime in self._scope_runtime_registry.live_session_runtimes():
-                        with self._bind_runtime_for_scope(session_runtime.scope):
-                            await consol.consolidate(
-                                session_runtime.storage_token,
-                                now,
-                            )
-                except Exception as e:
-                    logger.debug(f"Sylanne terminate consolidate skipped: {e}")
         # Do not serialize Persona/Relation mutable state through old process-wide
         # keys during shutdown.  A scoped persistence gateway owns that work.
         # PR-Qzone：说说审计/频率闸状态终扫落盘（独立 KV key，兜底节流漏窗）
