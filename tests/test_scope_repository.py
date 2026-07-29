@@ -127,6 +127,49 @@ def test_scope_resolution_reloads_authoritative_parent_chain(tmp_path: Path) -> 
     assert reloaded == active
 
 
+def test_scope_create_retry_repairs_missing_catalog_registration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository = ScopeRepository(tmp_path)
+    candidate = _scope()
+    original_commit = repository._commit_catalog_generation_locked
+    failed_registration = False
+
+    def fail_first_registration(
+        *,
+        registration: tuple[str, str, str, str] | None = None,
+    ) -> int:
+        nonlocal failed_registration
+        if registration is not None and not failed_registration:
+            failed_registration = True
+            raise OSError("injected catalog publish failure")
+        return original_commit(registration=registration)
+
+    monkeypatch.setattr(
+        repository,
+        "_commit_catalog_generation_locked",
+        fail_first_registration,
+    )
+
+    with pytest.raises(OSError, match="injected catalog publish failure"):
+        repository.create_scope(candidate)
+
+    assert repository.scope_meta_path(candidate).exists()
+    orphaned_catalog = repository._read_catalog_locked()
+    assert candidate.storage_token not in orphaned_catalog["scopes"]
+
+    recovered = repository.create_scope(candidate)
+    assert repository.resolve_scope(candidate.storage_token) == recovered
+    generation_after_repair = repository._read_catalog_locked()["generation"]
+
+    assert repository.create_scope(candidate) == recovered
+    assert (
+        repository._read_catalog_locked()["generation"]
+        == generation_after_repair
+    )
+
+
 def test_scope_root_adapter_uses_only_startools_data_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from sylanne_alpha import infra
 

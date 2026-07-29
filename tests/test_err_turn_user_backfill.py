@@ -1,6 +1,6 @@
 """2.4.1 err 轮兜底（未提交新增）——覆盖 main.py 三处改动：
 
-  1. `_on_llm_request_inner` 入口 set_extra("_syl_resp_handled", False)
+  1. scope-ready 请求尾段 set_extra("_syl_resp_handled", False)
   2. `_on_llm_response_inner` 入口 set_extra("_syl_resp_handled", True)
   3. 新增 `@filter.after_message_sent` 钩子 `_on_after_message_sent_err_backfill`：
      仅当 `handled is False`（三态里唯一的"err 轮"态）才补写 user。
@@ -306,10 +306,12 @@ async def test_idempotent_response_hook_ran_then_after_message_sent_fires_too() 
 
 @pytest.mark.asyncio
 async def test_request_pipeline_survives_event_without_extra_api() -> None:
-    """标记置位健壮性：event 没有 set_extra（旧桩）时，请求管线不炸、正常委派。"""
+    """标记置位健壮性：scope 已就绪后，旧事件无 set_extra 仍正常委派。"""
 
     class _ReqPipelinePlugin:
-        _on_llm_request_inner = EmotionalStatePlugin._on_llm_request_inner
+        _on_scope_ready_llm_request = (
+            EmotionalStatePlugin._on_scope_ready_llm_request
+        )
         _inbound_dup_gate = EmotionalStatePlugin._inbound_dup_gate
 
         def __init__(self) -> None:
@@ -321,7 +323,9 @@ async def test_request_pipeline_survives_event_without_extra_api() -> None:
     p = _ReqPipelinePlugin()
     event = _LegacyEventNoExtra()  # 无 get_extra/set_extra
 
-    await p._on_llm_request_inner(event, request=SimpleNamespace())  # 不应抛异常
+    await p._on_scope_ready_llm_request(
+        event, request=SimpleNamespace()
+    )  # 不应抛异常
 
     p._llm_request_pipeline._on_llm_request_inner.assert_awaited_once()
 

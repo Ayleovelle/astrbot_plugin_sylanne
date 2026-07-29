@@ -12,6 +12,7 @@ from sylanne_alpha.scope_identity import ScopeResolver
 
 class _Session:
     platform_id = "adapter"
+    session_id = "42"
 
     def __str__(self) -> str:
         return "adapter:FriendMessage:42"
@@ -126,6 +127,122 @@ async def test_transport_turn_and_persona_freeze_precede_existing_pipeline(
     ]
     assert extras["_sylanne_transport_scope_v1"] is transport
     assert extras["_sylanne_resolved_scope_v1"].private_scope_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_redelivered_event_stops_before_any_legacy_private_write(
+    tmp_path,
+) -> None:
+    async def select_persona(**_kwargs):
+        return (
+            "narrator",
+            {"prompt": "quiet", "begin_dialogs": [], "tools": None, "skills": []},
+            None,
+            False,
+        )
+
+    resolver = ScopeResolver.for_test(
+        SimpleNamespace(
+            get_config=lambda *, umo: {"provider_settings": {}},
+            persona_manager=SimpleNamespace(
+                resolve_selected_persona=select_persona
+            ),
+        ),
+        root=tmp_path,
+    )
+
+    class Event:
+        def __init__(self, label: str) -> None:
+            self.label = label
+            self.session = _Session()
+            self.session_id = "42"
+            self.unified_msg_origin = "adapter:FriendMessage:42"
+            self.message_obj = SimpleNamespace(message_id="same-message-id")
+            self.message_str = "same payload"
+            self.extras: dict[str, object] = {}
+            self.stop_calls = 0
+
+        def get_platform_id(self) -> str:
+            return "adapter"
+
+        def get_platform_name(self) -> str:
+            return "aiocqhttp"
+
+        def get_self_id(self) -> str:
+            return "10001"
+
+        def get_extra(self, key: str, default: object = None) -> object:
+            return self.extras.get(key, default)
+
+        def set_extra(self, key: str, value: object) -> None:
+            self.extras[key] = value
+
+        def stop_event(self) -> None:
+            self.stop_calls += 1
+
+    legacy_activity: list[str] = []
+    pipeline_events: list[str] = []
+
+    async def save_rhythm() -> None:
+        legacy_activity.append("save_rhythm")
+
+    async def existing_pipeline(event: Event, _request: object) -> None:
+        pipeline_events.append(event.label)
+
+    plugin = SimpleNamespace(
+        _scope_resolver_v1=resolver,
+        config={},
+        _inbound_seen={},
+        _session_ctx=SimpleNamespace(
+            session_key=lambda _event: "42",
+            resolve_authenticated_identity=lambda _event: legacy_activity.append(
+                "resolve_identity"
+            ),
+            detect_and_observe_ritual_from_text=lambda *_args: legacy_activity.append(
+                "observe_ritual"
+            ),
+        ),
+        _store=SimpleNamespace(
+            stash_authenticated_identity=lambda *_args: legacy_activity.append(
+                "stash_identity"
+            ),
+            last_user_message_time=SimpleNamespace(
+                set=lambda *_args: legacy_activity.append("last_message")
+            ),
+            hosts=SimpleNamespace(get=lambda *_args: None),
+        ),
+        _rhythm_learner=SimpleNamespace(
+            observe_user_message=lambda *_args: legacy_activity.append(
+                "observe_rhythm"
+            )
+        ),
+        _rhythm_learner_throttled_save=save_rhythm,
+        _llm_request_pipeline=SimpleNamespace(
+            _on_llm_request_inner=existing_pipeline
+        ),
+    )
+    plugin._inbound_dup_gate = lambda event: (
+        EmotionalStatePlugin._inbound_dup_gate(plugin, event)
+    )
+    request = SimpleNamespace(conversation=SimpleNamespace(persona_id=None))
+    first = Event("first")
+    duplicate = Event("duplicate")
+
+    await EmotionalStatePlugin.on_message(plugin, first)
+    await EmotionalStatePlugin._on_llm_request_inner(plugin, first, request)
+    baseline_activity = list(legacy_activity)
+
+    await EmotionalStatePlugin.on_message(plugin, duplicate)
+    await EmotionalStatePlugin._on_llm_request_inner(plugin, duplicate, request)
+    await EmotionalStatePlugin._on_llm_request_inner(plugin, duplicate, request)
+
+    assert baseline_activity
+    assert legacy_activity == baseline_activity
+    assert pipeline_events == ["first"]
+    assert first.stop_calls == 0
+    assert duplicate.stop_calls == 1
+    assert duplicate.get_extra("_syl_inbound_duplicate") is True
+    assert duplicate.get_extra("_sylanne_legacy_on_message_v1") == "duplicate"
 
 
 @pytest.mark.asyncio

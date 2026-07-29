@@ -3,7 +3,8 @@
 覆盖 main.py 新增电路：
   - `EmotionalStatePlugin._inbound_dup_gate`：以 (unified_msg_origin,
     message_obj.message_id) 为键的 check-then-set 去重判定。
-  - `_on_llm_request_inner` 顶端接线：命中重复 -> `event.stop_event()` + 早退，
+  - `_on_scope_ready_llm_request` 请求尾段接线：命中重复 ->
+    `event.stop_event()` + 早退，
     不委托给 `_llm_request_pipeline._on_llm_request_inner`（即不再触发
     build/run_agent/_save_to_history，第二 pass 净写 0 条）。
 
@@ -37,7 +38,7 @@ class _MsgObj:
 
 
 class _Event:
-    """真事件桩：只提供闸 + `_on_llm_request_inner` 委托链需要的最小面。"""
+    """真事件桩：只提供闸 + scope-ready 请求尾段需要的最小面。"""
 
     def __init__(self, umo=UMO, message_id=None):
         self.unified_msg_origin = umo
@@ -73,13 +74,16 @@ def _gate_only_plugin():
 
 
 def _req_pipeline_plugin():
-    """挂真实 `_inbound_dup_gate` + 真实 `_on_llm_request_inner`，
+    """挂真实 `_inbound_dup_gate` + 真实 scope-ready 请求尾段，
     `_llm_request_pipeline._on_llm_request_inner` 用 AsyncMock 隔离
-    （只钉"闸 -> 是否委托下游"这条门控，不掺真实 pipeline 逻辑）。"""
+    （显式假定 frozen-scope 前置契约已满足，只钉"闸 -> 是否委托下游"
+    这条门控，不伪造 scope，也不掺真实 pipeline 逻辑）。"""
 
     class _Plugin:
         _inbound_dup_gate = EmotionalStatePlugin._inbound_dup_gate
-        _on_llm_request_inner = EmotionalStatePlugin._on_llm_request_inner
+        _on_scope_ready_llm_request = (
+            EmotionalStatePlugin._on_scope_ready_llm_request
+        )
 
         def __init__(self):
             self._inbound_seen = BoundedDict(maxsize=1024)
@@ -192,7 +196,7 @@ def test_different_umo_same_mid_not_flagged_duplicate() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 组 2：接线在 `_on_llm_request_inner` —— 命中即 stop_event + 不委托下游
+# 组 2：scope-ready 请求尾段 —— 命中即 stop_event + 不委托下游
 # ---------------------------------------------------------------------------
 
 
@@ -205,8 +209,8 @@ async def test_duplicate_pass_stops_event_and_skips_pipeline_delegate() -> None:
     e1 = _Event(message_id="111111")
     e2 = _Event(message_id="111111")
 
-    await p._on_llm_request_inner(e1, request=SimpleNamespace())
-    await p._on_llm_request_inner(e2, request=SimpleNamespace())
+    await p._on_scope_ready_llm_request(e1, request=SimpleNamespace())
+    await p._on_scope_ready_llm_request(e2, request=SimpleNamespace())
 
     p._llm_request_pipeline._on_llm_request_inner.assert_awaited_once()
     assert e1._stopped is False, "首个 pass 不应被 stop"
@@ -221,8 +225,8 @@ async def test_two_distinct_real_messages_both_delegate_no_stop() -> None:
     e1 = _Event(message_id="111111")
     e2 = _Event(message_id="222222")
 
-    await p._on_llm_request_inner(e1, request=SimpleNamespace())
-    await p._on_llm_request_inner(e2, request=SimpleNamespace())
+    await p._on_scope_ready_llm_request(e1, request=SimpleNamespace())
+    await p._on_scope_ready_llm_request(e2, request=SimpleNamespace())
 
     assert p._llm_request_pipeline._on_llm_request_inner.await_count == 2
     assert e1._stopped is False
@@ -241,11 +245,11 @@ async def test_silent_round_message_id_still_registered_before_early_return() ->
     e1 = _Event(message_id=mid)  # 模拟 SILENT 轮：下游 mock 直接返回 None
     e2 = _Event(message_id=mid)  # 平台重投同一条消息
 
-    await p._on_llm_request_inner(e1, request=SimpleNamespace())
+    await p._on_scope_ready_llm_request(e1, request=SimpleNamespace())
     key = UMO + "\x00" + mid
     assert key in p._inbound_seen, "SILENT 轮的 message_id 必须已被登记"
 
-    await p._on_llm_request_inner(e2, request=SimpleNamespace())
+    await p._on_scope_ready_llm_request(e2, request=SimpleNamespace())
 
     p._llm_request_pipeline._on_llm_request_inner.assert_awaited_once()
     assert e2._stopped is True
@@ -258,8 +262,8 @@ async def test_none_message_id_both_passes_delegate_no_stop() -> None:
     e1 = _Event(message_id=None)
     e2 = _Event(message_id=None)
 
-    await p._on_llm_request_inner(e1, request=SimpleNamespace())
-    await p._on_llm_request_inner(e2, request=SimpleNamespace())
+    await p._on_scope_ready_llm_request(e1, request=SimpleNamespace())
+    await p._on_scope_ready_llm_request(e2, request=SimpleNamespace())
 
     assert p._llm_request_pipeline._on_llm_request_inner.await_count == 2
     assert e1._stopped is False
@@ -280,8 +284,10 @@ async def test_gate_survives_event_missing_stop_event_method() -> None:
     e1 = _NoStopEvent(message_id="444444")
     e2 = _NoStopEvent(message_id="444444")
 
-    await p._on_llm_request_inner(e1, request=SimpleNamespace())
-    await p._on_llm_request_inner(e2, request=SimpleNamespace())  # 不应抛异常
+    await p._on_scope_ready_llm_request(e1, request=SimpleNamespace())
+    await p._on_scope_ready_llm_request(
+        e2, request=SimpleNamespace()
+    )  # 不应抛异常
 
     p._llm_request_pipeline._on_llm_request_inner.assert_awaited_once()
 

@@ -311,6 +311,31 @@ class ScopeRepository:
         )
         return generation
 
+    def _ensure_scope_registration_locked(self, scope: SessionScope) -> None:
+        """Repair a missing scope index entry without bumping an intact catalog."""
+
+        if type(scope) is not SessionScope:
+            raise ValueError("scope must be a SessionScope")
+        proposed = {
+            "bot_ref": scope.bot_ref.token,
+            "persona_ref": scope.persona_ref.token,
+            "session_ref": scope.session_ref.token,
+        }
+        catalog = self._read_catalog_locked()
+        existing = catalog["scopes"].get(scope.storage_token)
+        if existing is not None:
+            if existing != proposed:
+                raise RepositoryCorruptionError("scope catalog parent conflict")
+            return
+        self._commit_catalog_generation_locked(
+            registration=(
+                scope.storage_token,
+                scope.bot_ref.token,
+                scope.persona_ref.token,
+                scope.session_ref.token,
+            )
+        )
+
     def _bot_directory(self, bot_token: str) -> Path:
         return self.bots_directory / _require_token(bot_token, "bot_v1_")
 
@@ -798,6 +823,7 @@ class ScopeRepository:
             and current["persona_lifecycle_generation"]
             == active_persona.lifecycle_generation
         ):
+            self._ensure_scope_registration_locked(prepared)
             return prepared
         transition = "created" if current is None else "reactivated"
         if current is not None:
@@ -810,14 +836,7 @@ class ScopeRepository:
                 last_transition=transition,
             ),
         )
-        self._commit_catalog_generation_locked(
-            registration=(
-                prepared.storage_token,
-                prepared.bot_ref.token,
-                prepared.persona_ref.token,
-                prepared.session_ref.token,
-            )
-        )
+        self._ensure_scope_registration_locked(prepared)
         return prepared
 
     def create_scope(

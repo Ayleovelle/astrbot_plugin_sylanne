@@ -2156,10 +2156,16 @@ class EmotionalStatePlugin(Star):
             session = getattr(event, "session", None)
             canonical_umo = str(session) if session is not None else ""
             event_umo = getattr(event, "unified_msg_origin", None)
+            session_id = getattr(session, "session_id", None)
+            event_session_id = getattr(event, "session_id", None)
             if (
                 not canonical_umo
                 or type(event_umo) is not str
                 or event_umo != canonical_umo
+                or type(session_id) is not str
+                or not session_id
+                or type(event_session_id) is not str
+                or event_session_id != session_id
                 or resolver.resolve_transport(event) != transport
                 or resolver.catalog.binding_generation_for_bot_ref(
                     transport.bot_ref
@@ -2197,7 +2203,15 @@ class EmotionalStatePlugin(Star):
             locator = derive(event)
             if type(locator) is not str or not locator or locator == "default":
                 return None
-            base = str(getattr(event, "session_id", "") or event_umo)
+            session_id = getattr(session, "session_id", "")
+            event_session_id = getattr(event, "session_id", "")
+            if (
+                type(session_id) is not str
+                or type(event_session_id) is not str
+                or (event_session_id and event_session_id != session_id)
+            ):
+                return None
+            base = session_id if session_id else event_umo
             sender = str(
                 getattr(event, "sender_id", "")
                 or getattr(event, "user_id", "")
@@ -2317,8 +2331,16 @@ class EmotionalStatePlugin(Star):
         if not ScopeResolver.set_event_extra(event, marker, "running"):
             return False
         try:
+            if EmotionalStatePlugin._register_inbound_duplicate(self, event):
+                ScopeResolver.set_event_extra(event, marker, "duplicate")
+                stop_event = getattr(event, "stop_event", None)
+                if callable(stop_event):
+                    try:
+                        stop_event()
+                    except Exception:
+                        pass
+                return False
             session_key = self._session_ctx.session_key(event)
-            EmotionalStatePlugin._register_inbound_duplicate(self, event)
             now = time.time()
             # v2.5.0 slice-1b（design §8 BLOCKER B1，全矩阵扎实版修正）：主判据
             # 消费——供三写点（货架写/profile 软同步/出生播种，本 slice 货架写
@@ -2461,6 +2483,19 @@ class EmotionalStatePlugin(Star):
         )
         if legacy_ready is not True:
             return
+        return await EmotionalStatePlugin._on_scope_ready_llm_request(
+            self,
+            event,
+            request,
+        )
+
+    async def _on_scope_ready_llm_request(
+        self,
+        event: Any,
+        request: Any,
+    ) -> None:
+        """Run the request tail only after frozen-scope legacy setup succeeds."""
+
         # v2.5.0 入站消息级幂等闸：必须在任何早退（尤其 should_express 静默
         # return）之前拦截，否则 SILENT 轮的 message_id 不会入集，漏掉最可能
         # 触发悬挂重复的链路。命中即 stop_event + 早退，框架不再跑

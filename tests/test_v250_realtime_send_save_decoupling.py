@@ -128,6 +128,7 @@ class _Ev:
 
 class _ScopeSession:
     platform_id = "adapter"
+    session_id = "42"
 
     def __str__(self) -> str:
         return "adapter:FriendMessage:42"
@@ -139,7 +140,7 @@ class _ScopedEv(_Ev):
     def __init__(self, *, set_calls: list | None = None) -> None:
         super().__init__()
         self.unified_msg_origin = "adapter:FriendMessage:42"
-        self.session_id = self.unified_msg_origin
+        self.session_id = "42"
         self.session = _ScopeSession()
         self.message_obj = SimpleNamespace(message_id="msg-next")
         self._set_calls = set_calls
@@ -730,7 +731,7 @@ def test_new_inbound_message_advances_epoch_and_interrupts_active_delivery(
     turn = Turn()
     epochs = SessionMap()
     active_turns = SessionMap()
-    locator = "adapter:FriendMessage:42"
+    locator = "42"
     active_turns.set(locator, turn)
     store = SimpleNamespace(
         conversation_input_epoch=epochs,
@@ -786,7 +787,7 @@ def test_transport_safety_bridge_rejects_unproven_legacy_locator(
     active = Turn()
     epochs = SessionMap()
     active_turns = SessionMap()
-    active_turns.set("adapter:FriendMessage:42", active)
+    active_turns.set("42", active)
     shell = object.__new__(EmotionalStatePlugin)
     shell.config = {}
     shell._config = {}
@@ -805,6 +806,55 @@ def test_transport_safety_bridge_rejects_unproven_legacy_locator(
     assert epochs.values == {}
     assert event.get_extra("_syl_input_epoch") is None
     assert active.interrupted is False
+
+
+def test_transport_safety_bridge_rejects_event_session_id_tamper(tmp_path) -> None:
+    class SessionMap:
+        def __init__(self) -> None:
+            self.values: dict[str, object] = {}
+
+        def get(self, key: str, default: object = None) -> object:
+            return self.values.get(key, default)
+
+        def set(self, key: str, value: object) -> None:
+            self.values[key] = value
+
+    class Turn:
+        def __init__(self) -> None:
+            self.interrupted = False
+
+        def interrupt(self) -> None:
+            self.interrupted = True
+
+    active = Turn()
+    epochs = SessionMap()
+    active_turns = SessionMap()
+    active_turns.set("attacker-controlled", active)
+    calls: list[tuple[str, object]] = []
+    shell = object.__new__(EmotionalStatePlugin)
+    shell.config = _cfg(enabled=True, intercept=True)
+    shell._config = shell.config
+    shell._scope_resolver_v1 = _scope_resolver(tmp_path)
+    shell._store = SimpleNamespace(
+        conversation_input_epoch=epochs,
+        segmented_delivery_turns=active_turns,
+    )
+    shell._session_ctx = SimpleNamespace(
+        session_key=lambda _event: "attacker-controlled",
+    )
+    event = _ScopedEv(set_calls=calls)
+    event.session_id = "attacker-controlled"
+
+    asyncio.run(EmotionalStatePlugin.on_message(shell, event))
+
+    assert not any(key == "enable_streaming" for key, _value in calls)
+    assert epochs.values == {}
+    assert event.get_extra("_syl_input_epoch") is None
+    assert active.interrupted is False
+    assert [key for key, _value in calls] == [
+        "_sylanne_transport_scope_v1",
+        "_sylanne_transport_turn_v1",
+    ]
 
 
 def test_full_delivery_commits_exact_visible_bubbles_as_assistant_history(
