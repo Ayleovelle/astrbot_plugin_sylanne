@@ -453,10 +453,8 @@ class SessionCatalog:
         with self.repository.transaction():
             authority = self._load_bot_binding_locked(binding_token)
             if authority is None:
-                binding_generation = 0
-                stored_bot_token = None
-            else:
-                binding_generation, stored_bot_token = authority
+                raise ValueError("bot binding authority is missing")
+            binding_generation, stored_bot_token = authority
             expected_bot = self._identity_key.bot_ref(
                 binding,
                 binding_generation,
@@ -475,12 +473,6 @@ class SessionCatalog:
             ):
                 raise ValueError("bot binding does not match transport scope")
             self.repository._ensure_bot_locked(expected_bot)
-            if authority is None:
-                self._write_bot_binding_locked(
-                    binding_token,
-                    bot_token=expected_bot.token,
-                    generation=binding_generation,
-                )
             current = self._load_turn_locked(
                 transport_scope.bot_ref.token,
                 transport_scope.session_ref.token,

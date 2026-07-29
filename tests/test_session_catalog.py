@@ -164,6 +164,36 @@ def test_binding_authority_is_opaque_and_restart_stable(tmp_path: Path) -> None:
             assert "private-self-id" not in document
 
 
+def test_missing_binding_authority_rejects_without_any_scope_write(
+    tmp_path: Path,
+) -> None:
+    repository = ScopeRepository(tmp_path)
+    catalog = SessionCatalog(repository)
+    key = load_or_create_scope_identity_key(tmp_path / "identity.key")
+    bot = key.bot_ref(
+        BotBinding(
+            platform_id="private-platform-id",
+            self_id="private-self-id",
+        ),
+        generation=0,
+    )
+
+    with pytest.raises(ValueError, match="bot binding authority is missing"):
+        catalog.begin_turn(_transport(bot), _binding())
+
+    assert not (
+        repository.bots_directory / bot.token / "manifest.json"
+    ).exists()
+    assert not repository.transport_catalog_path(
+        bot.token,
+        "session_v1_S",
+    ).exists()
+    assert not repository.transport_delivery_binding_path(
+        bot.token,
+        "session_v1_S",
+    ).exists()
+
+
 def test_forged_bot_and_stale_binding_reject_without_turn_write(tmp_path: Path) -> None:
     repository = ScopeRepository(tmp_path)
     catalog = SessionCatalog(repository)
