@@ -8,6 +8,7 @@ license: AGPL-3.0-or-later
 repo: "https://github.com/Ayleovelle/astrbot_plugin_sylanne"
 support_platforms: []
 astrbot_version: ">=4.26,<5.0.0"
+tested_astrbot_version: "4.26.7"
 
 # Item 111: 插件市场元数据规范 v2
 compatibility_matrix:
