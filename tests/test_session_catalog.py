@@ -73,6 +73,19 @@ def _registered_bot(catalog: SessionCatalog, root: Path) -> BotRef:
     )
 
 
+def _current_proof(
+    *,
+    digest: str = "proof-v1",
+    generation: int = 0,
+    now_ms: int = 0,
+) -> dict[str, object]:
+    return {
+        "current_account_proof_digest": digest,
+        "current_account_proof_generation": generation,
+        "now_ms": now_ms,
+    }
+
+
 def test_transport_catalog_persists_monotonic_turn_and_fails_closed_after_resolving_restart(
     tmp_path: Path,
 ) -> None:
@@ -216,3 +229,80 @@ def test_forged_bot_and_stale_binding_reject_without_turn_write(tmp_path: Path) 
         bot.token,
         "session_v1_S",
     ).exists()
+
+
+def test_proactive_authorization_requires_live_current_proof(tmp_path: Path) -> None:
+    repository = ScopeRepository(tmp_path)
+    catalog = SessionCatalog(repository)
+    bot = _registered_bot(catalog, tmp_path)
+    scope = repository.create_scope(
+        _scope(bot=bot, persona_token="persona_v1_A"),
+        expected_absent=True,
+    )
+    frozen = catalog.freeze_persona(
+        catalog.begin_turn(_transport(bot), _binding()),
+        scope,
+    )
+
+    assert catalog.can_issue_proactive(frozen) is False
+    assert catalog.can_issue_proactive(frozen, **_current_proof()) is True
+    assert (
+        catalog.can_issue_proactive(
+            frozen,
+            **_current_proof(digest="changed-proof"),
+        )
+        is False
+    )
+    assert (
+        catalog.can_issue_proactive(
+            frozen,
+            **_current_proof(generation=1),
+        )
+        is False
+    )
+    assert (
+        catalog.can_issue_proactive(
+            frozen,
+            **_current_proof(now_ms=1),
+        )
+        is False
+    )
+
+
+def test_proactive_authorization_reloads_scope_and_persona_lifecycle(
+    tmp_path: Path,
+) -> None:
+    repository = ScopeRepository(tmp_path)
+    catalog = SessionCatalog(repository)
+    bot = _registered_bot(catalog, tmp_path)
+    scope_a = repository.create_scope(
+        _scope(bot=bot, persona_token="persona_v1_A"),
+        expected_absent=True,
+    )
+    frozen_a = catalog.freeze_persona(
+        catalog.begin_turn(_transport(bot), _binding()),
+        scope_a,
+    )
+    repository.invalidate_scope(
+        scope_a,
+        expected_scope_generation=scope_a.scope_generation,
+        reason="reset",
+    )
+
+    assert catalog.can_issue_proactive(frozen_a, **_current_proof()) is False
+
+    scope_b = repository.create_scope(
+        _scope(bot=bot, persona_token="persona_v1_B"),
+        expected_absent=True,
+    )
+    frozen_b = catalog.freeze_persona(
+        catalog.begin_turn(_transport(bot), _binding()),
+        scope_b,
+    )
+    repository.retire_persona_revision(
+        scope_b.persona_ref,
+        expected_lifecycle_generation=scope_b.persona_ref.lifecycle_generation,
+        reason="retired",
+    )
+
+    assert catalog.can_issue_proactive(frozen_b, **_current_proof()) is False

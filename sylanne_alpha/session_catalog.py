@@ -397,7 +397,10 @@ class SessionCatalog:
             error_label="delivery binding",
         )
 
-    def _validate_binding_locked(self, turn: TransportTurn) -> bool:
+    def _load_binding_locked(
+        self,
+        turn: TransportTurn,
+    ) -> ProtectedDeliveryBinding | None:
         path = self.repository.transport_delivery_binding_path(
             turn.bot_ref,
             turn.session_ref,
@@ -418,15 +421,52 @@ class SessionCatalog:
             if (
                 type(document) is not dict
                 or raw != _canonical_json_bytes(document)
-                or document.get("schema_version") != _DELIVERY_BINDING_SCHEMA
+                or set(document)
+                != {
+                    "schema_version",
+                    "platform_id",
+                    "self_id",
+                    "message_session",
+                    "target_address",
+                    "adapter_capability",
+                    "account_proof_digest",
+                    "account_proof_generation",
+                    "account_proof_expires_at_ms",
+                    "binding_generation",
+                }
             ):
-                return False
-            return hmac.compare_digest(
-                self._binding_digest(document),
-                turn.binding_digest,
+                return None
+            binding = ProtectedDeliveryBinding(
+                platform_id=document["platform_id"],
+                self_id=document["self_id"],
+                message_session=document["message_session"],
+                target_address=document["target_address"],
+                adapter_capability=document["adapter_capability"],
+                account_proof_digest=document["account_proof_digest"],
+                account_proof_generation=document[
+                    "account_proof_generation"
+                ],
+                account_proof_expires_at_ms=document[
+                    "account_proof_expires_at_ms"
+                ],
+                binding_generation=document["binding_generation"],
             )
-        except (OSError, UnicodeDecodeError, ValueError):
+            if (
+                binding._document() != document
+                or not hmac.compare_digest(
+                    self._binding_digest(document),
+                    turn.binding_digest,
+                )
+            ):
+                return None
+            return binding
+        except (KeyError, OSError, TypeError, UnicodeDecodeError, ValueError):
+            return None
+
+    def _validate_binding_locked(self, turn: TransportTurn) -> bool:
+        if self._load_binding_locked(turn) is None:
             return False
+        return True
 
     def begin_turn(
         self,
@@ -577,15 +617,90 @@ class SessionCatalog:
                 )
             return matches[0]
 
-    def can_issue_proactive(self, turn: TransportTurn) -> bool:
-        if type(turn) is not TransportTurn:
+    def can_issue_proactive(
+        self,
+        turn: TransportTurn,
+        *,
+        current_account_proof_digest: str | None = None,
+        current_account_proof_generation: int | None = None,
+        now_ms: int | None = None,
+    ) -> bool:
+        if (
+            type(turn) is not TransportTurn
+            or type(current_account_proof_digest) is not str
+            or not current_account_proof_digest
+            or type(current_account_proof_generation) is not int
+            or current_account_proof_generation < 0
+            or type(now_ms) is not int
+            or now_ms < 0
+        ):
             return False
         try:
-            current = self.current(turn.session_ref)
-            if current != turn or current.turn_state != "frozen":
-                return False
             with self.repository.transaction():
-                return self._validate_binding_locked(current)
+                current = self._load_turn_locked(
+                    turn.bot_ref,
+                    turn.session_ref,
+                )
+                if (
+                    current != turn
+                    or current is None
+                    or current.turn_state != "frozen"
+                    or current.active_scope_token is None
+                ):
+                    return False
+                active_scope = self.repository._resolve_scope_locked(
+                    current.active_scope_token
+                )
+                if (
+                    active_scope.bot_ref.token != current.bot_ref
+                    or active_scope.persona_ref.token
+                    != current.active_persona_ref
+                    or active_scope.session_ref.token != current.session_ref
+                    or active_scope.persona_ref.lifecycle_generation
+                    != current.persona_lifecycle_generation
+                    or active_scope.session_ref.generation
+                    != current.session_generation
+                    or active_scope.storage_token
+                    != current.active_scope_token
+                    or active_scope.scope_generation
+                    != current.scope_generation
+                ):
+                    return False
+                binding = self._load_binding_locked(current)
+                if (
+                    binding is None
+                    or not hmac.compare_digest(
+                        binding.account_proof_digest,
+                        current_account_proof_digest,
+                    )
+                    or binding.account_proof_generation
+                    != current_account_proof_generation
+                    or now_ms >= binding.account_proof_expires_at_ms
+                ):
+                    return False
+                binding_token = self._bot_binding_token(
+                    binding.platform_id,
+                    binding.self_id,
+                )
+                authority = self._load_bot_binding_locked(binding_token)
+                if authority is None:
+                    return False
+                binding_generation, stored_bot_token = authority
+                expected_bot = self._identity_key.bot_ref(
+                    BotBinding(
+                        platform_id=binding.platform_id,
+                        self_id=binding.self_id,
+                    ),
+                    binding_generation,
+                )
+                return (
+                    binding.binding_generation == binding_generation
+                    and expected_bot == active_scope.bot_ref
+                    and hmac.compare_digest(
+                        stored_bot_token,
+                        current.bot_ref,
+                    )
+                )
         except (KeyError, RepositoryCorruptionError, StaleScopeWrite, ValueError):
             return False
 
