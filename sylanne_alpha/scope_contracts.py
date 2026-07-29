@@ -185,19 +185,41 @@ class RelationScope:
 
 @dataclass(frozen=True, slots=True)
 class ResolvedTransportScope:
-    bot_ref: BotRef
-    session_ref: SessionRef
-    identity_quality: str
+    """Transport identity result, with an explicit fail-closed disabled state."""
+
+    bot_ref: BotRef | None
+    session_ref: SessionRef | None
+    identity_quality: str | None
     private_scope_enabled: bool
     disabled_reason: str | None
 
     def __post_init__(self) -> None:
+        _require_bool(self.private_scope_enabled, "private_scope_enabled")
+        if self.private_scope_enabled is False:
+            if (
+                self.bot_ref is not None
+                or self.session_ref is not None
+                or self.identity_quality is not None
+            ):
+                raise ValueError("invalid disabled transport scope state")
+            _require_text(self.disabled_reason, "disabled_reason")
+            return
         bot_ref = _require_bot_ref(self.bot_ref)
         session_ref = _require_session_ref(self.session_ref)
         _require_session_belongs(bot_ref, session_ref)
         _require_text(self.identity_quality, "identity_quality")
-        _require_bool(self.private_scope_enabled, "private_scope_enabled")
-        _require_optional_text(self.disabled_reason, "disabled_reason")
+        if self.disabled_reason is not None:
+            raise ValueError("invalid successful transport scope state")
+
+    @classmethod
+    def disabled(cls, reason: str) -> ResolvedTransportScope:
+        return cls(
+            bot_ref=None,
+            session_ref=None,
+            identity_quality=None,
+            private_scope_enabled=False,
+            disabled_reason=reason,
+        )
 
 
 @dataclass(frozen=True, slots=True)

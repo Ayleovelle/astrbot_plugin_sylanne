@@ -73,7 +73,8 @@ class ProtectedDeliveryBinding:
 
     def __post_init__(self) -> None:
         _require_text(self.platform_id, "platform_id")
-        _require_text(self.self_id, "self_id")
+        if type(self.self_id) is not str:
+            raise ValueError("self_id must be an exact str")
         _require_text(self.message_session, "message_session")
         _require_text(self.target_address, "target_address")
         _require_text(self.adapter_capability, "adapter_capability")
@@ -289,6 +290,48 @@ class SessionCatalog:
             self.repository._ensure_bot_locked(expected_bot)
             return generation
 
+    def _binding_generation_for_bot_ref_locked(self, bot_ref: object) -> int | None:
+        """Return one persisted binding authority for a proof-derived BotRef.
+
+        A proof never creates authority: a missing, malformed, or ambiguous
+        manifest is indistinguishable from an unverified account to callers.
+        """
+
+        from .scope_contracts import BotRef
+
+        if type(bot_ref) is not BotRef:
+            return None
+        directory = self.repository.bot_bindings_directory
+        if not directory.is_dir():
+            return None
+        matches: list[int] = []
+        try:
+            entries = tuple(directory.iterdir())
+        except OSError:
+            return None
+        for entry in entries:
+            if not entry.is_dir() or not entry.name.startswith("binding_v1_"):
+                continue
+            try:
+                authority = self._load_bot_binding_locked(entry.name)
+            except (RepositoryCorruptionError, ValueError, OSError):
+                return None
+            if authority is None:
+                continue
+            generation, stored_bot_token = authority
+            if (
+                generation == bot_ref.generation
+                and hmac.compare_digest(stored_bot_token, bot_ref.token)
+            ):
+                matches.append(generation)
+        return matches[0] if len(matches) == 1 else None
+
+    def binding_generation_for_bot_ref(self, bot_ref: object) -> int | None:
+        """Find only an already-persisted unique authority for ``bot_ref``."""
+
+        with self.repository.transaction():
+            return self._binding_generation_for_bot_ref_locked(bot_ref)
+
     @staticmethod
     def _turn_document(turn: TransportTurn) -> dict[str, object]:
         return {
@@ -482,23 +525,34 @@ class SessionCatalog:
             or transport_scope.disabled_reason is not None
         ):
             raise ValueError("transport scope is not enabled")
-        binding = BotBinding(
-            platform_id=delivery_binding.platform_id,
-            self_id=delivery_binding.self_id,
-        )
-        binding_token = self._bot_binding_token(
-            binding.platform_id,
-            binding.self_id,
-        )
         with self.repository.transaction():
-            authority = self._load_bot_binding_locked(binding_token)
-            if authority is None:
-                raise ValueError("bot binding authority is missing")
-            binding_generation, stored_bot_token = authority
-            expected_bot = self._identity_key.bot_ref(
-                binding,
-                binding_generation,
-            )
+            if delivery_binding.self_id:
+                binding = BotBinding(
+                    platform_id=delivery_binding.platform_id,
+                    self_id=delivery_binding.self_id,
+                )
+                binding_token = self._bot_binding_token(
+                    binding.platform_id,
+                    binding.self_id,
+                )
+                authority = self._load_bot_binding_locked(binding_token)
+                if authority is None:
+                    raise ValueError("bot binding authority is missing")
+                binding_generation, stored_bot_token = authority
+                expected_bot = self._identity_key.bot_ref(
+                    binding,
+                    binding_generation,
+                )
+            else:
+                if transport_scope.bot_ref is None:
+                    raise ValueError("bot binding authority is missing")
+                binding_generation = self._binding_generation_for_bot_ref_locked(
+                    transport_scope.bot_ref
+                )
+                if binding_generation is None:
+                    raise ValueError("bot binding authority is missing or ambiguous")
+                stored_bot_token = transport_scope.bot_ref.token
+                expected_bot = transport_scope.bot_ref
             if delivery_binding.binding_generation != binding_generation:
                 raise ValueError("binding generation is stale")
             if (

@@ -218,6 +218,7 @@ from sylanne_alpha.memory_facade import MemoryFacade  # noqa: E402
 from sylanne_alpha.realtime_dispatch import RealtimeDispatch  # noqa: E402
 from sylanne_alpha.background_queue import BackgroundPostQueue  # noqa: E402
 from sylanne_alpha.webui_routes import WebUIRoutes  # noqa: E402
+from sylanne_alpha.scope_identity import ScopeResolver  # noqa: E402
 
 # 加载 WebUI dashboard HTML（从 UI/index.html）
 _webui_dashboard_path = Path(_PLUGIN_DIR) / "UI" / "index.html"
@@ -1329,6 +1330,9 @@ class EmotionalStatePlugin(Star):
         # initialize() 里拿。默认关（源码/stable 构建 V3_SHADOW_ENABLED=False），
         # 只有 grey 打包生成的 build_flags 才翻开；不是用户可选项，故不进 _conf_schema。
         self._v3_shadow = _V3ShadowFacade()
+        # Scope-v1 is opened lazily at the first real AstrBot adapter event.  Tests
+        # with a deliberately absent Context retain the pre-scope compatibility path.
+        self._scope_resolver_v1: ScopeResolver | None = None
         self._register_web_apis(context)
 
         # AstrBot ConversationManager / PersonaManager 集成
@@ -2039,6 +2043,51 @@ class EmotionalStatePlugin(Star):
                 exc_info=True,
             )
 
+    def _scope_resolver_instance(self) -> ScopeResolver | None:
+        resolver = getattr(self, "_scope_resolver_v1", None)
+        if resolver is not None:
+            return resolver
+        context = getattr(self, "context", None)
+        if (
+            context is None
+            or not hasattr(context, "get_config")
+            or not hasattr(context, "persona_manager")
+        ):
+            return None
+        root = _sylanne_infra.resolve_scope_v1_root()
+        resolver = ScopeResolver.for_context(context, root)
+        self._scope_resolver_v1 = resolver
+        return resolver
+
+    def _begin_scope_transport(self, event: Any) -> bool | None:
+        """Persist one resolving transport turn before any legacy private state."""
+
+        resolver = EmotionalStatePlugin._scope_resolver_instance(self)
+        if resolver is None:
+            return None
+        transport = resolver.resolve_transport(event)
+        if transport.private_scope_enabled is not True:
+            resolver.set_event_extra(event, "_sylanne_transport_scope_v1", transport)
+            return False
+        binding = resolver.delivery_binding(event, transport)
+        if binding is None:
+            return False
+        try:
+            turn = resolver.catalog.begin_turn(transport, binding)
+        except Exception:
+            return False
+        if not resolver.set_event_extra(event, "_sylanne_transport_scope_v1", transport):
+            return False
+        if not resolver.set_event_extra(event, "_sylanne_transport_turn_v1", turn):
+            return False
+        return True
+
+    async def _freeze_scope_persona(self, event: Any, request: Any) -> Any | None:
+        resolver = EmotionalStatePlugin._scope_resolver_instance(self)
+        if resolver is None:
+            return None
+        return await resolver.resolve(event, request)
+
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: Any, *args: Any, **kwargs: Any):
         """监听所有消息事件，更新 proactive scheduler 时间戳和节奏学习器。
@@ -2049,6 +2098,9 @@ class EmotionalStatePlugin(Star):
         TypeError "takes 2 positional but N given"，故一律用 *args/**kwargs 兜住，
         本插件只用 event。"""
         try:
+            transport_ready = EmotionalStatePlugin._begin_scope_transport(self, event)
+            if transport_ready is False:
+                return
             # M4a（realtime 完整重做 Model-D）：即时聊天接管开启时强制关闭本轮
             # 流式，让响应侧走非流式档（on_decorating_result 才够得着、能抑制
             # 框架重发）。此处（filter.event_message_type(ALL)，由 ProcessStage
@@ -2199,6 +2251,14 @@ class EmotionalStatePlugin(Star):
             return False
 
     async def _on_llm_request_inner(self, event: Any, request: Any) -> None:
+        resolved_scope = await EmotionalStatePlugin._freeze_scope_persona(
+            self, event, request
+        )
+        if (
+            resolved_scope is not None
+            and getattr(resolved_scope, "private_scope_enabled", False) is not True
+        ):
+            return
         # v2.5.0 入站消息级幂等闸：必须在任何早退（尤其 should_express 静默
         # return）之前拦截，否则 SILENT 轮的 message_id 不会入集，漏掉最可能
         # 触发悬挂重复的链路。命中即 stop_event + 早退，框架不再跑

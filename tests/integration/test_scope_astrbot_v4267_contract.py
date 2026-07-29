@@ -10,7 +10,7 @@ import pytest
 
 
 astrbot = pytest.importorskip("astrbot")
-if astrbot.__version__ != "4.26.7":
+if getattr(astrbot, "__version__", None) != "4.26.7":
     pytest.skip(
         "AstrBot 4.26.7 contract probe requires the pinned runtime",
         allow_module_level=True,

@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from sylanne_alpha.host import SylanneAlphaHost
+    from sylanne_alpha.scope_identity import ScopeResolver
     from sylanne_alpha.session_state_store import SessionStateStore
     from sylanne_alpha.memory_system import MemorySystem
 
@@ -65,6 +66,7 @@ class PluginSessionAccess(Protocol):
     """
 
     _store: SessionStateStore
+    _scope_resolver_v1: ScopeResolver | None
     _background_tasks: list[asyncio.Task]
     _computation_logs: collections.deque
 

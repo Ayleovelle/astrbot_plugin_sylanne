@@ -7,11 +7,22 @@ import hashlib
 import hmac
 import json
 import os
+import tempfile
+import time
 from dataclasses import dataclass, field
-from typing import Protocol
+from pathlib import Path
+from typing import Any, Protocol
 
 from .infra import load_or_create_owner_only_secret
-from .scope_contracts import BotRef, PersonaRevisionRef, RelationRef, SessionRef
+from .scope_contracts import (
+    BotRef,
+    PersonaRevisionRef,
+    RelationRef,
+    ResolvedScope,
+    ResolvedTransportScope,
+    SessionRef,
+    SessionScope,
+)
 
 _BOT_DOMAIN = b"sylanne.scope.bot.v1\x00"
 _PERSONA_DOMAIN = b"sylanne.scope.persona.v1\x00"
@@ -349,6 +360,492 @@ def resolve_proven_single_account(
     return proof.bot_ref
 
 
+class ScopeResolver:
+    """Resolve AstrBot's applied Persona and freeze it beneath one transport turn."""
+
+    def __init__(
+        self,
+        context: Any,
+        *,
+        repository: Any,
+        catalog: Any,
+        identity: ScopeIdentityKey,
+        account_proofs: AdapterAccountProofProvider | None = None,
+        clock_ms: Any = None,
+        allow_test_synthetic_turn: bool = False,
+    ) -> None:
+        self._context = context
+        self._repository = repository
+        self._catalog = catalog
+        self._identity = identity
+        self._account_proofs = account_proofs or NoAdapterAccountProofProvider()
+        self._clock_ms = clock_ms or (lambda: time.time_ns() // 1_000_000)
+        self._allow_test_synthetic_turn = allow_test_synthetic_turn
+
+    @classmethod
+    def for_context(
+        cls,
+        context: Any,
+        root: str | os.PathLike[str],
+        *,
+        account_proofs: AdapterAccountProofProvider | None = None,
+    ) -> ScopeResolver:
+        """Create the durable production resolver for one plugin instance."""
+
+        from .scope_repository import ScopeRepository
+        from .session_catalog import SessionCatalog
+
+        repository = ScopeRepository(root)
+        identity = load_or_create_scope_identity_key(repository.root / "identity.key")
+        return cls(
+            context,
+            repository=repository,
+            catalog=SessionCatalog(repository, identity_key=identity),
+            identity=identity,
+            account_proofs=account_proofs,
+        )
+
+    @classmethod
+    def for_test(
+        cls,
+        context: Any,
+        *,
+        account_proofs: AdapterAccountProofProvider | None = None,
+        root: str | os.PathLike[str] | None = None,
+    ) -> ScopeResolver:
+        """Construct an isolated resolver; production code never uses this helper."""
+
+        test_root = Path(root) if root is not None else Path(
+            tempfile.mkdtemp(prefix="sylanne-scope-")
+        )
+        resolver = cls.for_context(context, test_root, account_proofs=account_proofs)
+        resolver._allow_test_synthetic_turn = True
+        return resolver
+
+    @property
+    def catalog(self) -> Any:
+        return self._catalog
+
+    @staticmethod
+    def _event_extra(event: Any, key: str, default: Any = None) -> Any:
+        getter = getattr(event, "get_extra", None)
+        if not callable(getter):
+            return default
+        try:
+            return getter(key, default)
+        except TypeError:
+            try:
+                value = getter(key)
+            except Exception:
+                return default
+            return default if value is None else value
+        except Exception:
+            return default
+
+    @staticmethod
+    def set_event_extra(event: Any, key: str, value: Any) -> bool:
+        setter = getattr(event, "set_extra", None)
+        if not callable(setter):
+            return False
+        try:
+            setter(key, value)
+        except Exception:
+            return False
+        return True
+
+    def resolve_transport(self, event: Any) -> ResolvedTransportScope:
+        """Use only the adapter event's current canonical session and identity."""
+
+        try:
+            platform_id = str(event.get_platform_id() or "")
+            session = getattr(event, "session", None)
+            canonical_umo = str(session) if session is not None else ""
+            session_platform_id = str(getattr(session, "platform_id", "") or "")
+        except Exception:
+            return ResolvedTransportScope.disabled("transport_session_unverified")
+        if not platform_id or not canonical_umo:
+            return ResolvedTransportScope.disabled("transport_session_unverified")
+        if session_platform_id != platform_id:
+            return ResolvedTransportScope.disabled("umo_platform_conflict")
+        try:
+            self_id = str(event.get_self_id() or "")
+        except Exception:
+            self_id = ""
+        try:
+            if self_id:
+                generation = self._catalog.binding_generation(platform_id, self_id)
+                bot_ref = self._identity.bot_ref(
+                    BotBinding(platform_id=platform_id, self_id=self_id), generation
+                )
+                identity_quality = "event_self_id"
+            else:
+                current_proof = self._account_proofs.current(platform_id)
+                if current_proof is None:
+                    return ResolvedTransportScope.disabled("bot_identity_unverified")
+                bot_ref = resolve_proven_single_account(
+                    current_proof.proof,
+                    platform_id=platform_id,
+                    current_account_set_digest=current_proof.current_account_set_digest,
+                    current_proof_generation=current_proof.current_proof_generation,
+                    now_ms=int(self._clock_ms()),
+                )
+                if (
+                    bot_ref is None
+                    or self._catalog.binding_generation_for_bot_ref(bot_ref) is None
+                ):
+                    return ResolvedTransportScope.disabled("bot_identity_unverified")
+                identity_quality = "single_account_proven"
+            session_ref = self._identity.session_ref(
+                bot_ref, platform_id, canonical_umo, generation=0
+            )
+            return ResolvedTransportScope(
+                bot_ref=bot_ref,
+                session_ref=session_ref,
+                identity_quality=identity_quality,
+                private_scope_enabled=True,
+                disabled_reason=None,
+            )
+        except Exception:
+            return ResolvedTransportScope.disabled("bot_identity_unverified")
+
+    def delivery_binding(self, event: Any, transport: ResolvedTransportScope) -> Any | None:
+        """Capture one protected binding from this exact live adapter event."""
+
+        from .session_catalog import ProtectedDeliveryBinding
+
+        if (
+            type(transport) is not ResolvedTransportScope
+            or transport.private_scope_enabled is not True
+            or transport.bot_ref is None
+            or transport.session_ref is None
+        ):
+            return None
+        try:
+            platform_id = str(event.get_platform_id() or "")
+            self_id = str(event.get_self_id() or "")
+            session = getattr(event, "session", None)
+            canonical_umo = str(session) if session is not None else ""
+            if (
+                not platform_id
+                or not canonical_umo
+                or str(getattr(session, "platform_id", "") or "") != platform_id
+                or self._identity.session_ref(
+                    transport.bot_ref, platform_id, canonical_umo, generation=0
+                )
+                != transport.session_ref
+            ):
+                return None
+            proof_digest = "proof-unavailable"
+            proof_generation = 0
+            proof_expires_at_ms = 0
+            if not self_id:
+                current = self._account_proofs.current(platform_id)
+                if current is None:
+                    return None
+                proven = resolve_proven_single_account(
+                    current.proof,
+                    platform_id=platform_id,
+                    current_account_set_digest=current.current_account_set_digest,
+                    current_proof_generation=current.current_proof_generation,
+                    now_ms=int(self._clock_ms()),
+                )
+                if proven != transport.bot_ref:
+                    return None
+                proof_digest = current.current_account_set_digest
+                proof_generation = current.current_proof_generation
+                proof_expires_at_ms = current.proof.expires_at_ms
+            else:
+                current = self._account_proofs.current(platform_id)
+                if current is not None:
+                    proof_digest = current.current_account_set_digest
+                    proof_generation = current.current_proof_generation
+                    proof_expires_at_ms = current.proof.expires_at_ms
+            return ProtectedDeliveryBinding(
+                platform_id=platform_id,
+                self_id=self_id,
+                message_session=canonical_umo,
+                target_address=canonical_umo,
+                adapter_capability="reactive_only",
+                account_proof_digest=proof_digest,
+                account_proof_generation=proof_generation,
+                account_proof_expires_at_ms=proof_expires_at_ms,
+                binding_generation=transport.bot_ref.generation,
+            )
+        except Exception:
+            return None
+
+    @staticmethod
+    def _persona_source(
+        selected_id: Any,
+        personality: Any,
+        *,
+        resolution_source: str,
+    ) -> PersonaSource | None:
+        if (
+            type(selected_id) is not str
+            or selected_id in {"[%None]", "_chatui_default_"}
+            or personality is None
+            or type(personality) is not dict
+        ):
+            return None
+        try:
+            def as_tuple(value: Any, *, optional: bool) -> tuple[str, ...] | None:
+                if value is None and optional:
+                    return None
+                if type(value) not in (list, tuple):
+                    raise ValueError
+                result = tuple(value)
+                if any(type(item) is not str for item in result):
+                    raise ValueError
+                return result
+
+            return PersonaSource(
+                persona_id=selected_id,
+                prompt=personality["prompt"],
+                begin_dialogs=as_tuple(personality.get("begin_dialogs", []), optional=False) or (),
+                tools=as_tuple(personality.get("tools"), optional=True),
+                skills=as_tuple(personality.get("skills"), optional=True),
+                resolution_source=resolution_source,
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _resolution_source(request: Any, forced_id: Any) -> str:
+        if forced_id is not None:
+            return "forced"
+        conversation = getattr(request, "conversation", None)
+        if getattr(conversation, "persona_id", None) is not None:
+            return "conversation"
+        return "default"
+
+    def _scope_for(
+        self,
+        transport: ResolvedTransportScope,
+        source: PersonaSource,
+        *,
+        platform_id: str,
+        canonical_umo: str,
+    ) -> SessionScope:
+        assert transport.bot_ref is not None
+        assert transport.session_ref is not None
+        candidate = self._identity.persona_revision(
+            transport.bot_ref, source, lifecycle_generation=0
+        )
+        persona_ref = self._repository.activate_persona_revision(candidate)
+        session_ref = self._identity.session_ref(
+            transport.bot_ref, platform_id, canonical_umo, generation=0
+        )
+        candidate_scope = SessionScope(
+            bot_ref=transport.bot_ref,
+            persona_ref=persona_ref,
+            session_ref=session_ref,
+            storage_token=self._identity.scope_token(
+                transport.bot_ref, persona_ref, session_ref
+            ),
+            scope_generation=0,
+        )
+        return self._repository.create_scope(candidate_scope)
+
+    def _test_turn(self, event: Any, transport: ResolvedTransportScope) -> Any | None:
+        if not self._allow_test_synthetic_turn or transport.bot_ref is None:
+            return None
+        from .session_catalog import ProtectedDeliveryBinding
+
+        session = getattr(event, "session", None)
+        platform_id = str(event.get_platform_id() or "")
+        self_id = str(event.get_self_id() or "")
+        try:
+            return self._catalog.begin_turn(
+                transport,
+                ProtectedDeliveryBinding(
+                    platform_id=platform_id,
+                    self_id=self_id,
+                    message_session=str(session),
+                    target_address="test-reactive-target",
+                    adapter_capability="reactive_only",
+                    account_proof_digest="test-unverified-proof",
+                    account_proof_generation=0,
+                    account_proof_expires_at_ms=0,
+                    binding_generation=transport.bot_ref.generation,
+                ),
+            )
+        except Exception:
+            return None
+
+    async def resolve(self, event: Any, request: Any) -> ResolvedScope:
+        """Freeze the exact Persona AstrBot selected for this request once."""
+
+        now_ms = int(self._clock_ms())
+        conversation = getattr(request, "conversation", None)
+        if conversation is None:
+            return ResolvedScope.disabled(
+                "persona_application_unverified", resolved_at_ms=now_ms
+            )
+        transport = self._event_extra(event, "_sylanne_transport_scope_v1")
+        turn = self._event_extra(event, "_sylanne_transport_turn_v1")
+        if type(transport) is not ResolvedTransportScope:
+            transport = self.resolve_transport(event) if self._allow_test_synthetic_turn else None
+        if (
+            type(transport) is not ResolvedTransportScope
+            or transport.private_scope_enabled is not True
+            or transport.bot_ref is None
+            or transport.session_ref is None
+        ):
+            return ResolvedScope.disabled(
+                "transport_session_unverified", resolved_at_ms=now_ms
+            )
+        if turn is None:
+            turn = self._test_turn(event, transport)
+        if turn is None:
+            return ResolvedScope.disabled("transport_turn_unverified", resolved_at_ms=now_ms)
+        try:
+            cfg = self._context.get_config(umo=event.unified_msg_origin)
+            selected_id, personality, forced_id, _is_webchat_special = (
+                await self._context.persona_manager.resolve_selected_persona(
+                    umo=event.unified_msg_origin,
+                    conversation_persona_id=(
+                        request.conversation.persona_id if request.conversation else None
+                    ),
+                    platform_name=event.get_platform_name(),
+                    provider_settings=cfg.get("provider_settings", {}),
+                )
+            )
+        except Exception:
+            return ResolvedScope.disabled("persona_unavailable", resolved_at_ms=now_ms)
+        if selected_id is None or personality is None:
+            return ResolvedScope.disabled("persona_unavailable", resolved_at_ms=now_ms)
+        if type(selected_id) is str and selected_id.startswith(_MANAGED_EMBODIMENT_PREFIX):
+            return ResolvedScope.disabled(
+                "managed_persona_forbidden", resolved_at_ms=now_ms
+            )
+        source = self._persona_source(
+            selected_id,
+            personality,
+            resolution_source=self._resolution_source(request, forced_id),
+        )
+        if source is None:
+            return ResolvedScope.disabled("persona_unavailable", resolved_at_ms=now_ms)
+        try:
+            session = getattr(event, "session", None)
+            platform_id = str(event.get_platform_id() or "")
+            canonical_umo = str(session) if session is not None else ""
+            scope = self._scope_for(
+                transport,
+                source,
+                platform_id=platform_id,
+                canonical_umo=canonical_umo,
+            )
+            frozen_turn = self._catalog.freeze_persona(turn, scope)
+            resolved = ResolvedScope(
+                scope=scope,
+                persona_source=source,
+                identity_quality=transport.identity_quality,
+                resolution_source=source.resolution_source,
+                resolved_at_ms=now_ms,
+                private_scope_enabled=True,
+                disabled_reason=None,
+                turn_generation=frozen_turn.turn_generation,
+            )
+        except Exception:
+            return ResolvedScope.disabled("scope_resolution_unverified", resolved_at_ms=now_ms)
+        if not self.set_event_extra(event, "_sylanne_resolved_scope_v1", resolved):
+            return ResolvedScope.disabled("scope_resolution_unverified", resolved_at_ms=now_ms)
+        return resolved
+
+    async def resolve_test_values(
+        self,
+        *,
+        platform_id: str,
+        self_id: str,
+        umo: str,
+        persona_id: str,
+        proof: AdapterAccountProof | None = None,
+        current_account_set_digest: str = "",
+        current_proof_generation: int = 0,
+        now_ms: int | None = None,
+    ) -> ResolvedScope:
+        """Small test seam for transport/persona rejection cases."""
+
+        class _Session:
+            def __init__(self, platform: str, value: str) -> None:
+                self.platform_id = platform
+                self._value = value
+
+            def __str__(self) -> str:
+                return self._value
+
+        if proof is not None:
+            class _Proofs:
+                def current(self, _platform_id: str) -> CurrentAdapterAccountProof:
+                    return CurrentAdapterAccountProof(
+                        proof=proof,
+                        current_account_set_digest=current_account_set_digest,
+                        current_proof_generation=current_proof_generation,
+                    )
+
+            previous = self._account_proofs
+            self._account_proofs = _Proofs()
+        else:
+            previous = None
+        previous_clock = self._clock_ms
+        if now_ms is not None:
+            self._clock_ms = lambda: now_ms
+        try:
+            event = type("ScopeEvent", (), {})()
+            event.session = _Session(umo.split(":", 1)[0] if umo else platform_id, umo)
+            event.get_platform_id = lambda: platform_id
+            event.get_self_id = lambda: self_id
+            transport = self.resolve_transport(event)
+        finally:
+            if previous is not None:
+                self._account_proofs = previous
+            self._clock_ms = previous_clock
+        resolved_at_ms = int(self._clock_ms()) if now_ms is None else now_ms
+        if transport.private_scope_enabled is not True:
+            return ResolvedScope.disabled(
+                transport.disabled_reason or "transport_session_unverified",
+                resolved_at_ms=resolved_at_ms,
+            )
+        if persona_id.startswith(_MANAGED_EMBODIMENT_PREFIX):
+            return ResolvedScope.disabled(
+                "managed_persona_forbidden", resolved_at_ms=resolved_at_ms
+            )
+        try:
+            source = PersonaSource(
+                persona_id=persona_id,
+                prompt="test persona",
+                begin_dialogs=(),
+                tools=None,
+                skills=None,
+                resolution_source="default",
+            )
+            turn = self._test_turn(event, transport)
+            if turn is None:
+                raise ValueError("transport turn unavailable")
+            scope = self._scope_for(
+                transport,
+                source,
+                platform_id=platform_id,
+                canonical_umo=umo,
+            )
+            frozen = self._catalog.freeze_persona(turn, scope)
+            return ResolvedScope(
+                scope=scope,
+                persona_source=source,
+                identity_quality=transport.identity_quality,
+                resolution_source=source.resolution_source,
+                resolved_at_ms=resolved_at_ms,
+                private_scope_enabled=True,
+                disabled_reason=None,
+                turn_generation=frozen.turn_generation,
+            )
+        except Exception:
+            return ResolvedScope.disabled(
+                "scope_resolution_unverified", resolved_at_ms=resolved_at_ms
+            )
+
+
 __all__ = [
     "AdapterAccountProof",
     "AdapterAccountProofProvider",
@@ -356,6 +853,7 @@ __all__ = [
     "CurrentAdapterAccountProof",
     "NoAdapterAccountProofProvider",
     "PersonaSource",
+    "ScopeResolver",
     "ScopeIdentityKey",
     "load_or_create_scope_identity_key",
     "resolve_proven_single_account",

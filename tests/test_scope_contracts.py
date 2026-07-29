@@ -118,7 +118,10 @@ def test_scope_contracts_validate_parentage_tokens_and_generations() -> None:
             private_scope_enabled=True,
             disabled_reason=None,
         )
-    assert get_type_hints(ResolvedTransportScope)["identity_quality"] is str
+    assert get_type_hints(ResolvedTransportScope)["identity_quality"] == str | None
+    disabled = ResolvedTransportScope.disabled("transport_session_unverified")
+    assert disabled.bot_ref is None
+    assert disabled.session_ref is None
 
     with pytest.raises(ValueError, match="^invalid bot_v1_ token$"):
         BotRef(token="bot_v2_A", generation=0)
