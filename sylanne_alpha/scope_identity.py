@@ -474,7 +474,9 @@ class ScopeResolver:
             self_id = ""
         try:
             if self_id:
-                generation = self._catalog.binding_generation(platform_id, self_id)
+                generation = self._catalog.binding_generation_candidate(
+                    platform_id, self_id
+                )
                 bot_ref = self._identity.bot_ref(
                     BotBinding(platform_id=platform_id, self_id=self_id), generation
                 )
@@ -633,20 +635,18 @@ class ScopeResolver:
         candidate = self._identity.persona_revision(
             transport.bot_ref, source, lifecycle_generation=0
         )
-        persona_ref = self._repository.activate_persona_revision(candidate)
         session_ref = self._identity.session_ref(
             transport.bot_ref, platform_id, canonical_umo, generation=0
         )
-        candidate_scope = SessionScope(
+        return SessionScope(
             bot_ref=transport.bot_ref,
-            persona_ref=persona_ref,
+            persona_ref=candidate,
             session_ref=session_ref,
             storage_token=self._identity.scope_token(
-                transport.bot_ref, persona_ref, session_ref
+                transport.bot_ref, candidate, session_ref
             ),
             scope_generation=0,
         )
-        return self._repository.create_scope(candidate_scope)
 
     def _test_turn(self, event: Any, transport: ResolvedTransportScope) -> Any | None:
         if not self._allow_test_synthetic_turn or transport.bot_ref is None:
@@ -670,14 +670,103 @@ class ScopeResolver:
                     account_proof_expires_at_ms=0,
                     binding_generation=transport.bot_ref.generation,
                 ),
+                publish=lambda _turn: True,
             )
         except Exception:
             return None
+
+    def _matches_published_scope(self, event: Any, resolved: ResolvedScope) -> bool:
+        if (
+            type(resolved) is not ResolvedScope
+            or resolved.private_scope_enabled is not True
+            or resolved.scope is None
+            or resolved.persona_source is None
+            or resolved.turn_generation is None
+        ):
+            return False
+        transport = self._event_extra(event, "_sylanne_transport_scope_v1")
+        turn = self._event_extra(event, "_sylanne_transport_turn_v1")
+        if (
+            type(transport) is not ResolvedTransportScope
+            or transport.private_scope_enabled is not True
+            or transport.bot_ref is None
+            or transport.session_ref is None
+        ):
+            return False
+        try:
+            session = getattr(event, "session", None)
+            canonical_umo = str(session) if session is not None else ""
+            event_umo = getattr(event, "unified_msg_origin", None)
+            platform_id = str(event.get_platform_id() or "")
+            if (
+                not canonical_umo
+                or type(event_umo) is not str
+                or event_umo != canonical_umo
+                or str(getattr(session, "platform_id", "") or "") != platform_id
+                or self.resolve_transport(event) != transport
+                or self._catalog.binding_generation_for_bot_ref(transport.bot_ref)
+                != transport.bot_ref.generation
+            ):
+                return False
+            scope = resolved.scope
+            expected_persona = self._identity.persona_revision(
+                transport.bot_ref,
+                resolved.persona_source,
+                lifecycle_generation=scope.persona_ref.lifecycle_generation,
+            )
+            expected_session = self._identity.session_ref(
+                transport.bot_ref,
+                platform_id,
+                canonical_umo,
+                generation=scope.session_ref.generation,
+            )
+            if (
+                resolved.identity_quality != transport.identity_quality
+                or resolved.resolution_source
+                != resolved.persona_source.resolution_source
+                or scope.bot_ref != transport.bot_ref
+                or scope.persona_ref != expected_persona
+                or scope.session_ref != transport.session_ref
+                or scope.session_ref != expected_session
+                or scope.storage_token
+                != self._identity.scope_token(
+                    scope.bot_ref,
+                    scope.persona_ref,
+                    scope.session_ref,
+                )
+            ):
+                return False
+            return self._catalog.matches_frozen_scope(
+                transport,
+                turn,
+                scope,
+                turn_generation=resolved.turn_generation,
+            )
+        except Exception:
+            return False
 
     async def resolve(self, event: Any, request: Any) -> ResolvedScope:
         """Freeze the exact Persona AstrBot selected for this request once."""
 
         now_ms = int(self._clock_ms())
+        missing = object()
+        existing = self._event_extra(
+            event,
+            "_sylanne_resolved_scope_v1",
+            missing,
+        )
+        if existing is not missing:
+            if type(existing) is ResolvedScope:
+                if existing.private_scope_enabled is False:
+                    return existing
+                if self._matches_published_scope(event, existing):
+                    return existing
+            disabled = ResolvedScope.disabled(
+                "resolved_scope_mismatch",
+                resolved_at_ms=now_ms,
+            )
+            self.set_event_extra(event, "_sylanne_resolved_scope_v1", disabled)
+            return disabled
         conversation = getattr(request, "conversation", None)
         if conversation is None:
             return ResolvedScope.disabled(
@@ -754,29 +843,74 @@ class ScopeResolver:
         )
         if source is None:
             return ResolvedScope.disabled("persona_unavailable", resolved_at_ms=now_ms)
+        published: list[ResolvedScope] = []
         try:
-            scope = self._scope_for(
+            candidate_scope = self._scope_for(
                 transport,
                 source,
                 platform_id=platform_id,
                 canonical_umo=canonical_umo,
             )
-            frozen_turn = self._catalog.freeze_persona(turn, scope)
-            resolved = ResolvedScope(
-                scope=scope,
-                persona_source=source,
-                identity_quality=transport.identity_quality,
-                resolution_source=source.resolution_source,
-                resolved_at_ms=now_ms,
-                private_scope_enabled=True,
-                disabled_reason=None,
-                turn_generation=frozen_turn.turn_generation,
+
+            def publish(scope: SessionScope, frozen_turn: Any) -> bool:
+                resolved = ResolvedScope(
+                    scope=scope,
+                    persona_source=source,
+                    identity_quality=transport.identity_quality,
+                    resolution_source=source.resolution_source,
+                    resolved_at_ms=now_ms,
+                    private_scope_enabled=True,
+                    disabled_reason=None,
+                    turn_generation=frozen_turn.turn_generation,
+                )
+                if not self.set_event_extra(
+                    event,
+                    "_sylanne_resolved_scope_v1",
+                    resolved,
+                ):
+                    return False
+                if not self.set_event_extra(
+                    event,
+                    "_sylanne_transport_turn_v1",
+                    frozen_turn,
+                ):
+                    self.set_event_extra(
+                        event,
+                        "_sylanne_resolved_scope_v1",
+                        ResolvedScope.disabled(
+                            "scope_resolution_unverified",
+                            resolved_at_ms=now_ms,
+                        ),
+                    )
+                    return False
+                published.append(resolved)
+                return True
+
+            self._catalog.freeze_persona_published(
+                turn,
+                candidate_scope,
+                publish=publish,
             )
+            if len(published) != 1:
+                raise ValueError("resolved scope was not published exactly once")
         except Exception:
-            return ResolvedScope.disabled("scope_resolution_unverified", resolved_at_ms=now_ms)
-        if not self.set_event_extra(event, "_sylanne_resolved_scope_v1", resolved):
-            return ResolvedScope.disabled("scope_resolution_unverified", resolved_at_ms=now_ms)
-        return resolved
+            disabled = ResolvedScope.disabled(
+                "scope_resolution_unverified",
+                resolved_at_ms=now_ms,
+            )
+            self.set_event_extra(event, "_sylanne_resolved_scope_v1", disabled)
+            if published:
+                try:
+                    current_turn = self._catalog.current(transport.session_ref.token)
+                except Exception:
+                    current_turn = None
+                self.set_event_extra(
+                    event,
+                    "_sylanne_transport_turn_v1",
+                    current_turn,
+                )
+            return disabled
+        return published[0]
 
     async def resolve_test_values(
         self,
@@ -848,13 +982,17 @@ class ScopeResolver:
             turn = self._test_turn(event, transport)
             if turn is None:
                 raise ValueError("transport turn unavailable")
-            scope = self._scope_for(
+            candidate_scope = self._scope_for(
                 transport,
                 source,
                 platform_id=platform_id,
                 canonical_umo=umo,
             )
-            frozen = self._catalog.freeze_persona(turn, scope)
+            scope, frozen = self._catalog.freeze_persona_published(
+                turn,
+                candidate_scope,
+                publish=lambda _scope, _turn: True,
+            )
             return ResolvedScope(
                 scope=scope,
                 persona_source=source,

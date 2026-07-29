@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -67,17 +69,14 @@ async def test_transport_turn_and_persona_freeze_precede_existing_pipeline(
             original_begin(scope, binding, **kwargs),
         )[1],
     )
-    original_activate = resolver._repository.activate_persona_revision
-    monkeypatch.setattr(
-        resolver._repository,
-        "activate_persona_revision",
-        lambda candidate: (order.append("activate"), original_activate(candidate))[1],
-    )
-    original_freeze = resolver.catalog.freeze_persona
+    original_freeze = resolver.catalog.freeze_persona_published
     monkeypatch.setattr(
         resolver.catalog,
-        "freeze_persona",
-        lambda turn, scope: (order.append("freeze"), original_freeze(turn, scope))[1],
+        "freeze_persona_published",
+        lambda turn, scope, **kwargs: (
+            order.append("publish/freeze"),
+            original_freeze(turn, scope, **kwargs),
+        )[1],
     )
 
     async def existing_pipeline(_event, _request):
@@ -102,8 +101,8 @@ async def test_transport_turn_and_persona_freeze_precede_existing_pipeline(
         "binding",
         "begin_turn",
         "persona resolve",
-        "activate",
-        "freeze",
+        "publish/freeze",
+        "transport",
         "existing pipeline",
     ]
     assert extras["_sylanne_transport_scope_v1"] is transport
@@ -174,18 +173,211 @@ def test_transport_extra_failure_leaves_no_persisted_resolving_turn(
         get_extra=lambda key, default=None: extras.get(key, default),
         set_extra=set_extra,
     )
-    transport = resolver.resolve_transport(event)
-    assert transport.bot_ref is not None
-    assert transport.session_ref is not None
     plugin = SimpleNamespace(_scope_resolver_v1=resolver)
 
     assert EmotionalStatePlugin._begin_scope_transport(plugin, event) is False
 
-    assert not resolver._repository.transport_catalog_path(
-        transport.bot_ref.token, transport.session_ref.token
-    ).exists()
-    assert not resolver._repository.transport_delivery_binding_path(
-        transport.bot_ref.token, transport.session_ref.token
-    ).exists()
-    with pytest.raises(KeyError, match="transport session not found"):
-        resolver.catalog.current(transport.session_ref.token)
+    assert list(resolver._repository.bots_directory.rglob("*")) == []
+    bindings_root = resolver._repository.bot_bindings_directory
+    assert not bindings_root.exists() or list(bindings_root.rglob("*")) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["config", "persona"])
+async def test_persona_resolution_failure_runs_no_legacy_private_path(
+    tmp_path, failure_stage: str
+) -> None:
+    legacy_calls: list[str] = []
+
+    def get_config(*, umo: str) -> dict[str, object]:
+        if failure_stage == "config":
+            raise RuntimeError("config unavailable")
+        return {"provider_settings": {}}
+
+    manager = SimpleNamespace(
+        resolve_selected_persona=AsyncMock(side_effect=RuntimeError("persona unavailable"))
+    )
+    context = SimpleNamespace(get_config=get_config, persona_manager=manager)
+    resolver = ScopeResolver.for_test(context, root=tmp_path)
+    extras: dict[str, object] = {}
+    event = SimpleNamespace(
+        session=_Session(),
+        unified_msg_origin="adapter:FriendMessage:42",
+        get_platform_id=lambda: "adapter",
+        get_platform_name=lambda: "aiocqhttp",
+        get_self_id=lambda: "10001",
+        get_extra=lambda key, default=None: extras.get(key, default),
+        set_extra=lambda key, value: extras.__setitem__(key, value),
+    )
+
+    async def existing_pipeline(_event, _request):
+        legacy_calls.append("pipeline")
+
+    plugin = SimpleNamespace(
+        _scope_resolver_v1=resolver,
+        config={},
+        _session_ctx=SimpleNamespace(
+            session_key=lambda _event: legacy_calls.append("on_message") or "legacy"
+        ),
+        _inbound_dup_gate=lambda _event: False,
+        _llm_request_pipeline=SimpleNamespace(_on_llm_request_inner=existing_pipeline),
+    )
+    request = SimpleNamespace(conversation=SimpleNamespace(persona_id=None))
+
+    await EmotionalStatePlugin.on_message(plugin, event)
+    await EmotionalStatePlugin._on_llm_request_inner(plugin, event, request)
+
+    assert legacy_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extra_failure", ["raise", "drop"])
+async def test_resolved_scope_extra_failure_leaves_no_scope_or_frozen_artifact(
+    tmp_path, extra_failure: str
+) -> None:
+    async def select_persona(**_kwargs):
+        return (
+            "narrator",
+            {"prompt": "quiet", "begin_dialogs": [], "tools": None, "skills": []},
+            None,
+            False,
+        )
+
+    context = SimpleNamespace(
+        get_config=lambda *, umo: {"provider_settings": {}},
+        persona_manager=SimpleNamespace(resolve_selected_persona=select_persona),
+    )
+    resolver = ScopeResolver.for_test(context, root=tmp_path)
+    extras: dict[str, object] = {}
+    fail_resolved_extra = False
+
+    def set_extra(key: str, value: object) -> None:
+        if fail_resolved_extra and key == "_sylanne_resolved_scope_v1":
+            if extra_failure == "raise":
+                raise RuntimeError("resolved scope extra unavailable")
+            return
+        extras[key] = value
+
+    event = SimpleNamespace(
+        session=_Session(),
+        unified_msg_origin="adapter:FriendMessage:42",
+        get_platform_id=lambda: "adapter",
+        get_platform_name=lambda: "aiocqhttp",
+        get_self_id=lambda: "10001",
+        get_extra=lambda key, default=None: extras.get(key, default),
+        set_extra=set_extra,
+    )
+    plugin = SimpleNamespace(_scope_resolver_v1=resolver)
+    assert EmotionalStatePlugin._begin_scope_transport(plugin, event) is True
+    transport = extras["_sylanne_transport_scope_v1"]
+    resolving_turn = extras["_sylanne_transport_turn_v1"]
+
+    fail_resolved_extra = True
+    result = await resolver.resolve(
+        event,
+        SimpleNamespace(conversation=SimpleNamespace(persona_id=None)),
+    )
+
+    assert result.private_scope_enabled is False
+    assert resolver.catalog.current(transport.session_ref.token) == resolving_turn
+    assert resolver.catalog.current(transport.session_ref.token).turn_state == "resolving"
+    assert extras["_sylanne_transport_turn_v1"] is resolving_turn
+    persona_root = (
+        resolver._repository.bots_directory / transport.bot_ref.token / "personas"
+    )
+    assert not persona_root.exists() or list(persona_root.rglob("*")) == []
+    with resolver._repository.transaction():
+        assert resolver._repository._read_catalog_locked()["scopes"] == {}
+
+
+@pytest.mark.asyncio
+async def test_repeated_resolve_reuses_exact_published_scope_without_refreezing(
+    tmp_path,
+) -> None:
+    manager = SimpleNamespace(
+        resolve_selected_persona=AsyncMock(
+            return_value=(
+                "narrator",
+                {"prompt": "quiet", "begin_dialogs": [], "tools": None, "skills": []},
+                None,
+                False,
+            )
+        )
+    )
+    resolver = ScopeResolver.for_test(
+        SimpleNamespace(
+            get_config=lambda *, umo: {"provider_settings": {}},
+            persona_manager=manager,
+        ),
+        root=tmp_path,
+    )
+    extras: dict[str, object] = {}
+    event = SimpleNamespace(
+        session=_Session(),
+        unified_msg_origin="adapter:FriendMessage:42",
+        get_platform_id=lambda: "adapter",
+        get_platform_name=lambda: "aiocqhttp",
+        get_self_id=lambda: "10001",
+        get_extra=lambda key, default=None: extras.get(key, default),
+        set_extra=lambda key, value: extras.__setitem__(key, value),
+    )
+    plugin = SimpleNamespace(_scope_resolver_v1=resolver)
+    request = SimpleNamespace(conversation=SimpleNamespace(persona_id=None))
+    assert EmotionalStatePlugin._begin_scope_transport(plugin, event) is True
+
+    first = await resolver.resolve(event, request)
+    frozen_turn = extras["_sylanne_transport_turn_v1"]
+    second = await resolver.resolve(event, request)
+
+    assert second is first
+    assert manager.resolve_selected_persona.await_count == 1
+    assert extras["_sylanne_resolved_scope_v1"] is first
+    assert extras["_sylanne_transport_turn_v1"] is frozen_turn
+    assert resolver.catalog.current(first.scope.session_ref.token) == frozen_turn
+
+
+@pytest.mark.asyncio
+async def test_forged_published_scope_fails_closed_without_persona_resolution(
+    tmp_path,
+) -> None:
+    manager = SimpleNamespace(
+        resolve_selected_persona=AsyncMock(
+            return_value=(
+                "narrator",
+                {"prompt": "quiet", "begin_dialogs": [], "tools": None, "skills": []},
+                None,
+                False,
+            )
+        )
+    )
+    resolver = ScopeResolver.for_test(
+        SimpleNamespace(
+            get_config=lambda *, umo: {"provider_settings": {}},
+            persona_manager=manager,
+        ),
+        root=tmp_path,
+    )
+    extras: dict[str, object] = {}
+    event = SimpleNamespace(
+        session=_Session(),
+        unified_msg_origin="adapter:FriendMessage:42",
+        get_platform_id=lambda: "adapter",
+        get_platform_name=lambda: "aiocqhttp",
+        get_self_id=lambda: "10001",
+        get_extra=lambda key, default=None: extras.get(key, default),
+        set_extra=lambda key, value: extras.__setitem__(key, value),
+    )
+    plugin = SimpleNamespace(_scope_resolver_v1=resolver)
+    request = SimpleNamespace(conversation=SimpleNamespace(persona_id=None))
+    assert EmotionalStatePlugin._begin_scope_transport(plugin, event) is True
+    first = await resolver.resolve(event, request)
+    extras["_sylanne_resolved_scope_v1"] = replace(
+        first,
+        turn_generation=first.turn_generation + 1,
+    )
+
+    result = await resolver.resolve(event, request)
+
+    assert result.private_scope_enabled is False
+    assert result.disabled_reason == "resolved_scope_mismatch"
+    assert manager.resolve_selected_persona.await_count == 1

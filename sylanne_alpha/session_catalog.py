@@ -291,6 +291,29 @@ class SessionCatalog:
             self.repository._ensure_bot_locked(expected_bot)
             return generation
 
+    def binding_generation_candidate(self, platform_id: str, self_id: str) -> int:
+        """Return the current generation without creating binding authority."""
+
+        binding = BotBinding(
+            platform_id=_require_text(platform_id, "platform_id"),
+            self_id=_require_text(self_id, "self_id"),
+        )
+        binding_token = self._bot_binding_token(
+            binding.platform_id,
+            binding.self_id,
+        )
+        with self.repository.transaction():
+            authority = self._load_bot_binding_locked(binding_token)
+            if authority is None:
+                return 0
+            generation, stored_bot_token = authority
+            expected_bot = self._identity_key.bot_ref(binding, generation)
+            if not hmac.compare_digest(stored_bot_token, expected_bot.token):
+                raise RepositoryCorruptionError(
+                    "bot binding authority does not match identity key"
+                )
+            return generation
+
     def _binding_generation_for_bot_ref_locked(self, bot_ref: object) -> int | None:
         """Return one persisted binding authority for a proof-derived BotRef.
 
@@ -529,6 +552,8 @@ class SessionCatalog:
         ):
             raise ValueError("transport scope is not enabled")
         with self.repository.transaction():
+            create_binding_authority = False
+            stored_bot_token: str | None
             if delivery_binding.self_id:
                 binding = BotBinding(
                     platform_id=delivery_binding.platform_id,
@@ -540,8 +565,13 @@ class SessionCatalog:
                 )
                 authority = self._load_bot_binding_locked(binding_token)
                 if authority is None:
-                    raise ValueError("bot binding authority is missing")
-                binding_generation, stored_bot_token = authority
+                    if publish is None:
+                        raise ValueError("bot binding authority is missing")
+                    binding_generation = 0
+                    stored_bot_token = None
+                    create_binding_authority = True
+                else:
+                    binding_generation, stored_bot_token = authority
                 expected_bot = self._identity_key.bot_ref(
                     binding,
                     binding_generation,
@@ -569,11 +599,14 @@ class SessionCatalog:
                 )
             ):
                 raise ValueError("bot binding does not match transport scope")
-            self.repository._ensure_bot_locked(expected_bot)
             current = self._load_turn_locked(
                 transport_scope.bot_ref.token,
                 transport_scope.session_ref.token,
             )
+            if create_binding_authority and current is not None:
+                raise RepositoryCorruptionError(
+                    "transport turn exists without bot binding authority"
+                )
             if current is not None and (
                 current.bot_ref != transport_scope.bot_ref.token
                 or current.session_ref != transport_scope.session_ref.token
@@ -611,6 +644,13 @@ class SessionCatalog:
                     raise ValueError("transport turn publication failed")
             # The exact event objects are published before either durable turn
             # artifact, so an attachment failure cannot strand a resolving turn.
+            self.repository._ensure_bot_locked(expected_bot)
+            if create_binding_authority:
+                self._write_bot_binding_locked(
+                    binding_token,
+                    bot_token=expected_bot.token,
+                    generation=binding_generation,
+                )
             self._write_turn_locked(turn)
             self._write_binding_locked(turn, delivery_binding)
             return turn
@@ -653,6 +693,105 @@ class SessionCatalog:
             )
             self._write_turn_locked(frozen)
             return frozen
+
+    def freeze_persona_published(
+        self,
+        turn: TransportTurn,
+        candidate_scope: SessionScope,
+        *,
+        publish: Callable[[SessionScope, TransportTurn], bool],
+    ) -> tuple[SessionScope, TransportTurn]:
+        """Publish exact prospective objects before committing scope and freeze."""
+
+        if type(turn) is not TransportTurn:
+            raise ValueError("turn must be a TransportTurn")
+        if type(candidate_scope) is not SessionScope:
+            raise ValueError("candidate_scope must be a SessionScope")
+        if not callable(publish):
+            raise ValueError("publish must be callable")
+        with self.repository.transaction():
+            current = self._load_turn_locked(turn.bot_ref, turn.session_ref)
+            if current != turn or current.turn_state != "resolving":
+                raise StaleScopeWrite(
+                    turn.turn_generation,
+                    None if current is None else current.turn_generation,
+                    code="turn_generation_stale",
+                )
+            prepared = self.repository._prepare_scope_locked(candidate_scope)
+            if (
+                prepared.bot_ref.token != turn.bot_ref
+                or prepared.session_ref.token != turn.session_ref
+                or prepared.session_ref.generation != turn.session_generation
+                or not self._validate_binding_locked(turn)
+            ):
+                raise StaleScopeWrite(code="turn_parent_stale")
+            frozen = replace(
+                turn,
+                turn_state="frozen",
+                active_persona_ref=prepared.persona_ref.token,
+                persona_lifecycle_generation=(
+                    prepared.persona_ref.lifecycle_generation
+                ),
+                active_scope_token=prepared.storage_token,
+                scope_generation=prepared.scope_generation,
+                updated_at_ms=self._now_ms(),
+            )
+            try:
+                published = publish(prepared, frozen)
+            except Exception as exc:
+                raise ValueError("resolved scope publication failed") from exc
+            if published is not True:
+                raise ValueError("resolved scope publication failed")
+            committed = self.repository._create_scope_locked(candidate_scope)
+            if committed != prepared:
+                raise RepositoryCorruptionError(
+                    "prepared scope changed during freeze commit"
+                )
+            self._write_turn_locked(frozen)
+            return committed, frozen
+
+    def matches_frozen_scope(
+        self,
+        transport_scope: ResolvedTransportScope,
+        turn: object,
+        scope: SessionScope,
+        *,
+        turn_generation: int,
+    ) -> bool:
+        """Read-only exact-match check for one already-published frozen scope."""
+
+        if (
+            type(transport_scope) is not ResolvedTransportScope
+            or type(turn) is not TransportTurn
+            or type(scope) is not SessionScope
+            or type(turn_generation) is not int
+        ):
+            return False
+        try:
+            with self.repository.transaction():
+                current = self._load_turn_locked(turn.bot_ref, turn.session_ref)
+                active_scope = self.repository._require_active_scope_locked(scope)
+                return (
+                    transport_scope.private_scope_enabled is True
+                    and transport_scope.bot_ref == scope.bot_ref
+                    and transport_scope.session_ref == scope.session_ref
+                    and transport_scope.identity_quality == turn.identity_quality
+                    and current == turn
+                    and turn.turn_state == "frozen"
+                    and turn.turn_generation == turn_generation
+                    and turn.bot_ref == scope.bot_ref.token
+                    and turn.session_ref == scope.session_ref.token
+                    and turn.session_generation == scope.session_ref.generation
+                    and turn.active_persona_ref == scope.persona_ref.token
+                    and turn.persona_lifecycle_generation
+                    == scope.persona_ref.lifecycle_generation
+                    and turn.active_scope_token == scope.storage_token
+                    and turn.scope_generation == scope.scope_generation
+                    and active_scope == scope
+                    and self._validate_binding_locked(turn)
+                )
+        except Exception:
+            return False
 
     def current(self, session_ref_token: str) -> TransportTurn:
         token = _require_token(session_ref_token, "session_v1_")

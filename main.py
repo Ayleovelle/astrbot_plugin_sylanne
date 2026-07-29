@@ -2142,6 +2142,41 @@ class EmotionalStatePlugin(Star):
             transport_ready = EmotionalStatePlugin._begin_scope_transport(self, event)
             if transport_ready is not True:
                 return
+        except Exception:
+            return
+
+    async def _on_message_after_scope_frozen(
+        self,
+        event: Any,
+        resolved_scope: ResolvedScope,
+    ) -> None:
+        """Run legacy private-state message work only after scope publication."""
+
+        if (
+            type(resolved_scope) is not ResolvedScope
+            or resolved_scope.private_scope_enabled is not True
+            or ScopeResolver._event_extra(
+                event,
+                "_sylanne_resolved_scope_v1",
+            )
+            is not resolved_scope
+        ):
+            return
+        try:
+            resolver = EmotionalStatePlugin._scope_resolver_instance(self)
+            if (
+                resolver is None
+                or not resolver._matches_published_scope(event, resolved_scope)
+            ):
+                return
+        except Exception:
+            return
+        marker = "_sylanne_legacy_on_message_v1"
+        if ScopeResolver._event_extra(event, marker, False) is True:
+            return
+        if not ScopeResolver.set_event_extra(event, marker, True):
+            return
+        try:
             # M4a（realtime 完整重做 Model-D）：即时聊天接管开启时强制关闭本轮
             # 流式，让响应侧走非流式档（on_decorating_result 才够得着、能抑制
             # 框架重发）。此处（filter.event_message_type(ALL)，由 ProcessStage
@@ -2300,6 +2335,11 @@ class EmotionalStatePlugin(Star):
             or resolved_scope.private_scope_enabled is not True
         ):
             return
+        await EmotionalStatePlugin._on_message_after_scope_frozen(
+            self,
+            event,
+            resolved_scope,
+        )
         # v2.5.0 入站消息级幂等闸：必须在任何早退（尤其 should_express 静默
         # return）之前拦截，否则 SILENT 轮的 message_id 不会入集，漏掉最可能
         # 触发悬挂重复的链路。命中即 stop_event + 早退，框架不再跑

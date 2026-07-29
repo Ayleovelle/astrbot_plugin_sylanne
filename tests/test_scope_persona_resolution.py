@@ -170,7 +170,11 @@ async def test_unified_origin_must_match_canonical_session_before_persona_lookup
     transport = resolver.resolve_transport(event)
     binding = resolver.delivery_binding(event, transport)
     assert binding is not None
-    turn = resolver.catalog.begin_turn(transport, binding)
+    turn = resolver.catalog.begin_turn(
+        transport,
+        binding,
+        publish=lambda _turn: True,
+    )
     event.set_extra("_sylanne_transport_scope_v1", transport)
     event.set_extra("_sylanne_transport_turn_v1", turn)
 

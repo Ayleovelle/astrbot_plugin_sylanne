@@ -730,6 +730,96 @@ class ScopeRepository:
         _require_token(document["session_ref"], "session_v1_")
         return document
 
+    def _prepare_scope_locked(
+        self,
+        candidate: SessionScope,
+        *,
+        expected_absent: bool = False,
+    ) -> SessionScope:
+        """Preview the exact authoritative scope without writing repository state."""
+
+        if type(candidate) is not SessionScope:
+            raise ValueError("candidate must be a SessionScope")
+        if type(expected_absent) is not bool:
+            raise ValueError("expected_absent must be an exact bool")
+        manifest = self._load_persona_manifest_locked(candidate.persona_ref)
+        persona_generation = (
+            0 if manifest is None else int(manifest["lifecycle_generation"])
+        )
+        active_persona = replace(
+            candidate.persona_ref,
+            lifecycle_generation=persona_generation,
+        )
+        normalized = replace(candidate, persona_ref=active_persona)
+        current = self._load_scope_meta_locked(self.scope_meta_path(normalized))
+        if current is None:
+            return replace(normalized, scope_generation=0)
+        self._validate_scope_parent(current, normalized)
+        if (
+            current["state"] == "active"
+            and current["persona_lifecycle_generation"]
+            == active_persona.lifecycle_generation
+        ):
+            if expected_absent:
+                raise StaleScopeWrite(
+                    0,
+                    int(current["scope_generation"]),
+                    code="scope_exists",
+                )
+            return replace(
+                normalized,
+                scope_generation=int(current["scope_generation"]),
+            )
+        return replace(
+            normalized,
+            scope_generation=int(current["scope_generation"]) + 1,
+        )
+
+    def _create_scope_locked(
+        self,
+        candidate: SessionScope,
+        *,
+        expected_absent: bool = False,
+    ) -> SessionScope:
+        prepared = self._prepare_scope_locked(
+            candidate,
+            expected_absent=expected_absent,
+        )
+        active_persona = self._activate_persona_revision_locked(candidate.persona_ref)
+        if active_persona != prepared.persona_ref:
+            raise RepositoryCorruptionError(
+                "prepared persona generation changed during scope commit"
+            )
+        path = self.scope_meta_path(prepared)
+        current = self._load_scope_meta_locked(path)
+        if (
+            current is not None
+            and current["state"] == "active"
+            and current["persona_lifecycle_generation"]
+            == active_persona.lifecycle_generation
+        ):
+            return prepared
+        transition = "created" if current is None else "reactivated"
+        if current is not None:
+            self._cleanup_scope_components_locked(path.parent)
+        self._atomic_json_replace(
+            path,
+            self._scope_meta_document(
+                prepared,
+                state="active",
+                last_transition=transition,
+            ),
+        )
+        self._commit_catalog_generation_locked(
+            registration=(
+                prepared.storage_token,
+                prepared.bot_ref.token,
+                prepared.persona_ref.token,
+                prepared.session_ref.token,
+            )
+        )
+        return prepared
+
     def create_scope(
         self,
         candidate: SessionScope,
@@ -741,53 +831,10 @@ class ScopeRepository:
         if type(expected_absent) is not bool:
             raise ValueError("expected_absent must be an exact bool")
         with self._repository_lock():
-            active_persona = self._activate_persona_revision_locked(candidate.persona_ref)
-            normalized = replace(candidate, persona_ref=active_persona)
-            path = self.scope_meta_path(normalized)
-            current = self._load_scope_meta_locked(path)
-            if current is None:
-                active = replace(normalized, scope_generation=0)
-                transition = "created"
-            else:
-                self._validate_scope_parent(current, normalized)
-                if (
-                    current["state"] == "active"
-                    and current["persona_lifecycle_generation"]
-                    == active_persona.lifecycle_generation
-                ):
-                    if expected_absent:
-                        raise StaleScopeWrite(
-                            0,
-                            int(current["scope_generation"]),
-                            code="scope_exists",
-                        )
-                    return replace(
-                        normalized,
-                        scope_generation=int(current["scope_generation"]),
-                    )
-                active = replace(
-                    normalized,
-                    scope_generation=int(current["scope_generation"]) + 1,
-                )
-                transition = "reactivated"
-                self._cleanup_scope_components_locked(path.parent)
-            self._atomic_json_replace(
-                path,
-                self._scope_meta_document(
-                    active,
-                    state="active",
-                    last_transition=transition,
-                ),
+            return self._create_scope_locked(
+                candidate,
+                expected_absent=expected_absent,
             )
-            self._commit_catalog_generation_locked(
-                registration=(
-                    active.storage_token,
-                    active.bot_ref.token,
-                    active.persona_ref.token,
-                    active.session_ref.token,
-                )
-            )
-            return active
 
     @staticmethod
     def _validate_scope_parent(
