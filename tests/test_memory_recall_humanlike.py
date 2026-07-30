@@ -36,7 +36,7 @@ def test_recent_memory_with_zero_relevance_still_recalled():
     # 写一条与 query 毫无词面重合的近期记忆
     sys.write_summary("今天阳光很好心情不错", source_turns=1, temperature=0.5)
 
-    results = sys.recall(query="量子物理学的不确定性原理", limit=5)
+    results = sys.recall(query="粒子宇宙黑洞", limit=5)
 
     assert results, "近期记忆即使关键词不重合也应进入召回结果"
     assert any(r.recall_reason == "temporal_proximity" for r in results)
@@ -49,7 +49,7 @@ def test_old_memory_with_zero_relevance_dropped():
     # 人为把创建时间推到 10 分钟前
     item.created_at = time.time() - 600
 
-    results = sys.recall(query="量子物理学的不确定性原理", limit=5)
+    results = sys.recall(query="粒子宇宙黑洞", limit=5)
 
     assert not any(r.text == "今天阳光很好心情不错" for r in results)
 

@@ -15,6 +15,7 @@ from typing import Any, Protocol
 
 from .infra import load_or_create_owner_only_secret
 from .scope_contracts import (
+    AuthenticatedSubject,
     BotRef,
     PersonaRevisionRef,
     RelationRef,
@@ -22,6 +23,7 @@ from .scope_contracts import (
     ResolvedTransportScope,
     SessionRef,
     SessionScope,
+    VerifiedSubjectInput,
 )
 
 _BOT_DOMAIN = b"sylanne.scope.bot.v1\x00"
@@ -34,6 +36,7 @@ _MAX_IDENTITY_COMPONENT_BYTES = 4096
 _SCOPE_KEY_MAGIC = b"SYLANNE-SCOPE-IDENTITY\x01\x00"
 _SCOPE_KEY_ID_DOMAIN = b"sylanne.scope.key-id.v1\x00"
 _SCOPE_SECRET_BYTES = 32
+_MAX_ISSUED_PERSONA_PREPARATIONS = 64
 
 
 def _token(prefix: str, digest: bytes) -> str:
@@ -129,6 +132,45 @@ class PersonaSource:
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class PreparedPersonaScope:
+    """Resolver-owned Persona source awaiting identity proof and publication."""
+
+    transport: ResolvedTransportScope
+    turn: object = field(repr=False)
+    persona_source: PersonaSource
+    canonical_umo: str
+    platform_id: str
+    resolved_at_ms: int
+    authority: object = field(repr=False)
+
+    def __post_init__(self) -> None:
+        from .session_catalog import TransportTurn
+
+        if type(self.transport) is not ResolvedTransportScope:
+            raise ValueError("transport must be an exact ResolvedTransportScope")
+        if type(self.turn) is not TransportTurn:
+            raise ValueError("turn must be an exact TransportTurn")
+        if type(self.persona_source) is not PersonaSource:
+            raise ValueError("persona_source must be an exact PersonaSource")
+        _require_text(self.canonical_umo, "canonical_umo")
+        _require_text(self.platform_id, "platform_id")
+        _require_nonnegative_int(self.resolved_at_ms, "resolved_at_ms")
+        if self.authority is None:
+            raise ValueError("authority is required")
+
+
+@dataclass(slots=True)
+class _IssuedPersonaPreparation:
+    """One strongly-held, single-use preparation minted by this resolver."""
+
+    prepared: PreparedPersonaScope
+    transport_token: str
+    turn_generation: int
+    consumed: bool = False
+    published: ResolvedScope | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,6 +309,40 @@ class ScopeIdentityKey:
             bot_ref=bot_ref,
         )
 
+    def authenticated_subject(
+        self,
+        bot_ref: BotRef,
+        verified: VerifiedSubjectInput,
+    ) -> AuthenticatedSubject:
+        """Derive one opaque relation only from adapter-authenticated material.
+
+        The verified raw subject is consumed synchronously here.  The returned
+        contract deliberately carries only the HMAC-derived ``RelationRef`` and
+        the authenticated quality marker, so neither runtime ownership nor any
+        repository payload can retain platform/sender material.
+        """
+
+        if type(bot_ref) is not BotRef:
+            raise ValueError("bot_ref must be a BotRef")
+        if type(verified) is not VerifiedSubjectInput:
+            raise ValueError("verified must be a VerifiedSubjectInput")
+        return AuthenticatedSubject(
+            relation_ref=RelationRef(
+                token=_token(
+                    "relation_v1_",
+                    self._digest(
+                        _RELATION_DOMAIN,
+                        bot_ref.token,
+                        verified.platform_realm,
+                        verified.subject_kind,
+                        verified.subject_id,
+                    ),
+                ),
+                bot_ref=bot_ref,
+            ),
+            identity_quality=verified.identity_quality,
+        )
+
 
 def load_or_create_scope_identity_key(
     path: str | os.PathLike[str],
@@ -381,6 +457,8 @@ class ScopeResolver:
         self._account_proofs = account_proofs or NoAdapterAccountProofProvider()
         self._clock_ms = clock_ms or (lambda: time.time_ns() // 1_000_000)
         self._allow_test_synthetic_turn = allow_test_synthetic_turn
+        self._prepare_authority = object()
+        self._issued_preparations: dict[int, _IssuedPersonaPreparation] = {}
 
     @classmethod
     def for_context(
@@ -788,8 +866,35 @@ class ScopeResolver:
         except Exception:
             return False
 
-    async def resolve(self, event: Any, request: Any) -> ResolvedScope:
-        """Freeze the exact Persona AstrBot selected for this request once."""
+    def _issue_preparation(
+        self,
+        prepared: PreparedPersonaScope,
+    ) -> PreparedPersonaScope:
+        """Strongly retain one exact capability and its transport-turn binding."""
+
+        transport = prepared.transport
+        turn = prepared.turn
+        if transport.session_ref is None:
+            raise ValueError("prepared transport has no session")
+        preparation_id = id(prepared)
+        if preparation_id in self._issued_preparations:
+            raise RuntimeError("preparation object identity collision")
+        self._issued_preparations[preparation_id] = _IssuedPersonaPreparation(
+            prepared=prepared,
+            transport_token=transport.session_ref.token,
+            turn_generation=turn.turn_generation,
+        )
+        while len(self._issued_preparations) > _MAX_ISSUED_PERSONA_PREPARATIONS:
+            oldest = next(iter(self._issued_preparations))
+            self._issued_preparations.pop(oldest)
+        return prepared
+
+    async def prepare(
+        self,
+        event: Any,
+        request: Any,
+    ) -> PreparedPersonaScope | ResolvedScope:
+        """Resolve the effective Persona without constructing or publishing a scope."""
 
         now_ms = int(self._clock_ms())
         missing = object()
@@ -916,13 +1021,89 @@ class ScopeResolver:
         )
         if source is None:
             return ResolvedScope.disabled("persona_unavailable", resolved_at_ms=now_ms)
+        return self._issue_preparation(
+            PreparedPersonaScope(
+                transport=transport,
+                turn=turn,
+                persona_source=source,
+                canonical_umo=canonical_umo,
+                platform_id=platform_id,
+                resolved_at_ms=now_ms,
+                authority=self._prepare_authority,
+            )
+        )
+
+    def freeze(
+        self,
+        event: Any,
+        prepared: PreparedPersonaScope,
+    ) -> ResolvedScope:
+        """Freeze and publish only an exact preparation minted by this resolver."""
+
+        issued = (
+            self._issued_preparations.get(id(prepared))
+            if type(prepared) is PreparedPersonaScope
+            else None
+        )
+        if (
+            type(prepared) is not PreparedPersonaScope
+            or prepared.authority is not self._prepare_authority
+            or issued is None
+            or issued.prepared is not prepared
+            or prepared.transport.session_ref is None
+            or issued.transport_token != prepared.transport.session_ref.token
+            or issued.transport_token != prepared.turn.session_ref
+            or issued.turn_generation != prepared.turn.turn_generation
+        ):
+            return ResolvedScope.disabled(
+                "persona_preparation_unverified",
+                resolved_at_ms=int(self._clock_ms()),
+            )
+        if issued.consumed:
+            existing = self._event_extra(event, "_sylanne_resolved_scope_v1")
+            if (
+                issued.published is not None
+                and existing is issued.published
+                and self._matches_published_scope(event, issued.published)
+            ):
+                return issued.published
+            return ResolvedScope.disabled(
+                "persona_preparation_unverified",
+                resolved_at_ms=int(self._clock_ms()),
+            )
+        # Consume before every live-parent check or publication attempt.  A
+        # failed exact capability can never be repaired and replayed later.
+        issued.consumed = True
+        now_ms = prepared.resolved_at_ms
+        existing = self._event_extra(event, "_sylanne_resolved_scope_v1")
+        if existing is not None:
+            disabled = ResolvedScope.disabled(
+                "resolved_scope_mismatch",
+                resolved_at_ms=now_ms,
+            )
+            self.set_event_extra(event, "_sylanne_resolved_scope_v1", disabled)
+            return disabled
+        transport = prepared.transport
+        turn = prepared.turn
+        source = prepared.persona_source
+        if not self._matches_live_resolving_parent(
+            event,
+            transport,
+            turn,
+            canonical_umo=prepared.canonical_umo,
+            platform_id=prepared.platform_id,
+        ):
+            return ResolvedScope.disabled(
+                "transport_parent_changed",
+                resolved_at_ms=now_ms,
+            )
         published: list[ResolvedScope] = []
         try:
             candidate_scope = self._scope_for(
                 transport,
                 source,
-                platform_id=platform_id,
-                canonical_umo=canonical_umo,
+                platform_id=prepared.platform_id,
+                canonical_umo=prepared.canonical_umo,
             )
 
             def publish(scope: SessionScope, frozen_turn: Any) -> bool:
@@ -983,7 +1164,16 @@ class ScopeResolver:
                     current_turn,
                 )
             return disabled
-        return published[0]
+        issued.published = published[0]
+        return issued.published
+
+    async def resolve(self, event: Any, request: Any) -> ResolvedScope:
+        """Prepare and freeze the exact Persona AstrBot selected for this request."""
+
+        prepared = await self.prepare(event, request)
+        if type(prepared) is ResolvedScope:
+            return prepared
+        return self.freeze(event, prepared)
 
     async def resolve_test_values(
         self,
@@ -1089,6 +1279,7 @@ __all__ = [
     "CurrentAdapterAccountProof",
     "NoAdapterAccountProofProvider",
     "PersonaSource",
+    "PreparedPersonaScope",
     "ScopeResolver",
     "ScopeIdentityKey",
     "load_or_create_scope_identity_key",

@@ -108,7 +108,7 @@ def test_emotion_bypass_silent_when_neutral():
     sad.created_at = now - 3600 * 24 * 30
     sad.last_recalled_ts = 0.0
     sad.actr_acc = 1.0
-    results = m.recall("今天午饭吃什么", current_warmth=0.0, limit=5)
+    results = m.recall("午餐菜谱推荐", current_warmth=0.0, limit=5)
     texts = [r.text for r in results]
     assert not any("工作压力" in t for t in texts), "中性闲聊不该翻出旧情绪记忆"
 
@@ -122,7 +122,7 @@ def test_emotion_bypass_mood_congruent_direction():
     sad.created_at = now - 3600 * 24 * 30
     sad.last_recalled_ts = 0.0
     sad.actr_acc = 1.0
-    results = m.recall("好开心啊", current_warmth=0.7, limit=5)
+    results = m.recall("愉悦极了", current_warmth=0.7, limit=5)
     assert not any("吵架" in r.text for r in results)
 
 

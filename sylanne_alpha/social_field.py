@@ -16,11 +16,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import hmac
 import math
 import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
+
+from .scoped_session_components import ScopedSessionComponentStore
+from .scope_repository import ScopedPersistenceGateway
 
 
 @dataclass
@@ -83,7 +89,14 @@ class SocialFieldCollector:
     - drain_shadow_buffer() 供 ConversationBuffer 注入旁观上下文
     """
 
-    def __init__(self, config: dict | None = None):
+    def __init__(
+        self,
+        config: dict | None = None,
+        *,
+        persistence: ScopedPersistenceGateway | None = None,
+    ):
+        """Create an explicit legacy collector or a frozen session collector."""
+
         self._groups: dict[str, _GroupState] = {}
         # v2.5.0 R6 专用：见 register_group_key_alias() 文档字符串。
         self._group_key_aliases: dict[str, str] = {}
@@ -95,8 +108,13 @@ class SocialFieldCollector:
         self._post_reply_decay: float = 0.3
         self._inactive_decay: float = 0.98
         self._ema_alpha: float = 0.3
+        self._scoped_components = (
+            None if persistence is None else ScopedSessionComponentStore(persistence)
+        )
         if config:
             self.configure(config)
+        if self._scoped_components is not None:
+            self._restore_scoped_state()
 
     def configure(self, config: dict) -> None:
         """从配置字典中提取机器人名字和参数。"""
@@ -115,12 +133,28 @@ class SocialFieldCollector:
 
     def _get_group(self, group_id: str) -> _GroupState:
         """获取或创建群组状态。群组数上限 100，超出时淘汰最早的。"""
-        if group_id not in self._groups:
+        group_key = self._group_key(group_id)
+        if group_key not in self._groups:
             if len(self._groups) >= 100:
                 oldest_key = next(iter(self._groups))
                 del self._groups[oldest_key]
-            self._groups[group_id] = _GroupState()
-        return self._groups[group_id]
+            self._groups[group_key] = _GroupState()
+        return self._groups[group_key]
+
+    def _group_key(self, group_id: str) -> str:
+        """Return a non-durable raw key in legacy mode, a scoped digest otherwise."""
+
+        components = self._scoped_components
+        if components is None:
+            return group_id
+        # The raw group id remains only in this call frame.  HMAC with the
+        # frozen opaque storage token gives deterministic restart restoration
+        # while preventing a group identifier from appearing in component JSON.
+        return hmac.new(
+            components.gateway.scope.storage_token.encode("utf-8"),
+            group_id.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
 
     def collect(
         self,
@@ -225,7 +259,7 @@ class SocialFieldCollector:
 
     def drain_shadow_buffer(self, group_id: str) -> list[dict]:
         """取出并清空旁观消息缓冲区，用于上下文注入。"""
-        gs = self._groups.get(group_id)
+        gs = self._groups.get(self._group_key(group_id))
         if not gs or not gs.shadow_buffer:
             return []
         entries = list(gs.shadow_buffer)
@@ -258,6 +292,8 @@ class SocialFieldCollector:
         """
         if not alias_key or not raw_group_id or alias_key == raw_group_id:
             return
+        alias_key = self._group_key(alias_key)
+        raw_group_id = self._group_key(raw_group_id)
         if (
             alias_key not in self._group_key_aliases
             and len(self._group_key_aliases) >= 100
@@ -288,9 +324,10 @@ class SocialFieldCollector:
         后者查不到时会经 `register_group_key_alias` 登记的别名再查一次
         （见该方法文档字符串）。两次都查不到则视为无数据，返回空集合。
         """
-        gs = self._groups.get(group_id)
+        group_key = self._group_key(group_id)
+        gs = self._groups.get(group_key)
         if gs is None:
-            raw_group_id = self._group_key_aliases.get(group_id)
+            raw_group_id = self._group_key_aliases.get(group_key)
             if raw_group_id:
                 gs = self._groups.get(raw_group_id)
         if not gs:
@@ -373,6 +410,8 @@ class SocialFieldCollector:
         return min(1.0, overlap / max(1, min(len(incoming), len(bot_tokens))))
 
     def is_group_context_by_key(self, session_key: str) -> bool:
+        if self._scoped_components is not None:
+            raise ValueError("scoped social state does not accept a session key")
         return "Group" in session_key or "group" in session_key
 
     def known_other_sender_ids(self) -> set[str]:
@@ -390,6 +429,8 @@ class SocialFieldCollector:
         return ids
 
     def extract_group_id_from_key(self, session_key: str) -> str:
+        if self._scoped_components is not None:
+            raise ValueError("scoped social state does not accept a session key")
         if ":" in session_key:
             return session_key.rsplit(":", 1)[0]
         return session_key
@@ -416,6 +457,119 @@ class SocialFieldCollector:
         self._post_reply_decay = post_reply_decay
         self._inactive_decay = inactive_decay
         self._ema_alpha = ema_alpha
+
+    # ------------------------------------------------------------------
+    # Scope-v1 session component persistence
+    # ------------------------------------------------------------------
+
+    @property
+    def persistence(self) -> ScopedPersistenceGateway | None:
+        components = self._scoped_components
+        return None if components is None else components.gateway
+
+    @staticmethod
+    def _group_snapshot(state: _GroupState) -> dict[str, object]:
+        """Serialize only aggregate state; shadow messages contain raw people/text."""
+
+        return {
+            "last_bot_reply_ts": state.last_bot_reply_ts,
+            "recent_bot_topics": [sorted(topic) for topic in state.recent_bot_topics],
+            "silence_ticks": state.silence_ticks,
+            "message_timestamps": list(state.message_timestamps),
+            "ema_rate": state.ema_rate,
+            "social_void_pressure": state.social_void_pressure,
+        }
+
+    @staticmethod
+    def _restore_group(payload: dict[str, object]) -> _GroupState:
+        state = _GroupState()
+        for value in payload.get("recent_bot_topics", []):
+            if isinstance(value, list) and all(isinstance(token, str) for token in value):
+                state.recent_bot_topics.append(set(value))
+        for value in payload.get("message_timestamps", []):
+            if isinstance(value, (int, float)):
+                state.message_timestamps.append(float(value))
+        for name in ("last_bot_reply_ts", "ema_rate", "social_void_pressure"):
+            value = payload.get(name)
+            if isinstance(value, (int, float)):
+                setattr(state, name, float(value))
+        silence_ticks = payload.get("silence_ticks")
+        if type(silence_ticks) is int and silence_ticks >= 0:
+            state.silence_ticks = silence_ticks
+        return state
+
+    def _scoped_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": "sylanne.social.scoped.v1",
+            "groups": {
+                group_key: self._group_snapshot(state)
+                for group_key, state in self._groups.items()
+            },
+            "group_key_aliases": dict(self._group_key_aliases),
+            "parameters": {
+                "pressure_rate": self._pressure_rate,
+                "pressure_cap": self._pressure_cap,
+                "post_reply_decay": self._post_reply_decay,
+                "inactive_decay": self._inactive_decay,
+                "ema_alpha": self._ema_alpha,
+            },
+        }
+
+    def _restore_scoped_state(self) -> None:
+        components = self._scoped_components
+        if components is None:
+            return
+        payload = components.load("social")
+        if payload is None:
+            return
+        groups = payload.get("groups")
+        if isinstance(groups, dict):
+            for group_key, state in groups.items():
+                if isinstance(group_key, str) and isinstance(state, dict):
+                    self._groups[group_key] = self._restore_group(state)
+        aliases = payload.get("group_key_aliases")
+        if isinstance(aliases, dict):
+            self._group_key_aliases = {
+                alias: target
+                for alias, target in aliases.items()
+                if isinstance(alias, str) and isinstance(target, str)
+            }
+        parameters = payload.get("parameters")
+        if isinstance(parameters, dict):
+            for attr, key in (
+                ("_pressure_rate", "pressure_rate"),
+                ("_pressure_cap", "pressure_cap"),
+                ("_post_reply_decay", "post_reply_decay"),
+                ("_inactive_decay", "inactive_decay"),
+                ("_ema_alpha", "ema_alpha"),
+            ):
+                value = parameters.get(key)
+                if isinstance(value, (int, float)):
+                    setattr(self, attr, float(value))
+
+    def scoped_group_snapshot(self, group_id: str) -> dict[str, object]:
+        """Inspect one raw group only in-memory; no raw group id is durable."""
+
+        if self._scoped_components is None:
+            raise ValueError("scoped persistence is not configured")
+        state = self._groups.get(self._group_key(group_id))
+        return {} if state is None else self._group_snapshot(state)
+
+    def flush_scoped_state(self) -> int:
+        components = self._scoped_components
+        if components is None:
+            raise ValueError("scoped persistence is not configured")
+        return components.save("social", self._scoped_payload())
+
+    def schedule_scoped_flush(self, *, delay_seconds: float) -> asyncio.Task[bool]:
+        components = self._scoped_components
+        if components is None:
+            raise ValueError("scoped persistence is not configured")
+        return components.schedule_save(
+            "social",
+            self._scoped_payload(),
+            delay_seconds=delay_seconds,
+        )
 
 
 def emotional_resistance(current_intensity: float, inner_order: float) -> float:

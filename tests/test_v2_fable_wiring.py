@@ -80,6 +80,14 @@ class _Plugin:
         self._kv[key] = value
 
 
+def test_private_runtime_alias_rejects_raw_key_when_scope_registry_present() -> None:
+    plugin = _Plugin(tempfile.mkdtemp(prefix="fw_scoped_raw_"))
+    plugin._scope_runtime_registry = object()
+
+    assert ig._runtime_for(plugin, "sess:fw") is None
+    assert not hasattr(plugin, "_v2core_runtimes")
+
+
 def test_response_tick_under_session_lock() -> None:
     """P-A：response 阶段对宿主的 tick 必须发生在会话锁持有期间（S5 串行义务）。
 

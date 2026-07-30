@@ -295,6 +295,72 @@ async def save_person_profile(
 
 
 # ---------------------------------------------------------------------------
+# Task-6 inactive relation persistence.  These helpers deliberately sit beside
+# the legacy KV API rather than replacing it: ingress has not switched yet.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class RelationPersonProfileState:
+    """One profile value plus the CAS generation of its relation component."""
+
+    profile: PersonProfile
+    generation: int
+
+    def __post_init__(self) -> None:
+        if type(self.profile) is not PersonProfile:
+            raise ValueError("profile must be a PersonProfile")
+        if type(self.generation) is not int or self.generation < 0:
+            raise ValueError("generation must be a non-negative int")
+
+
+# Short alias for callers that describe this as a relation profile snapshot.
+RelationProfileState = RelationPersonProfileState
+
+
+def _require_relation_profile_gateway(gateway: object):
+    from .scope_repository import RelationScopedPersistenceGateway
+
+    if type(gateway) is not RelationScopedPersistenceGateway:
+        raise ValueError("gateway must be a RelationScopedPersistenceGateway")
+    return gateway
+
+
+def load_relation_person_profile(gateway: object) -> RelationPersonProfileState:
+    """Load only the profile component from an exact frozen relation gateway."""
+
+    persistence = _require_relation_profile_gateway(gateway)
+    snapshot = persistence.load("profile")
+    if snapshot is None or type(snapshot.payload) is not dict:
+        return RelationPersonProfileState(profile=PersonProfile(), generation=0)
+    try:
+        profile = PersonProfile.from_dict(snapshot.payload)
+    except Exception:
+        profile = PersonProfile()
+    return RelationPersonProfileState(profile=profile, generation=snapshot.generation)
+
+
+def save_relation_person_profile(
+    gateway: object,
+    profile: PersonProfile,
+    *,
+    expected_generation: int,
+) -> int:
+    """CAS-save one profile through its captured relation gateway only."""
+
+    persistence = _require_relation_profile_gateway(gateway)
+    if type(profile) is not PersonProfile:
+        raise ValueError("profile must be a PersonProfile")
+    if type(expected_generation) is not int or expected_generation < 0:
+        raise ValueError("expected_generation must be a non-negative int")
+    return persistence.save(
+        "profile",
+        expected_generation=expected_generation,
+        payload=profile.to_dict(),
+    )
+
+
+# ---------------------------------------------------------------------------
 # 衰减纯函数（design §4.2）—— 本 slice 唯一涉及"计算"的部分，其余（播种/合并/purge）
 # 留后续 slice。纯函数：不读写 KV、不改传入对象、无副作用，可直接单元测。
 # ---------------------------------------------------------------------------

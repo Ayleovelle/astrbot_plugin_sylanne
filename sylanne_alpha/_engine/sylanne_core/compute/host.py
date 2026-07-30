@@ -18,7 +18,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from .kernel import AlphaKernel, AlphaKernelEvent
 from .runtime import AlphaRuntime
@@ -84,7 +84,12 @@ class SylanneAlphaHost:
     profile: DimensionProfile | None = None
     telemetry_sink: DistillationSink | None = None
     pel_enabled: bool = False
-    runtime: AlphaRuntime = field(init=False)
+    runtime_factory: Callable[..., Any] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    runtime: Any = field(init=False)
     kernel: AlphaKernel = field(init=False)
     _dirty: bool = field(init=False, default=False)
     _ticks_since_flush: int = field(init=False, default=0)
@@ -92,9 +97,20 @@ class SylanneAlphaHost:
     _pending_snapshot: dict[str, Any] | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
-        self.runtime = AlphaRuntime(
-            Path(self.root), profile=self.profile, pel_enabled=self.pel_enabled
-        )
+        if self.runtime_factory is None:
+            self.runtime = AlphaRuntime(
+                Path(self.root), profile=self.profile, pel_enabled=self.pel_enabled
+            )
+        else:
+            self.runtime = self.runtime_factory(
+                Path(self.root),
+                profile=self.profile,
+                pel_enabled=self.pel_enabled,
+            )
+            if not callable(getattr(self.runtime, "load", None)) or not callable(
+                getattr(self.runtime, "save_snapshot", None)
+            ):
+                raise TypeError("runtime_factory returned an invalid Alpha runtime")
         self.kernel = self.runtime.load(self.session_key)
         self.kernel.set_telemetry(self.telemetry_sink)
         self._last_flush_time = time.time()

@@ -24,6 +24,8 @@ import random
 import time
 from typing import Any
 
+from sylanne_alpha.scope_contracts import SessionScope
+from sylanne_alpha.scope_runtime import RelationRuntime, ScopedSessionRuntime
 from sylanne_alpha.variant_pool import choose
 
 try:
@@ -309,6 +311,12 @@ class ProactiveBridge:
         （没有该守卫能力）则退化为直接调用 getter，维持改动前的行为不变。
         """
         p = self._p
+        if getattr(p, "_scope_runtime_registry", None) is not None:
+            binding = self._scoped_runtime_binding(session_key)
+            if binding is None:
+                return None
+            memory = binding.session_runtime.memory_system
+            return memory
         mem_getter = getattr(p, "_memory_system_for_session", None)
         if not callable(mem_getter):
             return None
@@ -317,6 +325,37 @@ class ProactiveBridge:
         if mem_map is not None and hasattr(mem_map, "has") and not mem_map.has(session_key):
             return None
         return mem_getter(session_key)
+
+    def _scoped_runtime_binding(self, session_key: str) -> Any | None:
+        """Return one live exact binding without selecting or creating a runtime."""
+
+        p = self._p
+        registry = getattr(p, "_scope_runtime_registry", None)
+        if registry is None:
+            return None
+        getter = getattr(p, "_bound_runtime", None)
+        if not callable(getter):
+            return None
+        try:
+            binding = getter()
+        except Exception:
+            return None
+        scope = getattr(binding, "scope", None)
+        session_runtime = getattr(binding, "session_runtime", None)
+        if (
+            type(scope) is not SessionScope
+            or type(session_runtime) is not ScopedSessionRuntime
+            or session_runtime.scope != scope
+            or session_key != scope.storage_token
+            or not registry.is_live_session(scope)
+        ):
+            return None
+        try:
+            if registry.exact_session(scope) is not session_runtime:
+                return None
+        except Exception:
+            return None
+        return binding
 
     def consume_followup_on_dispatch(self, session_key: str, reason_code: str) -> None:
         """T2-05 MAJOR-1 修复（issue-43 同源的内容复读）：user_followup 标签的
@@ -376,11 +415,31 @@ class ProactiveBridge:
                 始终先于 surface。
         """
         p = self._p
+        scoped_registry = getattr(p, "_scope_runtime_registry", None)
+        binding = None
+        if scoped_registry is not None:
+            binding = self._scoped_runtime_binding(session_key)
+            if binding is None:
+                return "life_rhythm"
         # 1) 仪式缺席（proactive_scheduler.check_ritual_absence）——优先级最高，不依赖 surface
-        sched = getattr(p, "_proactive_scheduler", None)
+        if binding is None:
+            sched = getattr(p, "_proactive_scheduler", None)
+            relation_token = session_key
+        else:
+            sched = binding.session_runtime.proactive_scheduler
+            relation = getattr(binding, "relation_runtime", None)
+            relation_token = (
+                relation.scope.relation_ref.token
+                if type(relation) is RelationRuntime
+                else None
+            )
         if sched is not None and hasattr(sched, "check_ritual_absence"):
             try:
-                ritual = sched.check_ritual_absence(session_key)
+                ritual = (
+                    None
+                    if relation_token is None
+                    else sched.check_ritual_absence(relation_token)
+                )
                 if ritual:
                     return "ritual"
             except Exception:

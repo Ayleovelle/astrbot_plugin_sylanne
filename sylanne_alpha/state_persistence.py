@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 import zlib
 from typing import TYPE_CHECKING, Any
@@ -23,9 +24,21 @@ from sylanne_alpha.utils import safe_ensure_future
 
 if TYPE_CHECKING:
     from .host import SylanneAlphaHost
+    from .memory_system import MemorySystem
     from .protocols import PluginHost
+    from .scope_repository import ScopedPersistenceGateway
 
 logger = logging.getLogger("astrbot_plugin_sylanne")
+
+
+class LegacyWriteForbidden(RuntimeError):
+    """Raised when code tries to route a scoped host through legacy storage.
+
+    Scoped construction is deliberately available before the global ingress
+    flip.  This narrow exception gives that later flip one explicit boundary:
+    code that only knows how to write AstrBot KV or ``AlphaRuntime`` files must
+    stop instead of silently treating a scoped host as an ordinary session.
+    """
 
 # MEM-03 PR-4：单键全局跨重启 pending-delete 索引的 KV 键——不属于任何单一
 # session（详见 memory_migration_spine.MEMORY_KV_KEYS_MANIFEST 里的注释）。
@@ -370,6 +383,37 @@ class StatePersistence:
         """检查 AstrBot KV 存储 API 是否可用。"""
         return hasattr(self._p, "put_kv_data") and callable(self._p.put_kv_data)
 
+    @staticmethod
+    def _scoped_runtime_for_host(session_key: str, host: Any) -> Any | None:
+        """Return a validated scoped runtime, never a duck-typed substitute.
+
+        The exact runtime type is an authority boundary.  A caller may not
+        smuggle a raw transport/default/latest token into a frozen host and
+        then continue down the compatibility KV/file path.
+        """
+
+        from .scoped_host_runtime import ScopedAlphaRuntime
+
+        runtime = getattr(host, "runtime", None)
+        if type(runtime) is not ScopedAlphaRuntime:
+            return None
+        runtime.require_session_token(session_key)
+        return runtime
+
+    def require_legacy_write_allowed(self, session_key: str, host: Any) -> None:
+        """Fail closed if a legacy-only writer is handed a scoped host.
+
+        This boundary is intentionally not applied globally yet: ordinary
+        ``AlphaRuntime`` sessions remain compatible until atomic ingress
+        activation.  New scoped callers instead take the direct branches in
+        ``persist_kernel``/``persist_buffer`` below.
+        """
+
+        if self._scoped_runtime_for_host(session_key, host) is not None:
+            raise LegacyWriteForbidden(
+                "scoped hosts are read-only to legacy KV and AlphaRuntime writers"
+            )
+
     # ------------------------------------------------------------------
     # 各引擎子系统的 KV 键生成
     # ------------------------------------------------------------------
@@ -450,6 +494,15 @@ class StatePersistence:
             session_key: 会话标识。
             host: 包含 kernel 和 runtime 的 Host 实例。
         """
+        scoped_runtime = self._scoped_runtime_for_host(session_key, host)
+        if scoped_runtime is not None:
+            # Take and commit this CoW snapshot before the first await.  The
+            # adapter has already captured its immutable gateway and component
+            # generation, so no delayed task can follow a reset/rebinding into
+            # an unrelated current session.
+            scoped_runtime.save_snapshot(session_key, host.kernel.snapshot())
+            return
+
         import json as _json
 
         dirty_set = swap_dirty() if is_dirty() else set()
@@ -639,6 +692,10 @@ class StatePersistence:
             session_key: 会话标识。
             host: Host 实例。
         """
+        scoped_runtime = self._scoped_runtime_for_host(session_key, host)
+        if scoped_runtime is not None:
+            scoped_runtime.save_snapshot(session_key, host.kernel.snapshot())
+            return
         try:
             host.runtime.save(host.kernel)
         except Exception as e:
@@ -658,6 +715,13 @@ class StatePersistence:
             host: Host 实例。
             buf_dict: 缓冲区序列化字典。
         """
+        scoped_runtime = self._scoped_runtime_for_host(session_key, host)
+        if scoped_runtime is not None:
+            # Deliberately synchronous before the first await; the frozen
+            # gateway and buffer component generation are the exact write
+            # authority.  No AstrBot KV or legacy runtime method is reached.
+            scoped_runtime.save_buffer(session_key, buf_dict)
+            return
         if self.has_kv_api():
             try:
                 await self._p.put_kv_data(self.buffer_kv_key(session_key), buf_dict)
@@ -681,6 +745,9 @@ class StatePersistence:
         Returns:
             缓冲区字典，无数据时返回 None。
         """
+        scoped_runtime = self._scoped_runtime_for_host(session_key, host)
+        if scoped_runtime is not None:
+            return scoped_runtime.load_buffer(session_key)
         if self.has_kv_api():
             try:
                 data = await self._p.get_kv_data(self.buffer_kv_key(session_key), None)
@@ -2339,11 +2406,29 @@ class StatePersistence:
             )
             register_fn = getattr(conv_mgr, "register_on_session_deleted", None)
             if register_fn and callable(register_fn):
-                register_fn(self._on_session_deleted)
+                register_fn(self._on_session_deleted_callback)
                 logger.info("Sylanne: registered on_session_deleted callback")
         return conv_mgr
 
-    def _on_session_deleted(self, session_key: str) -> None:
+    async def _on_session_deleted_callback(self, session_key: str) -> None:
+        """Awaitable AstrBot callback adapter for the synchronous cleanup core."""
+
+        self._on_session_deleted(session_key)
+
+    def release_scoped_session(self, scope: object) -> bool:
+        """Release only an already-frozen scoped runtime owner."""
+
+        from .scope_contracts import SessionScope
+
+        if type(scope) is not SessionScope:
+            return False
+        registry = getattr(self._p, "_scope_runtime_registry", None)
+        if registry is None or not registry.is_live_session(scope):
+            return False
+        registry.release_session(scope)
+        return True
+
+    def _on_session_deleted(self, session_key: object) -> None:
         """AstrBot 会话删除回调——释放 Sylanne 侧的会话资源。
 
         会话态容器统一收口于 p._store.release_session（CP8-P2），结构性登记保证
@@ -2371,6 +2456,8 @@ class StatePersistence:
         retrieved" 噪音（详见 _on_memory_system_evicted 同款模式的 MINOR-1 注释）。
         """
         p = self._p
+        if self.release_scoped_session(session_key):
+            return
         if getattr(p, "_scope_runtime_registry", None) is not None:
             # ConversationManager supplies only a raw key here.  With scope runtime
             # enabled that is insufficient authority to select a private owner.
@@ -2378,6 +2465,8 @@ class StatePersistence:
             logger.debug(
                 "Sylanne session delete ignored without frozen scope: %s", session_key
             )
+            return
+        if type(session_key) is not str:
             return
         p._store.release_session(session_key)
         # bump 在 release 之后：占位者已 pop → occupant=None → 不 restamp → 旧引用全出局。
@@ -3186,19 +3275,6 @@ class StatePersistence:
         elif isinstance(tasks, list):
             tasks.clear()
         p._background_tasks = []
-        # Save final checkpoints for background post queues
-        bg_queues = p._store.background_post_queues
-        checkpoint_enabled = bool(
-            (p.config or {}).get("background_post_queue_checkpoint_enabled")
-        )
-        recovered = p._background_post_recovered_sessions
-        if checkpoint_enabled:
-            for sk in list(bg_queues.keys()):
-                if sk in recovered or bg_queues.get(sk):
-                    try:
-                        await p._save_background_post_checkpoint(sk)
-                    except Exception:
-                        pass
         # Clean up background post state
         p._background_post_tasks = {}
         p._store.background_post_queues.clear()
@@ -3211,3 +3287,192 @@ class StatePersistence:
             await stop_webui_server()
         except Exception:
             pass
+
+
+class ScopedStatePersistence:
+    """Memory-only persistence bound to one frozen scope gateway.
+
+    This is deliberately separate from :class:`StatePersistence`: the active
+    compatibility path still accepts raw session keys and may use AstrBot KV or
+    legacy files.  A scoped caller gets neither of those inputs nor fallback
+    branches.  Its only authority is the immutable gateway captured at
+    construction time.
+    """
+
+    __slots__ = ("_gateway", "_memory_generation")
+
+    _COMPONENT = "memory"
+
+    def __init__(self, gateway: "ScopedPersistenceGateway") -> None:
+        from .scope_repository import ScopedPersistenceGateway
+
+        if type(gateway) is not ScopedPersistenceGateway:
+            raise ValueError("gateway must be a ScopedPersistenceGateway")
+        self._gateway = gateway
+        self._memory_generation = 0
+
+    @property
+    def gateway(self) -> "ScopedPersistenceGateway":
+        """The one immutable capability this instance will ever use."""
+
+        return self._gateway
+
+    @property
+    def memory_generation(self) -> int:
+        """Last loaded or saved ``memory`` component generation."""
+
+        return self._memory_generation
+
+    @staticmethod
+    def _memory_payload(memory: "MemorySystem") -> dict[str, object]:
+        from .memory_system import MemorySystem
+
+        if not isinstance(memory, MemorySystem):
+            raise ValueError("memory must be a MemorySystem")
+        return ScopedStatePersistence._canonical_json_snapshot(memory.to_dict())
+
+    @staticmethod
+    def _canonical_json_snapshot(payload: object) -> dict[str, object]:
+        """Return a detached, canonical JSON snapshot of one memory payload.
+
+        ``MemorySystem.to_dict()`` constructs fresh outer containers but some
+        nested values (notably follow-up dictionaries) may still be shared with
+        the live system.  Delayed work must retain the exact state observed at
+        scheduling time, so normalize and JSON-round-trip before it can yield.
+        """
+
+        def _normalize(value: object) -> object:
+            if value is None or type(value) in (bool, int, str):
+                return value
+            if type(value) is float:
+                if not math.isfinite(value):
+                    raise ValueError("memory payload cannot contain a non-finite float")
+                return value
+            if type(value) in (list, tuple):
+                return [_normalize(item) for item in value]
+            if type(value) is dict:
+                normalized: dict[str, object] = {}
+                for key, item in value.items():
+                    if type(key) is not str:
+                        raise TypeError("memory payload object keys must be exact str")
+                    normalized[key] = _normalize(item)
+                return normalized
+            raise TypeError(
+                "memory payload contains a value that is not JSON-safe: "
+                f"{type(value).__qualname__}"
+            )
+
+        normalized = _normalize(payload)
+        if type(normalized) is not dict:
+            raise TypeError("memory payload must be an exact dict")
+        encoded = json.dumps(
+            normalized,
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        detached = json.loads(encoded)
+        if type(detached) is not dict:
+            raise RuntimeError("canonical memory payload did not decode to a dict")
+        return detached
+
+    async def load_memory(self) -> "MemorySystem | None":
+        """Load and reconstruct the ``memory`` component for this gateway only."""
+
+        from .memory_system import MemorySystem
+
+        memory = MemorySystem()
+        return self.restore_memory_into(memory)
+
+    def restore_memory_into(
+        self,
+        memory: "MemorySystem",
+    ) -> "MemorySystem | None":
+        """Synchronously restore one owner and capture its exact CAS generation."""
+
+        from .memory_system import MemorySystem
+
+        if not isinstance(memory, MemorySystem):
+            raise ValueError("memory must be a MemorySystem")
+        snapshot = self._gateway.load(self._COMPONENT)
+        if snapshot is None:
+            self._memory_generation = 0
+            return None
+        memory.from_dict(snapshot.payload)
+        self._memory_generation = snapshot.generation
+        return memory
+
+    async def _save_memory_payload(
+        self,
+        *,
+        gateway: "ScopedPersistenceGateway",
+        generation: int,
+        payload: dict[str, object],
+        stale_returns_false: bool,
+    ) -> bool:
+        """Commit one already-captured memory snapshot through its own gateway."""
+
+        from .scope_repository import StaleScopeWrite
+
+        try:
+            next_generation = gateway.save(
+                self._COMPONENT,
+                expected_generation=generation,
+                payload=payload,
+            )
+        except StaleScopeWrite:
+            if stale_returns_false:
+                return False
+            raise
+        if gateway is self._gateway and self._memory_generation == generation:
+            self._memory_generation = next_generation
+        return True
+
+    async def save_memory(self, memory: "MemorySystem") -> bool:
+        """CAS-save ``memory`` at this instance's captured component generation.
+
+        A stale direct writer is intentionally observable to its caller through
+        :class:`~sylanne_alpha.scope_repository.StaleScopeWrite`; only delayed
+        work below is safely discardable.
+        """
+
+        payload = self._memory_payload(memory)
+        return await self._save_memory_payload(
+            gateway=self._gateway,
+            generation=self._memory_generation,
+            payload=payload,
+            stale_returns_false=False,
+        )
+
+    def schedule_memory_save(
+        self,
+        memory: "MemorySystem",
+        *,
+        delay_seconds: float,
+    ) -> "asyncio.Task[bool]":
+        """Schedule a save that cannot follow a reset or newer CAS generation."""
+
+        if isinstance(delay_seconds, bool) or not isinstance(delay_seconds, (int, float)):
+            raise ValueError("delay_seconds must be a non-negative number")
+        delay = float(delay_seconds)
+        if delay < 0.0:
+            raise ValueError("delay_seconds must be a non-negative number")
+
+        # Capture every authority/input before yielding.  In particular, do not
+        # look up a current scope when the timer fires and do not reuse a newer
+        # component generation that this object may learn in the meantime.
+        gateway = self._gateway
+        generation = self._memory_generation
+        payload = self._memory_payload(memory)
+
+        async def delayed_save() -> bool:
+            await asyncio.sleep(delay)
+            return await self._save_memory_payload(
+                gateway=gateway,
+                generation=generation,
+                payload=payload,
+                stale_returns_false=True,
+            )
+
+        return asyncio.create_task(delayed_save())

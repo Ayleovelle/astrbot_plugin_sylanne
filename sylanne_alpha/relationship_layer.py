@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 try:
@@ -140,6 +141,97 @@ def restore(plugin: Any, data: dict) -> None:
     if isinstance(override_state, dict):
         for sk, ov in override_state.items():
             store.intimacy_override.set(sk, bool(ov))
+
+
+# ---------------------------------------------------------------------------
+# Task-6 inactive relation persistence.  This deliberately does not wire the
+# legacy plugin-wide register/override maps into relation scopes yet.
+# ---------------------------------------------------------------------------
+
+
+_RAW_IDENTITY_KEYS = frozenset(
+    {
+        "platform",
+        "platform_id",
+        "platform_realm",
+        "sender_id",
+        "subject_id",
+        "user_id",
+    }
+)
+
+
+def _contains_raw_identity_key(value: object) -> bool:
+    if type(value) is dict:
+        return any(
+            (type(key) is str and key in _RAW_IDENTITY_KEYS)
+            or _contains_raw_identity_key(item)
+            for key, item in value.items()
+        )
+    if type(value) in (list, tuple):
+        return any(_contains_raw_identity_key(item) for item in value)
+    return False
+
+
+@dataclass(frozen=True, slots=True)
+class RelationRelationshipState:
+    """One opaque relation relationship payload plus its CAS generation."""
+
+    state: dict[str, Any]
+    generation: int
+
+    def __post_init__(self) -> None:
+        if type(self.state) is not dict:
+            raise ValueError("state must be an exact dict")
+        if _contains_raw_identity_key(self.state):
+            raise ValueError("relationship state must not contain raw identity keys")
+        if type(self.generation) is not int or self.generation < 0:
+            raise ValueError("generation must be a non-negative int")
+
+
+RelationRelationshipSnapshot = RelationRelationshipState
+
+
+def _require_relation_relationship_gateway(gateway: object):
+    from .scope_repository import RelationScopedPersistenceGateway
+
+    if type(gateway) is not RelationScopedPersistenceGateway:
+        raise ValueError("gateway must be a RelationScopedPersistenceGateway")
+    return gateway
+
+
+def load_relation_relationship_state(gateway: object) -> RelationRelationshipState:
+    """Load only the opaque relationship component from one frozen gateway."""
+
+    persistence = _require_relation_relationship_gateway(gateway)
+    snapshot = persistence.load("relationship")
+    if snapshot is None or type(snapshot.payload) is not dict:
+        return RelationRelationshipState(state={}, generation=0)
+    if _contains_raw_identity_key(snapshot.payload):
+        return RelationRelationshipState(state={}, generation=snapshot.generation)
+    return RelationRelationshipState(state=dict(snapshot.payload), generation=snapshot.generation)
+
+
+def save_relation_relationship_state(
+    gateway: object,
+    state: dict[str, Any],
+    *,
+    expected_generation: int,
+) -> int:
+    """CAS-save opaque relationship state without a raw platform/sender key."""
+
+    persistence = _require_relation_relationship_gateway(gateway)
+    if type(state) is not dict:
+        raise ValueError("state must be an exact dict")
+    if _contains_raw_identity_key(state):
+        raise ValueError("relationship state must not contain raw identity keys")
+    if type(expected_generation) is not int or expected_generation < 0:
+        raise ValueError("expected_generation must be a non-negative int")
+    return persistence.save(
+        "relationship",
+        expected_generation=expected_generation,
+        payload=dict(state),
+    )
 
 
 # ---- /bond·/unbond（owner-gated，无 TOFU）----

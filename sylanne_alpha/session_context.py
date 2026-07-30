@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import hashlib
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +32,7 @@ except ImportError:
     def get_astrbot_data_path() -> Path:  # type: ignore
         return Path.home()
 
+
 from sylanne_alpha.infra import resolve_data_root
 from sylanne_alpha.host import SylanneAlphaHost
 from sylanne_alpha.memory_system import ConversationBuffer, MemorySystem
@@ -38,6 +40,9 @@ from sylanne_alpha.observation_history import (
     DEFAULT_MAX_BYTES,
     ObservationHistoryStore,
 )
+from sylanne_alpha.scope_repository import ScopedPersistenceGateway
+from sylanne_alpha.scope_contracts import VerifiedSubjectInput
+from sylanne_alpha.scope_runtime import FirstImpression, RelationRuntime, get_relationship_stage
 
 if TYPE_CHECKING:
     from sylanne_alpha.protocols import PluginHost
@@ -47,103 +52,6 @@ if TYPE_CHECKING:
 # 会读宿主系统时区，境外/UTC 服务器上会把凌晨的"早安"仪式误判成"深夜"（8 小时偏移）。
 # 与 v2core/capabilities/ignition.py 的 _CHINA_TZ 同一常量定义，仪式判断口径对齐。
 _CHINA_TZ = datetime.timezone(datetime.timedelta(hours=8))
-
-
-# ---------------------------------------------------------------------------
-# Item 153: 关系仪式注册表（RitualRegistry）
-# ---------------------------------------------------------------------------
-
-
-class RitualRegistry:
-    """关系仪式注册表：自动从重复行为模式中识别并注册"仪式"。
-
-    仪式是用户与 Sylanne 之间形成的固定互动模式（如每晚道晚安、
-    每天早上打招呼等）。当同一模式被观察到 3 次以上时，自动注册为仪式。
-
-    用途：
-    - 识别用户的行为规律，增强关系连续性感知
-    - 为主动联系提供时间窗口参考
-    - 仪式缺失时可触发"想念"信号
-    """
-
-    def __init__(self) -> None:
-        self._rituals: dict[str, dict] = {}  # name -> {hour_start, hour_end, pattern}
-        self._observations: dict[str, list[float]] = {}  # name -> [timestamps]
-
-    def observe_pattern(self, session_key: str, hour: int, pattern: str) -> None:
-        """观察到重复行为时记录。
-
-        当同一模式出现 3 次以上时，自动注册为仪式。
-
-        Args:
-            session_key: 会话标识。
-            hour: 当前小时（0-23）。
-            pattern: 行为模式描述（如 "greeting"、"goodnight"）。
-        """
-        key = f"{session_key}:{pattern}"
-        if key not in self._observations:
-            self._observations[key] = []
-        self._observations[key].append(time.time())
-        # 同一模式出现 3 次以上，自动注册为仪式
-        if len(self._observations[key]) >= 3:
-            self._rituals[key] = {
-                "hour_start": hour,
-                "hour_end": (hour + 1) % 24,
-                "pattern": pattern,
-            }
-            # 仪式已注册，只保留最近 5 条观测（用于更新时间窗口）
-            self._observations[key] = self._observations[key][-5:]
-
-    def get_active_rituals(self, session_key: str) -> list[dict]:
-        """获取指定会话的所有已注册仪式。
-
-        Args:
-            session_key: 会话标识。
-
-        Returns:
-            该会话的仪式列表，每个仪式包含 hour_start、hour_end、pattern。
-        """
-        return [v for k, v in self._rituals.items() if k.startswith(session_key)]
-
-    def get_ritual(self, session_key: str, pattern: str) -> dict | None:
-        """获取指定会话+模式的已注册仪式（未达自动注册阈值则 None）。
-
-        Args:
-            session_key: 会话标识。
-            pattern: 行为模式描述（如 "morning_greeting"）。
-        """
-        return self._rituals.get(f"{session_key}:{pattern}")
-
-    # ------------------------------------------------------------------
-    # 序列化（T2-06⑤：随插件 KV 周期持久化，重启不丢已学到的仪式）
-    # ------------------------------------------------------------------
-
-    def to_dict(self) -> dict:
-        """序列化为可 JSON 化的 dict。"""
-        return {
-            "rituals": dict(self._rituals),
-            "observations": {k: list(v) for k, v in self._observations.items()},
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "RitualRegistry":
-        """从字典恢复（load-compat：坏/缺字段一律安全降级为空）。"""
-        reg = cls()
-        if not isinstance(data, dict):
-            return reg
-        rituals = data.get("rituals", {})
-        if isinstance(rituals, dict):
-            reg._rituals = {
-                str(k): dict(v) for k, v in rituals.items() if isinstance(v, dict)
-            }
-        observations = data.get("observations", {})
-        if isinstance(observations, dict):
-            reg._observations = {
-                str(k): [float(t) for t in v if isinstance(t, (int, float))]
-                for k, v in observations.items()
-                if isinstance(v, list)
-            }
-        return reg
 
 
 # ---------------------------------------------------------------------------
@@ -172,93 +80,86 @@ def _detect_greeting_ritual_pattern(text: str) -> str | None:
     return None
 
 
-_RITUAL_REGISTRY_KV_KEY = "sylanne_ritual_registry_state"
+_DEVICE_CATEGORIES = frozenset({"mobile", "desktop", "other"})
 
 
-# ---------------------------------------------------------------------------
-# 关系年龄计算器（Item 125）
-# ---------------------------------------------------------------------------
+@dataclass(slots=True)
+class ScopedDeviceContext:
+    """Frozen session-owned device signal with no raw User-Agent persistence."""
 
-RELATIONSHIP_STAGES = {
-    "infant": (0, 3),       # 0-3 天：初识
-    "young": (3, 14),       # 3-14 天：熟悉中
-    "mature": (14, 90),     # 14-90 天：稳定关系
-    "deep": (90, float('inf')),  # 90 天+：深层关系
-}
+    gateway: ScopedPersistenceGateway
+    _generation: int = 0
+    _digest: str | None = None
+    _category: str | None = None
 
+    def __post_init__(self) -> None:
+        if type(self.gateway) is not ScopedPersistenceGateway:
+            raise ValueError("gateway must be a ScopedPersistenceGateway")
+        snapshot = self.gateway.load("device-context")
+        if snapshot is None:
+            return
+        self._generation = snapshot.generation
+        payload = snapshot.payload
+        if type(payload) is not dict:
+            return
+        digest = payload.get("digest")
+        category = payload.get("category")
+        if (
+            type(digest) is str
+            and len(digest) == 40
+            and all(char in "0123456789abcdef" for char in digest)
+            and type(category) is str
+            and category in _DEVICE_CATEGORIES
+        ):
+            self._digest = digest
+            self._category = category
 
-def get_relationship_stage(first_interaction: float) -> str:
-    """根据首次交互时间计算关系阶段。
+    @staticmethod
+    def _category_for(user_agent: str) -> str:
+        lowered = user_agent.lower()
+        if any(marker in lowered for marker in ("mobile", "android", "iphone", "ipad")):
+            return "mobile"
+        if any(marker in lowered for marker in ("windows", "macintosh", "x11", "linux")):
+            return "desktop"
+        return "other"
 
-    Args:
-        first_interaction: 首次交互的 Unix 时间戳（秒）。
+    def _digest_for(self, user_agent: str) -> str:
+        key = hashlib.sha256(self.gateway.scope.storage_token.encode("utf-8")).digest()
+        return hashlib.blake2b(
+            user_agent.encode("utf-8"),
+            key=key,
+            digest_size=20,
+        ).hexdigest()
 
-    Returns:
-        关系阶段名称：infant / young / mature / deep。
-    """
-    age_days = (time.time() - first_interaction) / 86400
-    for stage, (low, high) in RELATIONSHIP_STAGES.items():
-        if low <= age_days < high:
-            return stage
-    return "deep"
+    def last_device_category(self) -> str | None:
+        return self._category
 
+    def detect_change(self, user_agent: str) -> str | None:
+        """Persist the current opaque signal and return a coarse transition hint."""
 
-# ---------------------------------------------------------------------------
-# 第一印象锚定系统（Item 141 / Item 142）
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class FirstImpression:
-    """首次对话的印象锚定数据。
-
-    第一印象在关系早期具有极高权重，随时间缓慢衰减但永不完全消失。
-    这模拟了人类心理学中的"首因效应"——初始印象对后续判断的持久影响。
-    """
-
-    valence: float  # 首次对话情绪基调 (-1 ~ 1)
-    topic_type: str  # 话题类型（casual/deep/conflict/playful）
-    user_style: str  # 用户风格（brief/verbose/emotional/factual）
-    quality: float  # 互动质量 0-1
-    timestamp: float = field(default_factory=time.time)
-
-    def anchor_weight(self, relationship_age_days: float) -> float:
-        """锚定权重：前7天不衰减，7-30天缓慢衰减，30天后稳定在15-25%。
-
-        Args:
-            relationship_age_days: 关系年龄（天）。
-
-        Returns:
-            锚定权重，范围 0.15-1.0。
-        """
-        if relationship_age_days < 7:
-            return 1.0
-        elif relationship_age_days < 30:
-            decay = (relationship_age_days - 7) / 23
-            return 1.0 - decay * 0.75  # 1.0 → 0.25
-        else:
-            return 0.15 + self.quality * 0.1  # 15-25% 残留
-
-    def to_dict(self) -> dict:
-        """序列化为字典。"""
-        return {
-            "valence": self.valence,
-            "topic_type": self.topic_type,
-            "user_style": self.user_style,
-            "quality": self.quality,
-            "timestamp": self.timestamp,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "FirstImpression":
-        """从字典恢复。"""
-        return cls(
-            valence=float(data.get("valence", 0.0)),
-            topic_type=str(data.get("topic_type", "casual")),
-            user_style=str(data.get("user_style", "brief")),
-            quality=max(0.0, min(1.0, float(data.get("quality", 0.5)))),
-            timestamp=float(data.get("timestamp", 0.0) or time.time()),
+        if type(user_agent) is not str:
+            return None
+        digest = self._digest_for(user_agent)
+        category = self._category_for(user_agent)
+        previous_digest = self._digest
+        previous_category = self._category
+        if previous_digest == digest:
+            return None
+        next_generation = self.gateway.save(
+            "device-context",
+            expected_generation=self._generation,
+            payload={"digest": digest, "category": category},
         )
+        self._generation = next_generation
+        self._digest = digest
+        self._category = category
+        if previous_digest is None or previous_category == category:
+            return None
+        if category == "mobile" and previous_category != "mobile":
+            return "换到手机了？我简短些。"
+        if category == "desktop" and previous_category == "mobile":
+            return "回到电脑了，可以聊详细点。"
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +199,7 @@ class OfflineBuffer:
         self.last_push_ts = time.time()
         # 超出容量时丢弃最早的
         if len(self.buffer) > self._MAX_ITEMS:
-            self.buffer = self.buffer[-self._MAX_ITEMS:]
+            self.buffer = self.buffer[-self._MAX_ITEMS :]
 
     def drain_summary(self) -> str:
         """取出缓冲区内容并生成重连摘要。
@@ -312,7 +213,7 @@ class OfflineBuffer:
         if not self.buffer:
             return ""
         # 取最近 N 条
-        recent = self.buffer[-self._SUMMARY_COUNT:]
+        recent = self.buffer[-self._SUMMARY_COUNT :]
         self.buffer.clear()
         self.last_push_ts = 0.0
         # 拼接为摘要
@@ -387,15 +288,11 @@ def validate_session_isolation(hosts: dict) -> list[str]:
     # 检测共享违规
     for kid, sessions in kernel_ids.items():
         if len(sessions) > 1:
-            violations.append(
-                f"kernel 实例共享违规: id={kid:#x}, 涉及会话: {sessions}"
-            )
+            violations.append(f"kernel 实例共享违规: id={kid:#x}, 涉及会话: {sessions}")
 
     for mid, sessions in memory_ids.items():
         if len(sessions) > 1:
-            violations.append(
-                f"memory_system 实例共享违规: id={mid:#x}, 涉及会话: {sessions}"
-            )
+            violations.append(f"memory_system 实例共享违规: id={mid:#x}, 涉及会话: {sessions}")
 
     return violations
 
@@ -414,19 +311,7 @@ class SessionContext:
             plugin: Sylanne 插件实例，通过 self._p 访问其内部状态。
         """
         self._p = plugin
-        # Raw-key maps survive only as a compatibility reader for narrow plugin
-        # stubs which do not implement ScopeRuntimeRegistry.  Production state is
-        # owned by RelationRuntime / ScopedSessionRuntime and is never initialized
-        # here as a default bucket.
-        self._legacy_first_interaction_times: dict[str, float] | None = None
-        self._legacy_device_fingerprints: dict[str, str] | None = None
-        self._legacy_first_impressions: dict[str, FirstImpression] | None = None
-        self._legacy_ritual_registry: RitualRegistry | None = None
-        cfg = (
-            self._p.config
-            if hasattr(self._p, "_config")
-            else getattr(self._p, "config", {}) or {}
-        )
+        cfg = self._p.config if hasattr(self._p, "_config") else getattr(self._p, "config", {}) or {}
         self._observation_history_store = ObservationHistoryStore(
             Path(resolve_data_root(cfg)) / "observation-history",
             self._observation_history_limit_bytes,
@@ -448,17 +333,9 @@ class SessionContext:
 
     def _observation_history_limit_bytes(self) -> int:
         """动态读取历史存储预算；负值按 128 MiB 默认值处理。"""
-        cfg = (
-            self._p.config
-            if hasattr(self._p, "_config")
-            else getattr(self._p, "config", {}) or {}
-        )
+        cfg = self._p.config if hasattr(self._p, "_config") else getattr(self._p, "config", {}) or {}
         getter = getattr(cfg, "get", None)
-        raw_value = (
-            getter("sylanne_webui_history_storage_limit_mb", 128)
-            if callable(getter)
-            else 128
-        )
+        raw_value = getter("sylanne_webui_history_storage_limit_mb", 128) if callable(getter) else 128
         try:
             megabytes = int(raw_value)
         except (TypeError, ValueError, OverflowError):
@@ -494,146 +371,57 @@ class SessionContext:
         except Exception:
             return None
 
-    def _legacy_first_times(self) -> dict[str, float] | None:
-        if self._uses_scope_runtime():
-            return None
-        if self._legacy_first_interaction_times is None:
-            self._legacy_first_interaction_times = {}
-        return self._legacy_first_interaction_times
-
-    def _legacy_impressions(self) -> dict[str, FirstImpression] | None:
-        if self._uses_scope_runtime():
-            return None
-        if self._legacy_first_impressions is None:
-            self._legacy_first_impressions = {}
-        return self._legacy_first_impressions
-
-    def _legacy_devices(self) -> dict[str, str] | None:
-        if self._uses_scope_runtime():
-            return None
-        if self._legacy_device_fingerprints is None:
-            self._legacy_device_fingerprints = {}
-        return self._legacy_device_fingerprints
-
-    def _legacy_rituals(self) -> RitualRegistry | None:
-        if self._uses_scope_runtime():
-            return None
-        if self._legacy_ritual_registry is None:
-            self._legacy_ritual_registry = RitualRegistry()
-        return self._legacy_ritual_registry
-
     # ------------------------------------------------------------------
     # 关系年龄（Item 125 / Item 130）
     # ------------------------------------------------------------------
 
     def first_interaction_time(self, session_key: str) -> float:
-        """获取指定会话的首次交互时间戳。
+        """Return the active relation's first interaction, never a session bucket."""
 
-        如果尚未记录，以当前时间作为首次交互时间。
-
-        Args:
-            session_key: 会话标识。
-
-        Returns:
-            首次交互的 Unix 时间戳（秒）。
-        """
+        del session_key
         relation = self._active_relation_runtime()
-        if relation is not None:
-            return relation.first_interaction_times.setdefault("_relation", time.time())
-        legacy = self._legacy_first_times()
-        if legacy is None:
-            # A verified SessionScope alone is not an authenticated relationship.
-            # Do not create a session/default relation bucket.
-            return time.time()
-        return legacy.setdefault(session_key, time.time())
+        if type(relation) is RelationRuntime:
+            return relation.ensure_first_interaction_time()
+        # A missing authenticated relation is a no-op.  Preserve the legacy
+        # return shape for display callers without materialising anonymous state.
+        return time.time()
 
     def set_first_interaction_time(self, session_key: str, ts: float) -> None:
-        """显式设置首次交互时间（用于从持久化数据恢复）。
+        """Set state only on an already authenticated relation owner."""
 
-        Args:
-            session_key: 会话标识。
-            ts: Unix 时间戳（秒）。
-        """
+        del session_key
         relation = self._active_relation_runtime()
-        if relation is not None:
-            relation.first_interaction_times["_relation"] = ts
-            return
-        legacy = self._legacy_first_times()
-        if legacy is not None:
-            legacy[session_key] = ts
+        if type(relation) is RelationRuntime:
+            relation.set_first_interaction_time(ts)
 
     def relationship_stage(self, session_key: str) -> str:
-        """获取指定会话的关系阶段。
+        """Expose a display-safe relationship stage without a fallback bucket."""
 
-        Args:
-            session_key: 会话标识。
-
-        Returns:
-            关系阶段名称：infant / young / mature / deep。
-        """
+        relation = self._active_relation_runtime()
+        if type(relation) is RelationRuntime:
+            stage = relation.relationship_stage()
+            if stage is not None:
+                return stage
         return get_relationship_stage(self.first_interaction_time(session_key))
 
     def accelerate_relationship(self, session_key: str, intensity: float) -> None:
-        """高强度互动加速关系年龄。
+        """Apply acceleration only to an already authenticated relation owner."""
 
-        每次高强度互动等效于 intensity * 24 小时的关系积累（最多 1 天）。
-        通过回拨 first_interaction_time 实现，但不会超过真实首次交互前 30 天。
-
-        Args:
-            session_key: 会话标识。
-            intensity: 互动强度，范围 0-1。
-        """
-        intensity = max(0.0, min(1.0, intensity))
-        acceleration_hours = intensity * 24  # 最多等效 1 天
-        # 确保 first_interaction_time 已初始化
+        del session_key
         relation = self._active_relation_runtime()
-        if relation is None and self._uses_scope_runtime():
-            return
-        real_first = self.first_interaction_time(session_key)
-        # 下界：不早于真实首次交互前 30 天
-        floor = real_first - 30 * 86400
-        if relation is not None:
-            new_time = relation.first_interaction_times["_relation"] - acceleration_hours * 3600
-            relation.first_interaction_times["_relation"] = max(floor, new_time)
-            return
-        legacy = self._legacy_first_times()
-        if legacy is not None:
-            new_time = legacy[session_key] - acceleration_hours * 3600
-            legacy[session_key] = max(floor, new_time)
+        if type(relation) is RelationRuntime:
+            relation.accelerate_relationship(intensity)
 
     # ------------------------------------------------------------------
     # Item 103: 设备切换感知问候
     # ------------------------------------------------------------------
 
     def detect_device_change(self, session_key: str, current_ua: str) -> str | None:
-        """检测 User-Agent 变化，返回适配问候或 None。
+        """Registry-free compatibility seam; scoped callers must use the owner."""
 
-        Args:
-            session_key: 会话标识。
-            current_ua: 当前请求的 User-Agent 字符串。
-
-        Returns:
-            设备切换问候语，或 None（无变化时）。
-        """
-        session = self._active_session_runtime()
-        if session is not None:
-            last_ua = session.device_fingerprints.get("user_agent", "")
-            session.device_fingerprints["user_agent"] = current_ua
-        else:
-            legacy = self._legacy_devices()
-            if legacy is None:
-                return None
-            last_ua = legacy.get(session_key, "")
-            legacy[session_key] = current_ua
-        if not last_ua or last_ua == current_ua:
-            return None
-        # 简单判断：mobile vs desktop
-        is_mobile = any(k in current_ua.lower() for k in ("mobile", "android", "iphone"))
-        was_mobile = any(k in last_ua.lower() for k in ("mobile", "android", "iphone"))
-        if is_mobile and not was_mobile:
-            return "换到手机了？我简短些。"
-        elif not is_mobile and was_mobile:
-            return "回到电脑了，可以聊详细点。"
+        del session_key, current_ua
+        # This old shape is intentionally unable to select a live scoped session.
+        # Production receives ``ScopedDeviceContext`` from the exact runtime view.
         return None
 
     # ------------------------------------------------------------------
@@ -648,57 +436,30 @@ class SessionContext:
         user_style: str,
         quality: float,
     ) -> None:
-        """记录首次对话的第一印象。
+        """Record only through the active authenticated relation owner."""
 
-        仅在该 session 尚无第一印象时记录（不可覆盖）。
-
-        Args:
-            session_key: 会话标识。
-            valence: 情绪基调 (-1 ~ 1)。
-            topic_type: 话题类型（casual/deep/conflict/playful）。
-            user_style: 用户风格（brief/verbose/emotional/factual）。
-            quality: 互动质量 0-1。
-        """
+        del session_key
         relation = self._active_relation_runtime()
-        if relation is not None:
-            impressions = relation.first_impressions
-            key = "_relation"
-        else:
-            impressions = self._legacy_impressions()
-            if impressions is None:
-                return
-            key = session_key
-        if key in impressions:
-            return  # 第一印象不可覆盖
-        impressions[key] = FirstImpression(
-            valence=max(-1.0, min(1.0, valence)),
-            topic_type=topic_type,
-            user_style=user_style,
-            quality=max(0.0, min(1.0, quality)),
-        )
+        if type(relation) is RelationRuntime:
+            relation.record_first_impression(
+                valence=valence,
+                topic_type=topic_type,
+                user_style=user_style,
+                quality=quality,
+            )
 
     def get_impression_anchor(self, session_key: str) -> tuple[FirstImpression | None, float]:
-        """获取第一印象及其当前锚定权重。
+        """Return an anchor only from the active authenticated relation owner."""
 
-        Args:
-            session_key: 会话标识。
-
-        Returns:
-            (FirstImpression, anchor_weight) 元组。
-            如果无第一印象记录，返回 (None, 0.0)。
-        """
+        del session_key
         relation = self._active_relation_runtime()
-        if relation is not None:
-            impression = relation.first_impressions.get("_relation")
-        else:
-            impressions = self._legacy_impressions()
-            if impressions is None:
-                return (None, 0.0)
-            impression = impressions.get(session_key)
-        if impression is None:
+        if type(relation) is not RelationRuntime:
             return (None, 0.0)
-        first_ts = self.first_interaction_time(session_key)
-        age_days = (time.time() - first_ts) / 86400
+        impression = relation.first_impression()
+        first = relation.first_interaction_time()
+        if impression is None or first is None:
+            return (None, 0.0)
+        age_days = max(0.0, (time.time() - first) / 86_400)
         return (impression, impression.anchor_weight(age_days))
 
     # ------------------------------------------------------------------
@@ -729,11 +490,12 @@ class SessionContext:
         裸属性代理。本方法自身职责收窄回**只服务 `session_key()` 的桶派生**，
         不再是其他调用方的"身份解析"入口。
         """
-        return str(
-            getattr(event, "sender_id", "") or getattr(event, "user_id", "") or ""
-        )
+        return str(getattr(event, "sender_id", "") or getattr(event, "user_id", "") or "")
 
-    def resolve_authenticated_identity(self, event: Any) -> dict[str, str] | None:
+    def resolve_authenticated_identity(
+        self,
+        event: Any,
+    ) -> VerifiedSubjectInput | dict[str, str] | None:
         """跨群记忆三写点（货架写 / profile 软同步 / 出生播种）身份解析主判据。
 
         design: docs/architecture/v250-cross-group-memory-design.md §8 B1
@@ -803,6 +565,11 @@ class SessionContext:
             mt_name = ""
 
         if mt_name == "FRIEND_MESSAGE":
+            if self._uses_scope_runtime():
+                return VerifiedSubjectInput(
+                    platform_realm=platform,
+                    subject_id=sid,
+                )
             return {
                 "sender_id": sid,
                 "platform": platform,
@@ -823,6 +590,11 @@ class SessionContext:
             evt_session_id = str(getattr(event, "session_id", "") or "")
             if evt_session_id and evt_session_id != gid:
                 # unique_session ON：session_id 已被框架改写为 per-sender 形态
+                if self._uses_scope_runtime():
+                    return VerifiedSubjectInput(
+                        platform_realm=platform,
+                        subject_id=sid,
+                    )
                 return {
                     "sender_id": sid,
                     "platform": platform,
@@ -858,11 +630,7 @@ class SessionContext:
         if session_key:
             return session_key
         if event is not None:
-            base = str(
-                getattr(event, "session_id", "")
-                or getattr(event, "unified_msg_origin", "")
-                or "default"
-            )
+            base = str(getattr(event, "session_id", "") or getattr(event, "unified_msg_origin", "") or "default")
             # 群聊中追加 sender_id，使每个用户拥有独立的 host/kernel/计算脊柱。
             # 与 raw_bucket_sender_id() 共用同一口径（见该方法文档字符串）。
             sender_id = self.raw_bucket_sender_id(event)
@@ -942,9 +710,7 @@ class SessionContext:
     # 公共 session key 解析（用于 WebUI 等外部接口）
     # ------------------------------------------------------------------
 
-    def resolve_public_session_key(
-        self, event: Any = None, *, request: Any = None, session_key: str = ""
-    ) -> str:
+    def resolve_public_session_key(self, event: Any = None, *, request: Any = None, session_key: str = "") -> str:
         """解析公共会话标识，用于 WebUI 等外部接口。
 
         与 session_key() 不同，此方法不追加 sender_id，返回的是
@@ -985,75 +751,39 @@ class SessionContext:
         return "global"
 
     # ------------------------------------------------------------------
-    # Item 153 / T2-06：关系仪式注册表——观察 + 接线到 ProactiveScheduler
+    # Item 153 / T2-06：关系仪式观察
     # ------------------------------------------------------------------
 
-    def observe_ritual_pattern(self, session_key: str, hour: int, pattern: str) -> None:
-        """观察到重复问候/告别模式时喂给 RitualRegistry。
-
-        一旦 RitualRegistry 侧自动注册（≥3 次观测），同步登记进
-        ProactiveScheduler 自己的仪式表（scheduler.register_ritual）——此前
-        RitualRegistry 只是个孤立记录，没有任何调用方把它接到调度器的
-        check_ritual_absence，reason_code='ritual' 因此从未真正可达
-        （T2-06 审计发现的缺口）。命中即落盘（观测频率天然低，无需节流）。
-
-        Args:
-            session_key: 会话标识。
-            hour: 当前小时（0-23）。
-            pattern: 行为模式描述（如 "morning_greeting"、"night_farewell"）。
-        """
-        relation = self._active_relation_runtime()
-        if relation is not None:
-            registry = relation.ritual_registry
-            if registry is None:
-                registry = RitualRegistry()
-                relation.ritual_registry = registry
-            ritual_key = "_relation"
-            scheduler_key = relation.scope.relation_ref.token
-        else:
-            registry = self._legacy_rituals()
-            if registry is None:
-                # Missing authenticated RelationScope: relationship observations
-                # are intentionally no-ops, never session/global fallbacks.
-                return
-            ritual_key = session_key
-            scheduler_key = session_key
-        registry.observe_pattern(ritual_key, hour, pattern)
-        ritual = registry.get_ritual(ritual_key, pattern)
-        if not ritual:
-            return
-        scheduler = getattr(self._p, "_proactive_scheduler", None)
-        register = getattr(scheduler, "register_ritual", None) if scheduler is not None else None
-        if callable(register):
-            try:
-                register(
-                    scheduler_key,
-                    str(ritual.get("pattern", pattern)),
-                    int(ritual.get("hour_start", hour)),
-                    int(ritual.get("hour_end", (hour + 1) % 24)),
-                )
-            except Exception as e:
-                logger.debug(f"Sylanne ritual register_ritual skipped: {e}")
-        if (
-            not self._uses_scope_runtime()
-            and hasattr(self._p, "_has_kv_api")
-            and self._p._has_kv_api()
-        ):
-            try:
-                from sylanne_alpha.utils import safe_ensure_future
-
-                safe_ensure_future(
-                    self._p.put_kv_data(
-                        _RITUAL_REGISTRY_KV_KEY, registry.to_dict()
-                    ),
-                    name=f"ritual_registry_save_{session_key}",
-                )
-            except Exception as e:
-                logger.debug(f"Sylanne ritual registry save skipped: {e}")
-
-    def detect_and_observe_ritual_from_text(
-        self, session_key: str, text: str, now: float | None = None
+    def observe_ritual_pattern(
+        self,
+        session_key: str,
+        hour: int,
+        pattern: str,
+        *,
+        observed_at: float | None = None,
     ) -> None:
+        """Route a pattern to the already-bound relation owner, or skip it."""
+
+        del session_key
+        relation = self._active_relation_runtime()
+        if type(relation) is RelationRuntime:
+            ritual = relation.observe_ritual(
+                hour=hour,
+                pattern=pattern,
+                observed_at=observed_at,
+            )
+            session_runtime = self._active_session_runtime()
+            scheduler = getattr(session_runtime, "proactive_scheduler", None)
+            register = getattr(scheduler, "register_ritual", None)
+            if ritual is not None and callable(register):
+                register(
+                    relation.scope.relation_ref.token,
+                    str(ritual["pattern"]),
+                    int(ritual["hour_start"]),
+                    int(ritual["hour_end"]),
+                )
+
+    def detect_and_observe_ritual_from_text(self, session_key: str, text: str, now: float | None = None) -> None:
         """T2-06④：message ingest 钩子——从原始用户文本识别早安/晚安模式。
 
         识别方式与偏差说明见模块级 `_detect_greeting_ritual_pattern` 的注释
@@ -1072,7 +802,12 @@ class SessionContext:
         # 中国时区读取小时（非 time.localtime 的系统时区），避免境外/UTC 部署把凌晨
         # 早安仪式误判成深夜（8 小时偏移）。
         hour = datetime.datetime.fromtimestamp(ts, tz=_CHINA_TZ).hour
-        self.observe_ritual_pattern(session_key, hour, pattern)
+        self.observe_ritual_pattern(
+            session_key,
+            hour,
+            pattern,
+            observed_at=ts,
+        )
 
     # ------------------------------------------------------------------
     # 记忆系统辅助方法
@@ -1097,6 +832,18 @@ class SessionContext:
         Returns:
             该会话对应的 MemorySystem 实例。
         """
+        if self._uses_scope_runtime():
+            runtime = self._active_session_runtime()
+            if runtime is None:
+                raise ValueError("scoped memory lookup requires a frozen runtime")
+            if session_key != runtime.storage_token:
+                raise ValueError(
+                    "scoped memory lookup does not match frozen storage_token"
+                )
+            memory = runtime.memory_system
+            if not isinstance(memory, MemorySystem):
+                raise ValueError("scoped session runtime has no loaded memory owner")
+            return memory
         if not session_key:
             if self._uses_scope_runtime():
                 raise ValueError("scoped memory lookup requires storage_token")
@@ -1210,9 +957,7 @@ class SessionContext:
             if not text:
                 continue
             try:
-                temperature = float(
-                    trace.get("temperature", trace.get("warmth", 0.5)) or 0.5
-                )
+                temperature = float(trace.get("temperature", trace.get("warmth", 0.5)) or 0.5)
             except (TypeError, ValueError):
                 temperature = 0.5
             memory_system.write(
@@ -1224,15 +969,11 @@ class SessionContext:
             if memory_system._l1:
                 item = memory_system._l1[-1]
                 try:
-                    item.weight = max(
-                        0.0, min(1.0, float(trace.get("weight", 1.0) or 1.0))
-                    )
+                    item.weight = max(0.0, min(1.0, float(trace.get("weight", 1.0) or 1.0)))
                 except (TypeError, ValueError):
                     item.weight = 1.0
                 try:
-                    created_at = float(
-                        trace.get("created_at", trace.get("updated_at", 0.0)) or 0.0
-                    )
+                    created_at = float(trace.get("created_at", trace.get("updated_at", 0.0)) or 0.0)
                     if created_at > 0:
                         item.created_at = created_at
                 except (TypeError, ValueError):
@@ -1284,9 +1025,7 @@ class SessionContext:
                 exported = export_all()
             except Exception:
                 continue
-            persisted = (
-                exported.get("sessions", {}) if isinstance(exported, dict) else {}
-            )
+            persisted = exported.get("sessions", {}) if isinstance(exported, dict) else {}
             if isinstance(persisted, dict):
                 for key in persisted.keys():
                     add(key)
@@ -1321,6 +1060,18 @@ class SessionContext:
         Returns:
             该会话对应的 SylanneAlphaHost 实例。
         """
+        if self._uses_scope_runtime():
+            runtime = self._active_session_runtime()
+            if runtime is None:
+                raise ValueError("scoped host lookup requires a frozen runtime")
+            if session_key != runtime.storage_token:
+                raise ValueError(
+                    "scoped host lookup does not match frozen storage_token"
+                )
+            host = runtime.host
+            if not isinstance(host, SylanneAlphaHost):
+                raise ValueError("scoped session runtime has no gateway-bound host")
+            return host
         if not session_key:
             if self._uses_scope_runtime():
                 raise ValueError("scoped host lookup requires storage_token")
@@ -1336,6 +1087,7 @@ class SessionContext:
                 oldest_key = next(iter(hosts.keys()))
                 old_host = hosts.pop(oldest_key)
                 from sylanne_alpha.utils import safe_ensure_future
+
                 safe_ensure_future(
                     self._p._state_persistence.persist_kernel(oldest_key, old_host),
                     name=f"lru_evict_{oldest_key}",
@@ -1344,11 +1096,7 @@ class SessionContext:
                 # 再清进化层 per-session 状态。尤其 _restored 守卫必须清——否则同 key
                 # 后续重建时不会再从 KV 恢复，已落盘学习成果静默丢失。
                 self._persist_and_forget_evolution(oldest_key)
-            cfg = (
-                self._p.config
-                if hasattr(self._p, "_config")
-                else getattr(self._p, "config", {}) or {}
-            )
+            cfg = self._p.config if hasattr(self._p, "_config") else getattr(self._p, "config", {}) or {}
             root = resolve_data_root(cfg)
             host = SylanneAlphaHost(root=root, session_key=session_key)
             self._bind_observation_sink(host)
@@ -1371,11 +1119,7 @@ class SessionContext:
             else:
                 comp.replace_encoder(plugin_cls._shared_encoder)
             # 从人格状态派生记忆系统参数（人格驱动全参数）
-            personality = (
-                host.kernel._personality()
-                if hasattr(host.kernel, "_personality")
-                else {}
-            )
+            personality = host.kernel._personality() if hasattr(host.kernel, "_personality") else {}
             memory_system = self.memory_system_for_session(session_key)
             if personality and isinstance(personality, dict):
                 memory_system.derive_params(personality)
@@ -1400,9 +1144,7 @@ class SessionContext:
             if not self._p._store.conversation_buffers.has(session_key):
                 buf_data = host.runtime.load_buffer(session_key)
                 if buf_data and isinstance(buf_data, dict):
-                    self._p._store.conversation_buffers.set(
-                        session_key, ConversationBuffer.from_dict(buf_data)
-                    )
+                    self._p._store.conversation_buffers.set(session_key, ConversationBuffer.from_dict(buf_data))
         else:
             # 已存在：重新写入以刷新 LRU 顺序（set→__setitem__ 会 move_to_end）
             host = existing_host
@@ -1414,9 +1156,7 @@ class SessionContext:
     # v2.5.0 跨群记忆出生播种（design §3 关系+人格 / §4.1 transient / §8 B3）
     # ------------------------------------------------------------------
 
-    def _schedule_person_profile_seed(
-        self, session_key: str, host: SylanneAlphaHost, *, is_true_birth: bool
-    ) -> None:
+    def _schedule_person_profile_seed(self, session_key: str, host: SylanneAlphaHost, *, is_true_birth: bool) -> None:
         """`host()` 内的同步守门 + 调度入口。
 
         真正的 KV 读写是异步的（`get_kv_data`/`put_kv_data`），而 `host()` 本身
@@ -1429,6 +1169,13 @@ class SessionContext:
         `host.kernel._personality()`（同一 host 对象，同一进程内）时已是
         播种后的值，只有出生那一次 `derive_params` 调用用的是旧值。
         """
+        # A scoped request already owns a frozen RelationRuntime.  Do not turn
+        # its opaque subject into a legacy platform/sender KV lookup here: that
+        # would bypass the relation gateway and let a mutable session cache
+        # choose identity downstream.  The scoped ingress path supplies the
+        # relation-owned state directly instead.
+        if self._uses_scope_runtime():
+            return
         settings_mod = None
         try:
             from sylanne_alpha.cross_session_config import cross_session_settings
@@ -1503,6 +1250,10 @@ class SessionContext:
         §4.3"shadow 观测：播种点在 shadow 档落一条…不施加"）；只有
         `mode=="on"` 才真正写入 kernel/回写 `last_applied_*` 锚点。
         """
+        # Defense in depth for a task queued before a runtime mode transition.
+        # Scoped mode must never fall back to raw platform/sender persistence.
+        if self._uses_scope_runtime():
+            return
         from sylanne_alpha.cross_session_config import cross_session_settings
         from sylanne_alpha.person_profile import load_person_profile, seed_transient_delta
         from sylanne_alpha.person_shelf import register_person_shelf_origin
@@ -1525,9 +1276,7 @@ class SessionContext:
                 # 里留下可能需要 purge 反查的痕迹（transient 施加），登记失败
                 # 则本轮整体跳过（fail-closed，不产生孤儿）。
                 try:
-                    registered = await register_person_shelf_origin(
-                        self._p, safe_key, platform, sender_id, ""
-                    )
+                    registered = await register_person_shelf_origin(self._p, safe_key, platform, sender_id, "")
                 except Exception:
                     registered = False
                 if not registered:
@@ -1563,10 +1312,7 @@ class SessionContext:
                         )
 
                 if settings.cross_relationship and (
-                    profile.preference_count
-                    or profile.boundary_count
-                    or profile.progress_count
-                    or profile.repair_count
+                    profile.preference_count or profile.boundary_count or profile.progress_count or profile.repair_count
                 ):
                     if apply_live:
                         try:
@@ -1578,9 +1324,7 @@ class SessionContext:
                                 "repair_count": profile.repair_count,
                             }
                         except Exception as exc:
-                            logger.debug(
-                                f"Sylanne person profile seed: relationship seed failed: {exc}"
-                            )
+                            logger.debug(f"Sylanne person profile seed: relationship seed failed: {exc}")
                     else:
                         logger.debug(
                             "Sylanne person profile seed (shadow, would-apply): "
@@ -1605,8 +1349,7 @@ class SessionContext:
                                 host.kernel.body.apply_vector_delta(delta, now=now)
                             if (
                                 new_last_applied != profile.last_applied_transient
-                                or new_last_applied_volatility
-                                != profile.last_applied_volatility_transient
+                                or new_last_applied_volatility != profile.last_applied_volatility_transient
                             ):
                                 from sylanne_alpha.person_profile import save_person_profile
 
@@ -1617,9 +1360,7 @@ class SessionContext:
                                 )
                                 await save_person_profile(self._p, platform, sender_id, updated)
                         except Exception as exc:
-                            logger.debug(
-                                f"Sylanne person profile seed: transient apply failed: {exc}"
-                            )
+                            logger.debug(f"Sylanne person profile seed: transient apply failed: {exc}")
                     else:
                         # shadow：只落"若施加会怎样"的观测日志（person_hash 由
                         # debug 日志自身的 platform:sender_id 承担，Δt/衰减前后
@@ -1660,6 +1401,7 @@ class SessionContext:
                 snapshot = None
         if snapshot and consol is not None and hasattr(consol, "_write_evolution"):
             from sylanne_alpha.utils import safe_ensure_future
+
             safe_ensure_future(
                 consol._write_evolution(session_key, snapshot),
                 name=f"evo_persist_evict_{session_key}",

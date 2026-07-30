@@ -10,6 +10,10 @@ if TYPE_CHECKING:
     from .scope_identity import PersonaSource
 
 _TOKEN_PAYLOAD = re.compile(r"[A-Za-z0-9_-]+\Z", re.ASCII)
+_IDENTITY_QUALITY = "event_get_sender_id"
+_IDENTITY_QUALITY_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}\Z", re.ASCII)
+_SUBJECT_KIND = "user"
+_MAX_SUBJECT_COMPONENT_BYTES = 4096
 
 
 def _require_token(value: object, prefix: str) -> str:
@@ -45,6 +49,30 @@ def _require_optional_text(value: object, name: str) -> str | None:
 def _require_bool(value: object, name: str) -> bool:
     if type(value) is not bool:
         raise ValueError(f"{name} must be an exact bool")
+    return value
+
+
+def _require_subject_component(value: object, name: str) -> str:
+    """Validate a raw identity component without ever echoing it back."""
+
+    if type(value) is not str:
+        raise ValueError(f"{name} must be an exact non-empty str")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeError as exc:
+        raise ValueError(f"{name} must be an exact non-empty str") from exc
+    if not encoded or len(encoded) > _MAX_SUBJECT_COMPONENT_BYTES:
+        raise ValueError(f"{name} must be an exact non-empty str")
+    return value
+
+
+def _require_authenticated_identity_quality(value: object) -> str:
+    """Permit only the one adapter call path with sender authentication proof."""
+
+    if type(value) is not str or _IDENTITY_QUALITY_PATTERN.fullmatch(value) is None:
+        raise ValueError("identity_quality must be event_get_sender_id")
+    if value != _IDENTITY_QUALITY:
+        raise ValueError("identity_quality must be event_get_sender_id")
     return value
 
 
@@ -181,6 +209,55 @@ class RelationScope:
         if relation_ref.bot_ref != bot_ref:
             raise ValueError("relation does not belong to bot")
         _require_generation(self.relation_generation, "relation_generation")
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedSubjectInput:
+    """Ephemeral adapter proof material for one verified human sender.
+
+    ``subject_id`` is intentionally the only raw sender value in this path.  It
+    is accepted solely to HMAC-derive a :class:`RelationRef` and is redacted from
+    the dataclass representation; no durable/runtime contract carries it onward.
+    """
+
+    platform_realm: str
+    subject_kind: str = _SUBJECT_KIND
+    subject_id: str = field(default="", repr=False)
+    identity_quality: str = _IDENTITY_QUALITY
+
+    def __post_init__(self) -> None:
+        _require_subject_component(self.platform_realm, "platform_realm")
+        if type(self.subject_kind) is not str or self.subject_kind != _SUBJECT_KIND:
+            raise ValueError("subject_kind must be user")
+        _require_subject_component(self.subject_id, "subject_id")
+        _require_authenticated_identity_quality(self.identity_quality)
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticatedSubject:
+    """Opaque relation identity retained after raw adapter subject disposal."""
+
+    relation_ref: RelationRef
+    identity_quality: str
+
+    def __post_init__(self) -> None:
+        _require_relation_ref(self.relation_ref)
+        _require_authenticated_identity_quality(self.identity_quality)
+
+
+@dataclass(frozen=True, slots=True)
+class TurnSubjectProof:
+    """A subject proof bound to one opaque transport session turn."""
+
+    transport_session_token: str
+    turn_generation: int
+    subject: AuthenticatedSubject | None
+
+    def __post_init__(self) -> None:
+        _require_token(self.transport_session_token, "session_v1_")
+        _require_generation(self.turn_generation, "turn_generation")
+        if self.subject is not None and type(self.subject) is not AuthenticatedSubject:
+            raise ValueError("subject must be an AuthenticatedSubject or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -427,6 +504,7 @@ class ProactiveIntentDraft:
 
 
 __all__ = [
+    "AuthenticatedSubject",
     "BotDeliveryRef",
     "BotRef",
     "PersonaApiEcho",
@@ -445,4 +523,6 @@ __all__ = [
     "SessionRef",
     "SessionScope",
     "TurnDeliveryLease",
+    "TurnSubjectProof",
+    "VerifiedSubjectInput",
 ]

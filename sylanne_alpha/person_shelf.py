@@ -240,6 +240,70 @@ async def save_person_shelf(
         logger.debug("Sylanne person_shelf: 保存失败: %s", exc)
 
 
+# ---------------------------------------------------------------------------
+# Task-6 inactive relation persistence.  Keep the legacy raw-key KV API above
+# unchanged until ingress owns an authenticated relation runtime end-to-end.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class RelationPersonShelfState:
+    """One relation shelf bucket plus its component CAS generation."""
+
+    bucket: PersonShelfBucket
+    generation: int
+
+    def __post_init__(self) -> None:
+        if type(self.bucket) is not PersonShelfBucket:
+            raise ValueError("bucket must be a PersonShelfBucket")
+        if type(self.generation) is not int or self.generation < 0:
+            raise ValueError("generation must be a non-negative int")
+
+
+RelationShelfState = RelationPersonShelfState
+
+
+def _require_relation_shelf_gateway(gateway: object):
+    from .scope_repository import RelationScopedPersistenceGateway
+
+    if type(gateway) is not RelationScopedPersistenceGateway:
+        raise ValueError("gateway must be a RelationScopedPersistenceGateway")
+    return gateway
+
+
+def load_relation_person_shelf(gateway: object) -> RelationPersonShelfState:
+    """Load only the shelf component from an exact frozen relation gateway."""
+
+    persistence = _require_relation_shelf_gateway(gateway)
+    snapshot = persistence.load("shelf")
+    if snapshot is None:
+        return RelationPersonShelfState(bucket=PersonShelfBucket(), generation=0)
+    return RelationPersonShelfState(
+        bucket=PersonShelfBucket.from_dict(snapshot.payload),
+        generation=snapshot.generation,
+    )
+
+
+def save_relation_person_shelf(
+    gateway: object,
+    bucket: PersonShelfBucket,
+    *,
+    expected_generation: int,
+) -> int:
+    """CAS-save one shelf bucket through its captured relation gateway only."""
+
+    persistence = _require_relation_shelf_gateway(gateway)
+    if type(bucket) is not PersonShelfBucket:
+        raise ValueError("bucket must be a PersonShelfBucket")
+    if type(expected_generation) is not int or expected_generation < 0:
+        raise ValueError("expected_generation must be a non-negative int")
+    return persistence.save(
+        "shelf",
+        expected_generation=expected_generation,
+        payload=bucket.to_dict(),
+    )
+
+
 async def delete_person_shelf(plugin: Any, platform: str, sender_id: str) -> None:
     """整桶删除某人的货架（供 purge 级联用）。无 KV API / 键为空 / 删除异常均
     静默跳过（fail-safe，同 save_person_shelf 风格；purge 级联本就是 best-effort，

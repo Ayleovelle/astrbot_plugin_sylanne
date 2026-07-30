@@ -6,7 +6,12 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from sylanne_alpha.scope_identity import AdapterAccountProof, BotBinding, ScopeResolver
+from sylanne_alpha.scope_identity import (
+    AdapterAccountProof,
+    BotBinding,
+    PersonaSource,
+    ScopeResolver,
+)
 
 
 class _Session:
@@ -69,6 +74,247 @@ async def test_resolver_uses_astrbot_effective_persona_and_freezes_it() -> None:
         conversation_persona_id=None,
         platform_name="aiocqhttp",
         provider_settings={"default_personality": "narrator"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_prepare_resolves_persona_without_publishing_scope() -> None:
+    manager = SimpleNamespace(
+        resolve_selected_persona=AsyncMock(
+            return_value=(
+                "narrator",
+                {
+                    "prompt": "calm observer",
+                    "begin_dialogs": ["hello"],
+                    "tools": None,
+                    "skills": [],
+                },
+                None,
+                False,
+            )
+        )
+    )
+    resolver = ScopeResolver.for_test(
+        SimpleNamespace(
+            persona_manager=manager,
+            get_config=lambda *, umo: {"provider_settings": {}},
+        )
+    )
+    event = _event()
+    transport = resolver.resolve_transport(event)
+    binding = resolver.delivery_binding(event, transport)
+    assert binding is not None
+
+    def publish(turn) -> bool:
+        event.set_extra("_sylanne_transport_scope_v1", transport)
+        event.set_extra("_sylanne_transport_turn_v1", turn)
+        return True
+
+    resolving_turn = resolver.catalog.begin_turn(
+        transport,
+        binding,
+        publish=publish,
+    )
+    request = SimpleNamespace(conversation=SimpleNamespace(persona_id=None))
+
+    prepared = await resolver.prepare(event, request)
+
+    assert prepared.persona_source.persona_id == "narrator"
+    assert event.get_extra("_sylanne_resolved_scope_v1") is None
+    assert resolver.catalog.current(transport.session_ref.token) == resolving_turn
+    assert resolving_turn.turn_state == "resolving"
+
+    resolved = resolver.freeze(event, prepared)
+
+    assert resolved.private_scope_enabled is True
+    assert resolved.persona_source is prepared.persona_source
+
+
+@pytest.mark.asyncio
+async def test_freeze_rejects_equal_and_attacker_clones_without_publication(
+    tmp_path,
+) -> None:
+    manager = SimpleNamespace(
+        resolve_selected_persona=AsyncMock(
+            return_value=(
+                "narrator",
+                {
+                    "prompt": "calm observer",
+                    "begin_dialogs": [],
+                    "tools": None,
+                    "skills": [],
+                },
+                None,
+                False,
+            )
+        )
+    )
+    resolver = ScopeResolver.for_test(
+        SimpleNamespace(
+            persona_manager=manager,
+            get_config=lambda *, umo: {"provider_settings": {}},
+        ),
+        root=tmp_path,
+    )
+    event = _event()
+    transport = resolver.resolve_transport(event)
+    binding = resolver.delivery_binding(event, transport)
+    assert binding is not None
+
+    def publish(turn) -> bool:
+        event.set_extra("_sylanne_transport_scope_v1", transport)
+        event.set_extra("_sylanne_transport_turn_v1", turn)
+        return True
+
+    resolving_turn = resolver.catalog.begin_turn(
+        transport,
+        binding,
+        publish=publish,
+    )
+    prepared = await resolver.prepare(
+        event,
+        SimpleNamespace(conversation=SimpleNamespace(persona_id=None)),
+    )
+    attacker = replace(
+        prepared,
+        persona_source=PersonaSource(
+            persona_id="attacker",
+            prompt="publish attacker instructions",
+            begin_dialogs=(),
+            tools=None,
+            skills=None,
+            resolution_source="conversation",
+        ),
+    )
+
+    for forged in (replace(prepared), attacker):
+        rejected = resolver.freeze(event, forged)
+
+        assert rejected.private_scope_enabled is False
+        assert rejected.disabled_reason == "persona_preparation_unverified"
+        assert event.get_extra("_sylanne_resolved_scope_v1") is None
+        assert resolver.catalog.current(transport.session_ref.token) == resolving_turn
+        assert resolving_turn.turn_state == "resolving"
+        persona_root = (
+            resolver._repository.bots_directory
+            / transport.bot_ref.token
+            / "personas"
+        )
+        assert not persona_root.exists() or list(persona_root.rglob("*")) == []
+        with resolver._repository.transaction():
+            assert resolver._repository._read_catalog_locked()["scopes"] == {}
+
+    published = resolver.freeze(event, prepared)
+    assert published.private_scope_enabled is True
+    assert published.persona_source is prepared.persona_source
+    assert resolver.freeze(event, prepared) is published
+
+
+@pytest.mark.asyncio
+async def test_exact_preparation_failure_consumes_capability(tmp_path) -> None:
+    manager = SimpleNamespace(
+        resolve_selected_persona=AsyncMock(
+            return_value=(
+                "narrator",
+                {
+                    "prompt": "calm observer",
+                    "begin_dialogs": [],
+                    "tools": None,
+                    "skills": [],
+                },
+                None,
+                False,
+            )
+        )
+    )
+    resolver = ScopeResolver.for_test(
+        SimpleNamespace(
+            persona_manager=manager,
+            get_config=lambda *, umo: {"provider_settings": {}},
+        ),
+        root=tmp_path,
+    )
+    event = _event()
+    transport = resolver.resolve_transport(event)
+    binding = resolver.delivery_binding(event, transport)
+    assert binding is not None
+
+    def publish(turn) -> bool:
+        event.set_extra("_sylanne_transport_scope_v1", transport)
+        event.set_extra("_sylanne_transport_turn_v1", turn)
+        return True
+
+    resolving_turn = resolver.catalog.begin_turn(
+        transport,
+        binding,
+        publish=publish,
+    )
+    prepared = await resolver.prepare(
+        event,
+        SimpleNamespace(conversation=SimpleNamespace(persona_id=None)),
+    )
+    event.unified_msg_origin = "adapter:FriendMessage:changed"
+
+    failed = resolver.freeze(event, prepared)
+
+    assert failed.private_scope_enabled is False
+    assert failed.disabled_reason == "transport_parent_changed"
+    event.unified_msg_origin = "adapter:FriendMessage:42"
+    replay = resolver.freeze(event, prepared)
+    assert replay.private_scope_enabled is False
+    assert replay.disabled_reason == "persona_preparation_unverified"
+    assert resolver.catalog.current(transport.session_ref.token) == resolving_turn
+    assert resolving_turn.turn_state == "resolving"
+
+
+@pytest.mark.asyncio
+async def test_preparation_registry_is_bounded_and_strongly_holds_identity(
+    tmp_path,
+) -> None:
+    manager = SimpleNamespace(
+        resolve_selected_persona=AsyncMock(
+            return_value=(
+                "narrator",
+                {
+                    "prompt": "calm observer",
+                    "begin_dialogs": [],
+                    "tools": None,
+                    "skills": [],
+                },
+                None,
+                False,
+            )
+        )
+    )
+    resolver = ScopeResolver.for_test(
+        SimpleNamespace(
+            persona_manager=manager,
+            get_config=lambda *, umo: {"provider_settings": {}},
+        ),
+        root=tmp_path,
+    )
+    event = _event()
+    transport = resolver.resolve_transport(event)
+    binding = resolver.delivery_binding(event, transport)
+    assert binding is not None
+
+    def publish(turn) -> bool:
+        event.set_extra("_sylanne_transport_scope_v1", transport)
+        event.set_extra("_sylanne_transport_turn_v1", turn)
+        return True
+
+    resolver.catalog.begin_turn(transport, binding, publish=publish)
+    request = SimpleNamespace(conversation=SimpleNamespace(persona_id=None))
+    preparations = [await resolver.prepare(event, request) for _ in range(65)]
+
+    issued = getattr(resolver, "_issued_preparations", None)
+    assert isinstance(issued, dict)
+    assert len(issued) == 64
+    retained = preparations[-64:]
+    assert [record.prepared for record in issued.values()] == retained
+    assert all(
+        issued[id(prepared)].prepared is prepared
+        for prepared in retained
     )
 
 

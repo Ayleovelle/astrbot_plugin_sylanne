@@ -10,13 +10,15 @@ T2-05 —— user_followup 跟进线索：
   ③ consume-on-mention：用户主动提起同一话题时静默消费。
 
 T2-06 —— 晚安仪式感：
-  ④ 早安/晚安关键词观察 → session_context.RitualRegistry.observe_pattern。
+  ④ 早安/晚安关键词观察 → 已认证 RelationRuntime 的 RitualRegistry.observe_pattern。
      偏差：SDK assessor 的 greeting/farewell flag 在插件运行时路径不可达，改用关键词兜底
      （见 session_context._detect_greeting_ritual_pattern 的注释）。
-  ④'：一旦自动注册（≥3 次观测），同步接线进 ProactiveScheduler.register_ritual，
+  ④'：一旦自动注册（≥3 次观测），只向所属 exact ScopedSessionRuntime 的 scheduler
+     注册 timing hint，
      使既有 reason_code='ritual' 缺席检测（check_ritual_absence）真正可达
      （此前 RitualRegistry 是孤岛，从无调用方把它接到调度器）。
-  ⑤ RitualRegistry 状态随插件 KV 周期持久化（load-compat）。
+  ⑤ RitualRegistry 随 RelationScope 的 ``ritual`` 组件 CAS 持久化并在重启后恢复，
+     不使用插件全局 registry 或 KV 周期存档。
 """
 
 from __future__ import annotations
@@ -32,8 +34,13 @@ from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline
 from sylanne_alpha.memory_system import MemorySystem
 from sylanne_alpha.proactive_bridge import ProactiveBridge
 from sylanne_alpha.proactive_scheduler import ProactiveScheduler
-from sylanne_alpha.session_context import RitualRegistry, SessionContext
+from sylanne_alpha.scope_contracts import VerifiedSubjectInput
+from sylanne_alpha.scope_identity import ScopeIdentityKey
+from sylanne_alpha.scope_repository import ScopeRepository
+from sylanne_alpha.scope_runtime import RitualRegistry, ScopeRuntimeRegistry
+from sylanne_alpha.session_context import SessionContext
 from sylanne_alpha.session_state_store import SessionStateStore
+from tests.scope_fixtures import scopes
 
 
 def _ts(y, mo, d, h, mi=0) -> float:
@@ -417,181 +424,160 @@ class TestPendingFollowupPersistence:
 # ===========================================================================
 
 
-class _FakePluginForRitual:
-    """SessionContext 所需的最小插件替身：config + KV + scheduler 挂接。"""
-
+class _RecordingRelationScheduler:
     def __init__(self) -> None:
-        self.config = {}
-        self._proactive_scheduler: ProactiveScheduler | None = None
-        self._kv_store: dict[str, dict] = {}
-        self.kv_calls: list[tuple[str, dict]] = []
+        self.calls: list[tuple[str, str, int, int]] = []
 
-    def _has_kv_api(self) -> bool:
-        return True
+    def register_ritual(
+        self,
+        owner_token: str,
+        pattern: str,
+        hour_start: int,
+        hour_end: int,
+    ) -> None:
+        self.calls.append((owner_token, pattern, hour_start, hour_end))
 
-    async def put_kv_data(self, key: str, value) -> None:
-        self.kv_calls.append((key, value))
-        self._kv_store[key] = value
 
-    async def get_kv_data(self, key: str, default=None):
-        return self._kv_store.get(key, default)
+def _relation_context(tmp_path, scopes):
+    repository = ScopeRepository(tmp_path / "scope-v1")
+    session_scope = repository.create_scope(scopes.bot_a_persona_a, expected_absent=True)
+    identity = ScopeIdentityKey(key_id="ritual-test-key", secret=b"r" * 32)
+    subject = identity.authenticated_subject(
+        session_scope.bot_ref,
+        VerifiedSubjectInput(platform_realm="adapter", subject_id="ritual-person"),
+    )
+    assert subject is not None
+    registry = ScopeRuntimeRegistry(repository=repository)
+    relation = registry.relation_for(session_scope, subject)
+    assert relation is not None
+    session_runtime = registry.exact_session(session_scope)
+    scheduler = _RecordingRelationScheduler()
+    object.__setattr__(session_runtime, "proactive_scheduler", scheduler)
+
+    class _Plugin:
+        _scope_runtime_registry = registry
+        config = {}
+
+        def _active_scoped_session_runtime(self):
+            return session_runtime
+
+        def _active_relation_runtime(self):
+            return relation
+
+    return repository, session_scope, relation, scheduler, SessionContext(_Plugin())
 
 
 class TestRitualObservationWiring:
-    def test_below_threshold_does_not_register_or_reach_scheduler(self) -> None:
-        """观察不足 3 次——RitualRegistry 内部还没注册，也不该碰调度器。"""
-        plugin = _FakePluginForRitual()
-        sched = ProactiveScheduler(plugin)
-        plugin._proactive_scheduler = sched
-        ctx = SessionContext(plugin)
+    def test_below_threshold_does_not_register_or_reach_scheduler(self, tmp_path, scopes) -> None:
+        _, _, relation, scheduler, context = _relation_context(tmp_path, scopes)
+        context.observe_ritual_pattern("ignored", 22, "night_farewell")
+        context.observe_ritual_pattern("ignored", 22, "night_farewell")
+        assert relation.ritual("night_farewell") is None
+        assert scheduler.calls == []
 
-        ctx.observe_ritual_pattern("sessA", 22, "night_farewell")
-        ctx.observe_ritual_pattern("sessA", 22, "night_farewell")
-
-        assert ctx._ritual_registry.get_ritual("sessA", "night_farewell") is None
-        assert sched._ritual_registry == {}
-
-    def test_third_observation_registers_and_makes_ritual_reachable(self, monkeypatch) -> None:
-        """T2-06 核心断言：3 次观测后，既有 reason_code='ritual' 路径真正可达
-        （此前 RitualRegistry 是孤岛，check_ritual_absence 永远拿不到数据）。"""
-        plugin = _FakePluginForRitual()
-        sched = ProactiveScheduler(plugin)
-        plugin._proactive_scheduler = sched
-        ctx = SessionContext(plugin)
-
-        now = _ts(2026, 7, 3, 22, 30)
-        for _ in range(3):
-            ctx.observe_ritual_pattern("sessA", 22, "night_farewell")
-
-        # ① RitualRegistry 侧已注册
-        assert ctx._ritual_registry.get_ritual("sessA", "night_farewell") is not None
-        # ② 同步接线进 ProactiveScheduler 自己的仪式表
-        assert sched._ritual_registry.get("sessA", {}).get("night_farewell") == (22, 23)
-        # ③ check_ritual_absence 现在真的能命中（此前恒 None，因为调度器仪式表是空的）
-        assert sched.check_ritual_absence("sessA", now=now) == "night_farewell"
-
-        # ④ 进而 ProactiveBridge.infer_reason_code 能推断出 'ritual'
-        # infer_reason_code 内部调 check_ritual_absence(session_key) 不传 now，
-        # 因此用 monkeypatch 冻结 proactive_scheduler 模块内的 time.time()，
-        # 避免真实挂钟时间落在 22-23 点窗口外导致测试脆弱。
-        plugin.proactive_calls = 0
-
-        async def _fake_proactive_sylanne(*, session_key: str, now: float = 0.0):
-            plugin.proactive_calls += 1
-            return {"decision": {}}
-
-        plugin.proactive_sylanne = _fake_proactive_sylanne
-        bridge = ProactiveBridge(plugin)
-        monkeypatch.setattr(_sched_mod.time, "time", lambda: now)
-        rc = asyncio.run(bridge.infer_reason_code("sessA"))
-        assert rc == "ritual"
-
-    def test_before_wiring_ritual_reason_is_unreachable(self) -> None:
-        """反证：没有任何观测时，check_ritual_absence 恒 None，'ritual' 缘由
-        因而不可达（证明 T2-06 前 RitualRegistry 孤岛导致的缺口是真实的）。"""
-        plugin = _FakePluginForRitual()
-        sched = ProactiveScheduler(plugin)
-        plugin._proactive_scheduler = sched
-
-        now = _ts(2026, 7, 3, 22, 30)
-        assert sched.check_ritual_absence("sessA", now=now) is None
-
-    def test_kv_persist_on_registration_and_roundtrip(self) -> None:
-        """T2-06⑤：命中即落盘（fire-and-forget），且能从 KV 完整恢复。"""
-        plugin = _FakePluginForRitual()
-        sched = ProactiveScheduler(plugin)
-        plugin._proactive_scheduler = sched
-        ctx = SessionContext(plugin)
-
-        async def _drive() -> None:
-            for _ in range(3):
-                ctx.observe_ritual_pattern("sessA", 22, "night_farewell")
-            # 让 fire-and-forget 的落盘任务跑完
-            for _ in range(3):
-                await asyncio.sleep(0)
-
-        asyncio.run(_drive())
-
-        assert plugin.kv_calls, "应至少落盘一次"
-        key, saved = plugin.kv_calls[-1]
-        assert key == "sylanne_ritual_registry_state"
-        restored = RitualRegistry.from_dict(saved)
-        assert restored.get_ritual("sessA", "night_farewell") is not None
-
-    def test_detect_and_observe_from_text_morning_and_night(self) -> None:
-        """T2-06④：message-ingest 关键词兜底识别（早安/晚安）。"""
-        plugin = _FakePluginForRitual()
-        sched = ProactiveScheduler(plugin)
-        plugin._proactive_scheduler = sched
-        ctx = SessionContext(plugin)
-
-        now = _ts(2026, 7, 3, 7, 0)
-        for _ in range(3):
-            ctx.detect_and_observe_ritual_from_text("sessA", "早安呀！", now=now)
-        assert ctx._ritual_registry.get_ritual("sessA", "morning_greeting") is not None
-
-        now2 = _ts(2026, 7, 3, 23, 0)
-        for _ in range(3):
-            ctx.detect_and_observe_ritual_from_text("sessB", "晚安啦，睡了", now=now2)
-        assert ctx._ritual_registry.get_ritual("sessB", "night_farewell") is not None
-
-    def test_detect_and_observe_from_text_hour_independent_of_system_tz(
-        self, monkeypatch
+    def test_third_observation_is_relation_local_and_only_hints_owner_scheduler(
+        self,
+        tmp_path,
+        scopes,
     ) -> None:
-        """回归：仪式小时判定必须走固定中国时区（_CHINA_TZ），不能依赖
-        time.localtime() 读到的宿主系统时区——境外/UTC 服务器上 time.localtime
-        会把"早安"仪式判到完全错误的小时（8 小时偏移）。
+        _, _, relation, scheduler, context = _relation_context(tmp_path, scopes)
+        for _ in range(3):
+            context.observe_ritual_pattern("foreign-session", 22, "night_farewell")
 
-        用已知 UTC 时刻构造 ts（2026-07-02 23:30:00 UTC == 2026-07-03 07:30:00
-        中国时区），并把 time.localtime 打成必炸桩——证明修复后的代码路径根本
-        不再经过它，仍正确落在中国时区对应的小时 7。
-        """
-        plugin = _FakePluginForRitual()
-        sched = ProactiveScheduler(plugin)
-        plugin._proactive_scheduler = sched
-        ctx = SessionContext(plugin)
+        assert relation.ritual("night_farewell") == {
+            "hour_start": 22,
+            "hour_end": 23,
+            "pattern": "night_farewell",
+        }
+        assert scheduler.calls == [
+            (relation.scope.relation_ref.token, "night_farewell", 22, 23)
+        ]
+        assert ":" not in scheduler.calls[0][0]
 
+    def test_detect_and_observe_from_text_uses_china_hour_without_session_namespace(
+        self,
+        tmp_path,
+        scopes,
+        monkeypatch,
+    ) -> None:
+        _, _, relation, _, context = _relation_context(tmp_path, scopes)
         ts = datetime(2026, 7, 2, 23, 30, 0, tzinfo=timezone.utc).timestamp()
 
         def _boom(_ts=None):
             raise AssertionError("不应再调用依赖系统时区的 time.localtime()")
 
         monkeypatch.setattr(time, "localtime", _boom)
+        for _ in range(3):
+            context.detect_and_observe_ritual_from_text("foreign", "早安呀！", now=ts)
+        assert relation.ritual("morning_greeting") == {
+            "hour_start": 7,
+            "hour_end": 8,
+            "pattern": "morning_greeting",
+        }
+
+    def test_detect_and_observe_from_text_registers_night_on_active_relation(
+        self,
+        tmp_path,
+        scopes,
+    ) -> None:
+        _, _, relation, scheduler, context = _relation_context(tmp_path, scopes)
+        ts = datetime(2026, 7, 3, 15, 0, 0, tzinfo=timezone.utc).timestamp()
 
         for _ in range(3):
-            ctx.detect_and_observe_ritual_from_text("sessA", "早安呀！", now=ts)
-        ritual = ctx._ritual_registry.get_ritual("sessA", "morning_greeting")
-        assert ritual is not None
-        assert ritual["hour_start"] == 7
-        assert ritual["hour_end"] == 8
+            context.detect_and_observe_ritual_from_text(
+                "foreign",
+                "晚安啦，睡了",
+                now=ts,
+            )
 
-    def test_detect_and_observe_from_text_no_match_is_noop(self) -> None:
-        plugin = _FakePluginForRitual()
-        sched = ProactiveScheduler(plugin)
-        plugin._proactive_scheduler = sched
-        ctx = SessionContext(plugin)
+        assert relation.ritual("night_farewell") == {
+            "hour_start": 23,
+            "hour_end": 0,
+            "pattern": "night_farewell",
+        }
+        assert scheduler.calls == [
+            (relation.scope.relation_ref.token, "night_farewell", 23, 0)
+        ]
 
-        ctx.detect_and_observe_ritual_from_text("sessA", "中午吃什么呢", now=time.time())
-        assert ctx._ritual_registry.get_ritual("sessA", "morning_greeting") is None
-        assert ctx._ritual_registry.get_ritual("sessA", "night_farewell") is None
+    def test_non_ritual_text_is_noop_for_active_relation(
+        self,
+        tmp_path,
+        scopes,
+    ) -> None:
+        _, _, relation, scheduler, context = _relation_context(tmp_path, scopes)
+        ts = datetime(2026, 7, 3, 4, 0, 0, tzinfo=timezone.utc).timestamp()
+
+        for _ in range(3):
+            context.detect_and_observe_ritual_from_text(
+                "foreign",
+                "中午吃什么呢",
+                now=ts,
+            )
+
+        assert relation.ritual("morning_greeting") is None
+        assert relation.ritual("night_farewell") is None
+        assert scheduler.calls == []
+
+    def test_missing_relation_is_a_noop(self, tmp_path) -> None:
+        context = SessionContext(types.SimpleNamespace(config={}))
+        context.detect_and_observe_ritual_from_text("foreign", "早安呀！", now=time.time())
 
 
 class TestRitualRegistrySerialization:
-    def test_roundtrip(self) -> None:
+    def test_roundtrip_uses_pattern_only(self) -> None:
         reg = RitualRegistry()
         for _ in range(3):
-            reg.observe_pattern("sessA", 22, "night_farewell")
+            reg.observe_pattern(22, "night_farewell", observed_at=1.0)
         blob = reg.to_dict()
         restored = RitualRegistry.from_dict(blob)
-        assert restored.get_ritual("sessA", "night_farewell") == (
-            reg.get_ritual("sessA", "night_farewell")
-        )
+        assert restored.get_ritual("night_farewell") == reg.get_ritual("night_farewell")
+        assert set(blob["rituals"]) == {"night_farewell"}
 
     def test_from_dict_tolerates_garbage(self) -> None:
         reg = RitualRegistry.from_dict({"rituals": "not-a-dict", "observations": None})
-        assert reg.get_active_rituals("sessA") == []
-        reg2 = RitualRegistry.from_dict(None)  # type: ignore[arg-type]
-        assert reg2.get_active_rituals("sessA") == []
+        assert reg.get_active_rituals() == []
+        reg2 = RitualRegistry.from_dict(None)
+        assert reg2.get_active_rituals() == []
 
 
 # ===========================================================================

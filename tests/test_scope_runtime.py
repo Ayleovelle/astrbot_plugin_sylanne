@@ -13,7 +13,7 @@ import pytest
 
 from main import EmotionalStatePlugin
 from sylanne_alpha._engine.sylanne_core.compute.host import SylanneAlphaHost
-from sylanne_alpha.background_queue import BackgroundPostQueue
+from sylanne_alpha.background_queue import BackgroundPostJob, BackgroundPostQueue
 from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline
 from sylanne_alpha.proactive_scheduler import ProactiveScheduler
 from sylanne_alpha.public_api import PublicAPI
@@ -29,7 +29,9 @@ from sylanne_alpha.scope_runtime import (
     ScopeMismatch,
     ScopeRuntimeRegistry,
     ScopeUnavailable,
+    ScopedSessionRuntime,
 )
+from sylanne_alpha.scope_repository import ScopeRepository
 from sylanne_alpha.session_context import SessionContext
 from sylanne_alpha.v2core import integration
 from sylanne_alpha.webui_routes import WebUIRoutes
@@ -94,8 +96,22 @@ def _persona_plugin() -> EmotionalStatePlugin:
         _life_sim_memory_summary=noop,
         _qzone_candidate_handler=noop,
     )
+    def session_runtime_factory(scope, persona_runtime, persistence):
+        life_simulator = SimpleNamespace(
+            enabled=False,
+            interval_seconds=60.0,
+            configure=Mock(),
+        )
+        return ScopedSessionRuntime(
+            scope=scope,
+            store=persona_runtime.store,
+            persistence=persistence,
+            life_simulator=life_simulator,
+        )
+
     plugin._scope_runtime_registry = ScopeRuntimeRegistry(
         plugin._create_persona_runtime,
+        session_runtime_factory=session_runtime_factory,
     )
     plugin._background_tasks = []
     plugin._emotion_spirit_bridge = None
@@ -275,7 +291,7 @@ def test_registry_free_store_seam_cannot_bypass_a_scoped_registry(scopes) -> Non
 
 
 @pytest.mark.asyncio
-async def test_persona_autonomy_owners_activate_independently_and_retire_exactly(
+async def test_persona_autonomy_and_exact_session_lifecycle_retire_independently(
     scopes,
     monkeypatch,
 ) -> None:
@@ -285,61 +301,22 @@ async def test_persona_autonomy_owners_activate_independently_and_retire_exactly
     right_scope = scopes.bot_a_persona_b
     left = plugin._scope_runtime_registry.for_scope(left_scope)
     right = plugin._scope_runtime_registry.for_scope(right_scope)
-    plugin._scope_runtime_registry.exact_session(left_scope)
-    plugin._scope_runtime_registry.exact_session(right_scope)
+    left_session = plugin._scope_runtime_registry.exact_session(left_scope)
+    right_session = plugin._scope_runtime_registry.exact_session(right_scope)
 
     assert left.self_core is not right.self_core
     assert left.autonomy_scheduler is not right.autonomy_scheduler
 
-    async def _freeze(_plugin, event, _request):
-        return event.resolved_scope
-
-    async def _ready(*_args):
-        return True
-
-    async def _scope_tail(*_args):
-        return None
-
-    monkeypatch.setattr(EmotionalStatePlugin, "_freeze_scope_persona", _freeze)
-    monkeypatch.setattr(
-        EmotionalStatePlugin,
-        "_on_message_after_scope_frozen",
-        _ready,
-    )
-    monkeypatch.setattr(
-        EmotionalStatePlugin,
-        "_on_scope_ready_llm_request",
-        _scope_tail,
-    )
-    plugin._bind_runtime_for_event = lambda event: plugin._bind_runtime_for_scope(
-        event.resolved_scope.scope
-    )
-
-    def _event(scope):
-        transport = _transport_scope(scope)
-        return SimpleNamespace(
-            resolved_scope=_resolved_scope(scope),
-            get_extra=lambda key: (
-                transport if key == "_sylanne_transport_scope_v1" else None
-            ),
-        )
-
-    # Production request flow starts each frozen Persona owner exactly once.
-    await EmotionalStatePlugin._on_llm_request_inner(
-        plugin,
-        _event(left_scope),
-        object(),
-    )
-    await EmotionalStatePlugin._on_llm_request_inner(
-        plugin,
-        _event(right_scope),
-        object(),
-    )
+    with plugin._bind_runtime_for_scope(left_scope):
+        plugin._start_life_simulator()
+    with plugin._bind_runtime_for_scope(right_scope):
+        plugin._start_life_simulator()
 
     left_task = left.autonomy_scheduler_task
     right_task = right.autonomy_scheduler_task
-    assert left.life_simulator_started is True
-    assert right.life_simulator_started is True
+    assert left_session.lifecycle.life_simulator_started is True
+    assert right_session.lifecycle.life_simulator_started is True
+    assert left_session.life_simulator is not right_session.life_simulator
     assert left_task is not None and right_task is not None
     assert left_task is not right_task
     assert left_task.cancelled() is False
@@ -390,8 +367,8 @@ async def test_terminate_drains_and_consolidates_every_persona_autonomy_owner(
     right_scope = scopes.bot_a_persona_b
     left = plugin._scope_runtime_registry.for_scope(left_scope)
     right = plugin._scope_runtime_registry.for_scope(right_scope)
-    plugin._scope_runtime_registry.exact_session(left_scope)
-    plugin._scope_runtime_registry.exact_session(right_scope)
+    left_session = plugin._scope_runtime_registry.exact_session(left_scope)
+    right_session = plugin._scope_runtime_registry.exact_session(right_scope)
 
     with plugin._bind_runtime_for_scope(left_scope):
         plugin._start_life_simulator()
@@ -400,6 +377,8 @@ async def test_terminate_drains_and_consolidates_every_persona_autonomy_owner(
     left_task = left.autonomy_scheduler_task
     right_task = right.autonomy_scheduler_task
     assert left_task is not None and right_task is not None
+    assert left_session.lifecycle.life_simulator_started is True
+    assert right_session.lifecycle.life_simulator_started is True
 
     left_consolidate = AsyncMock()
     right_consolidate = AsyncMock()
@@ -510,10 +489,10 @@ def test_same_storage_token_with_new_scope_generation_has_its_own_session_runtim
 
     old_runtime = registry.exact_session(old_scope)
     new_runtime = registry.exact_session(new_scope)
-    old_runtime.device_fingerprints["device"] = "old"
 
     assert old_runtime is not new_runtime
-    assert new_runtime.device_fingerprints == {}
+    assert old_runtime.device_context_owner() is None
+    assert new_runtime.device_context_owner() is None
     assert registry.session_count == 2
 
 
@@ -548,38 +527,36 @@ def test_late_old_generation_cannot_replace_or_release_new_session(scopes) -> No
     assert registry.exact_session(new_scope).storage_token == new_scope.storage_token
 
 
-def test_wrong_persona_queue_cannot_write_the_bound_persona_scope(scopes) -> None:
-    registry = ScopeRuntimeRegistry.for_test()
-    left_scope = scopes.bot_a_persona_a
-    right_scope = scopes.bot_a_persona_b
-    left_runtime = registry.for_scope(left_scope)
-    right_runtime = registry.for_scope(right_scope)
-    registry.exact_session(left_scope)
-    registry.exact_session(right_scope)
-
-    class _Plugin:
-        _scope_runtime_registry = registry
-
-        def __init__(self) -> None:
-            self.binding = SimpleNamespace(
-                scope=right_scope,
-                persona_runtime=right_runtime,
-            )
-
-        def _bound_runtime(self):
-            return self.binding
-
-    plugin = _Plugin()
-    left_queue = BackgroundPostQueue(
-        plugin,
-        owner_persona_ref=left_scope.persona_ref,
+def test_exact_session_queue_gateway_cannot_cross_persona_scope(
+    scopes,
+    tmp_path,
+) -> None:
+    repository = ScopeRepository(tmp_path)
+    left_scope = repository.create_scope(
+        scopes.bot_a_persona_a,
+        expected_absent=True,
     )
-    left_runtime.background_queue = left_queue
+    right_scope = repository.create_scope(
+        scopes.bot_a_persona_b,
+        expected_absent=True,
+    )
+    registry = ScopeRuntimeRegistry.for_test(repository=repository)
+    left_session = registry.exact_session(left_scope)
+    right_session = registry.exact_session(right_scope)
+    left_queue = BackgroundPostQueue(left_session.persistence)
+    left_queue.enqueue(
+        BackgroundPostJob(None, "subject", "left", "context", 1, 1.0)
+    )
 
-    decision = left_queue.adaptive_worker_decision(right_scope.storage_token)
+    assert left_queue.save_checkpoint_now() is True
 
-    assert decision["dispatch_workers"] == 0
-    assert decision["reasons"] == ["scope_unavailable"]
+    right_queue = BackgroundPostQueue(right_session.persistence)
+    assert right_queue.recover_before_publication() is False
+    assert right_queue.pending_count == 0
+
+    restarted_left = BackgroundPostQueue(left_session.persistence)
+    assert restarted_left.recover_before_publication() is True
+    assert restarted_left.pending_count == 1
 
 
 def test_v2core_same_raw_session_isolated_by_full_scope(scopes, tmp_path) -> None:
@@ -702,9 +679,6 @@ def test_relation_observations_noop_without_authenticated_relation_scope(
     context.observe_ritual_pattern(scope.storage_token, 9, "morning_greeting")
     context.accelerate_relationship(scope.storage_token, 1.0)
 
-    assert context._legacy_first_impressions is None
-    assert context._legacy_first_interaction_times is None
-    assert context._legacy_ritual_registry is None
     assert plugin.put_calls == []
     assert persona_runtime.relation_runtimes == {}
 
@@ -741,7 +715,7 @@ def test_public_session_reader_never_falls_back_to_global_in_scoped_runtime(
 def test_relation_runtimes_and_rituals_are_exactly_isolated(scopes, tmp_path) -> None:
     registry = ScopeRuntimeRegistry.for_test()
     scope = scopes.bot_a_persona_a
-    registry.for_scope(scope)
+    persona_runtime = registry.for_scope(scope)
     session_runtime = registry.exact_session(scope)
     left_scope = RelationScope(
         bot_ref=scope.bot_ref,
@@ -755,9 +729,11 @@ def test_relation_runtimes_and_rituals_are_exactly_isolated(scopes, tmp_path) ->
         relation_ref=RelationRef("relation_v1_fixture_right", scope.bot_ref),
         relation_generation=0,
     )
-    left = registry.relation_or_none(left_scope)
-    right = registry.relation_or_none(right_scope)
+    left = persona_runtime.relation_for(left_scope)
+    right = persona_runtime.relation_for(right_scope)
     assert left is not None and right is not None and left is not right
+    assert registry.relation_or_none(left_scope) is left
+    assert registry.relation_or_none(right_scope) is right
 
     class _Plugin:
         _scope_runtime_registry = registry
@@ -786,13 +762,11 @@ def test_relation_runtimes_and_rituals_are_exactly_isolated(scopes, tmp_path) ->
     for _ in range(3):
         context.observe_ritual_pattern(scope.storage_token, 22, "night_farewell")
 
-    assert left.first_impressions is not right.first_impressions
-    assert left.ritual_registry is not None
-    assert right.ritual_registry is not None
     assert left.ritual_registry is not right.ritual_registry
-    assert left.ritual_registry.get_ritual("_relation", "morning_greeting") is not None
-    assert left.ritual_registry.get_ritual("_relation", "night_farewell") is None
-    assert right.ritual_registry.get_ritual("_relation", "night_farewell") is not None
+    assert left.first_impression() is not right.first_impression()
+    assert left.ritual("morning_greeting") is not None
+    assert left.ritual("night_farewell") is None
+    assert right.ritual("night_farewell") is not None
 
 
 @pytest.mark.asyncio

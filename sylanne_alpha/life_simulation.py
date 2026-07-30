@@ -22,11 +22,15 @@ _simulate_tick 重构为编排器，旧状态自动迁移。ShareIntent 留给 P
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
+
+from .scoped_session_components import ScopedSessionComponentStore
+from .scope_repository import ScopedPersistenceGateway
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +63,7 @@ SKILL_EFFECTIVENESS_FLOOR = 0.1
 OUTREACH_TIMEOUT_SECONDS = 1800.0
 OUTREACH_AUDIT_PER_SESSION = 20
 OUTREACH_AUDIT_MAX_SESSIONS = 100
+_SCOPED_AUDIT_KEY = "_scoped"
 
 # 内部哨兵：from_dict 中区分 "skills" key 缺席（v2 数据需 seed）vs key 存在但值为
 # 空 list（v3 数据用户清空，应保留）。不能用 None / [] 做 sentinel，因为 v3 的
@@ -849,9 +854,25 @@ class LifeSimulator:
     tick 后可经 `state_dirty_callback` 触发宿主节流落盘（见 §PR-A5）。
     """
 
-    def __init__(self, config: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        config: dict[str, Any] | None = None,
+        *,
+        persistence: ScopedPersistenceGateway | None = None,
+    ):
+        """Build a life owner in either explicit legacy or frozen scoped mode.
+
+        Omitting ``persistence`` deliberately keeps the old registry-free
+        construction seam for compatibility.  Supplying it creates a single
+        immutable capability owner: no session key, KV object, or file path can
+        participate in the scoped restore/write path.
+        """
+
         self._config = config or {}
         self.state = LifeSimulationState()
+        self._scoped_components = (
+            None if persistence is None else ScopedSessionComponentStore(persistence)
+        )
         self._llm_caller: Callable[..., Awaitable[str]] | None = None  # LLM 调用回调
         self._outreach_callback: Callable[[str, str], Awaitable[None]] | None = (
             None  # 主动联系回调
@@ -877,6 +898,8 @@ class LifeSimulator:
         self._consecutive_failures: int = 0
         self._backoff_skip_remaining: int = 0
         self._last_fail_warn_ts: float = 0.0  # 上次持续失败告警的壁钟（时间制重发节流）
+        if self._scoped_components is not None:
+            self._restore_scoped_state()
 
     @property
     def enabled(self) -> bool:
@@ -1654,6 +1677,10 @@ class LifeSimulator:
 
     def _audit_session_key(self, event: LifeEvent) -> str:
         """选择 audit 索引 key：origin_session 优先，否则 _global（不污染真实会话）。"""
+        if self._scoped_components is not None:
+            # The component is already partitioned by the frozen SessionScope.
+            # Do not copy an origin/session selector into its payload.
+            return _SCOPED_AUDIT_KEY
         return event.origin_session or "_global"
 
     def _audit_bucket_append(self, key: str, entry: dict) -> None:
@@ -1711,10 +1738,22 @@ class LifeSimulator:
 
         返回标记的条数。供 main.py / pipeline 在收到用户消息时调用。
         """
-        if not session_key:
+        if self._scoped_components is not None:
+            raise ValueError("scoped life state requires record_scoped_user_response")
+        return self._record_user_response_for_key(session_key, now=now)
+
+    def record_scoped_user_response(self, now: float | None = None) -> int:
+        """Mark feedback for this frozen session without accepting a raw key."""
+
+        if self._scoped_components is None:
+            raise ValueError("scoped persistence is not configured")
+        return self._record_user_response_for_key(_SCOPED_AUDIT_KEY, now=now)
+
+    def _record_user_response_for_key(self, key: str, *, now: float | None) -> int:
+        if not key:
             return 0
         ts = now if now is not None else time.time()
-        bucket = self.state.outreach_audit.get(session_key)
+        bucket = self.state.outreach_audit.get(key)
         if not bucket:
             return 0
         marked = 0
@@ -1966,6 +2005,84 @@ class LifeSimulator:
 
     def from_dict(self, data: dict[str, Any]):
         self.state = LifeSimulationState.from_dict(data)
+
+    # ------------------------------------------------------------------
+    # Scope-v1 session component persistence
+    # ------------------------------------------------------------------
+
+    @property
+    def persistence(self) -> ScopedPersistenceGateway | None:
+        """Return the frozen scoped capability, when this is a scoped owner."""
+
+        components = self._scoped_components
+        return None if components is None else components.gateway
+
+    def _scoped_payload(self) -> dict[str, object]:
+        """Serialize durable life state without a transport/session identity.
+
+        ``origin_session`` and the legacy per-session audit index were required
+        while one simulator was shared globally.  A scope-v1 life owner is
+        already one exact SessionScope, so retaining either would duplicate raw
+        routing identity in the component payload.  The scoped audit bucket is
+        intentionally a fixed local slot instead.
+        """
+
+        payload: dict[str, object] = self.state.to_dict()
+        payload["schema_version"] = "sylanne.life.scoped.v1"
+        events = payload.get("events")
+        if isinstance(events, list):
+            sanitized_events: list[dict[str, object]] = []
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                sanitized = dict(event)
+                # Omit the routing field entirely.  An empty value would still
+                # preserve a session-shaped payload schema without serving the
+                # scoped owner.
+                sanitized.pop("origin_session", None)
+                sanitized_events.append(sanitized)
+            payload["events"] = sanitized_events
+        audits = payload.get("outreach_audit")
+        scoped_audit: list[object] = []
+        if isinstance(audits, dict):
+            candidate = audits.get(_SCOPED_AUDIT_KEY)
+            if isinstance(candidate, list):
+                scoped_audit = list(candidate)
+        payload["outreach_audit"] = {_SCOPED_AUDIT_KEY: scoped_audit}
+        return payload
+
+    def _restore_scoped_state(self) -> None:
+        components = self._scoped_components
+        if components is None:
+            return
+        payload = components.load("life")
+        if payload is not None:
+            self.state = LifeSimulationState.from_dict(payload)
+
+    def flush_scoped_state(self) -> int:
+        """CAS-write this exact scope's life component.
+
+        Direct callers receive ``StaleScopeWrite`` from the frozen gateway.  A
+        delayed caller should use :meth:`schedule_scoped_flush`, which records
+        and discards stale work rather than looking up a replacement runtime.
+        """
+
+        components = self._scoped_components
+        if components is None:
+            raise ValueError("scoped persistence is not configured")
+        return components.save("life", self._scoped_payload())
+
+    def schedule_scoped_flush(self, *, delay_seconds: float) -> asyncio.Task[bool]:
+        """Capture and asynchronously save only through this frozen gateway."""
+
+        components = self._scoped_components
+        if components is None:
+            raise ValueError("scoped persistence is not configured")
+        return components.schedule_save(
+            "life",
+            self._scoped_payload(),
+            delay_seconds=delay_seconds,
+        )
 
 
 # ---------------------------------------------------------------------------

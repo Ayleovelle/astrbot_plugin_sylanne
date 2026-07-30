@@ -25,7 +25,10 @@ import os
 import threading
 import time
 from pathlib import Path
+from typing import Any, Coroutine
 
+from sylanne_alpha.scoped_engine_persistence import ScopedEnginePersistence
+from sylanne_alpha.scope_repository import ScopedPersistenceGateway
 from sylanne_alpha.v2core.shadow_snapshot import V2SeedSnapshotV1
 from sylanne_alpha.v3bridge.actual_action import ActualAction
 from sylanne_alpha.v3bridge.effect_committer import EffectCommitter
@@ -56,6 +59,36 @@ from sylanne_alpha.v3core.orchestrator import orchestrate
 
 
 DEFAULT_SHADOW_DEADLINE_MS = 250.0
+
+
+class ScopedV3ShadowState:
+    """The scope-v1 state seam for one V3 shadow component.
+
+    This intentionally has no filesystem root, raw session reference, or
+    fallback selector.  The legacy journal runtime remains an explicit separate
+    construction path until main wiring routes V3 shadow snapshots through this
+    capability.
+    """
+
+    def __init__(self, persistence: ScopedPersistenceGateway) -> None:
+        self._engine = ScopedEnginePersistence(persistence)
+
+    @property
+    def persistence(self) -> ScopedPersistenceGateway:
+        return self._engine.persistence
+
+    def load(self) -> dict[str, object] | None:
+        snapshot = self._engine.load_v3_shadow()
+        return None if snapshot is None else snapshot.payload
+
+    def save(self, payload: object) -> int:
+        return self._engine.save_v3_shadow(payload)
+
+    def save_delayed(self, payload: object) -> Coroutine[Any, Any, bool]:
+        return self._engine.save_v3_shadow_delayed(payload)
+
+    def schedule_save(self, payload: object, *, delay_seconds: float = 0.0) -> asyncio.Task[bool]:
+        return self._engine.schedule_v3_shadow_save(payload, delay_seconds=delay_seconds)
 
 
 def _tree_usage_bytes(root: Path, *, excluded: Path) -> int:
@@ -108,6 +141,7 @@ class V3ShadowRuntime:
         job_timeout_s: float | None = 30.0,
         drain_timeout_s: float = 5.0,
         shutdown_step_timeout_s: float = 5.0,
+        persistence: ScopedPersistenceGateway | None = None,
     ) -> None:
         self._plugin_instance_id = plugin_instance_id
         self._correlation_secret = correlation_secret
@@ -121,6 +155,12 @@ class V3ShadowRuntime:
         self._job_timeout_s = job_timeout_s
         self._drain_timeout_s = drain_timeout_s
         self._shutdown_step_timeout_s = shutdown_step_timeout_s
+        self._scoped_shadow_state = (
+            None if persistence is None else ScopedV3ShadowState(persistence)
+        )
+        self._restored_scoped_shadow = (
+            None if self._scoped_shadow_state is None else self._scoped_shadow_state.load()
+        )
 
         repository_root = Path(os.fspath(root))
         if plugin_data_root is not None and non_v3_bytes is not None:
@@ -146,6 +186,44 @@ class V3ShadowRuntime:
         self.registry: TurnRegistry | None = None
         self.supervisor: ShadowSupervisor | None = None
         self._epoch: int | None = None
+
+    @property
+    def scoped_persistence(self) -> ScopedPersistenceGateway | None:
+        """Return the frozen V3 scope capability when this runtime was scoped."""
+
+        state = self._scoped_shadow_state
+        return None if state is None else state.persistence
+
+    @property
+    def restored_scoped_shadow(self) -> dict[str, object] | None:
+        """Expose the construction-time V3 snapshot without a raw session lookup."""
+
+        snapshot = self._restored_scoped_shadow
+        return None if snapshot is None else dict(snapshot)
+
+    def save_scoped_shadow(self, payload: object) -> int:
+        """CAS-write a V3 shadow snapshot through the captured gateway only."""
+
+        state = self._scoped_shadow_state
+        if state is None:
+            raise ValueError("scoped persistence is not configured")
+        generation = state.save(payload)
+        restored = state.load()
+        self._restored_scoped_shadow = restored
+        return generation
+
+    def schedule_scoped_shadow_save(
+        self,
+        payload: object,
+        *,
+        delay_seconds: float = 0.0,
+    ) -> asyncio.Task[bool]:
+        """Capture a delayed V3 component write; stale scope work is discarded."""
+
+        state = self._scoped_shadow_state
+        if state is None:
+            raise ValueError("scoped persistence is not configured")
+        return state.schedule_save(payload, delay_seconds=delay_seconds)
 
     # -- lifecycle -----------------------------------------------------------
 

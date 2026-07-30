@@ -16,7 +16,11 @@ from sylanne_alpha.scope_contracts import (
     SessionScope,
 )
 from sylanne_alpha.scope_identity import load_or_create_scope_identity_key
-from sylanne_alpha.scope_repository import ScopeRepository, StaleScopeWrite
+from sylanne_alpha.scope_repository import (
+    ScopeParentMismatch,
+    ScopeRepository,
+    StaleScopeWrite,
+)
 
 
 def _scope(*, generation: int = 0, persona_token: str = "persona_v1_P") -> SessionScope:
@@ -116,6 +120,93 @@ def test_persona_retirement_reactivation_fences_stale_genesis_writer(tmp_path: P
             expected_lifecycle_generation=active.lifecycle_generation,
             payload={"traits_prior": {}},
         )
+
+
+def test_relation_activation_recovers_after_persona_retirement_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A stop after Persona retirement cannot revive prior relation bytes."""
+
+    repository = ScopeRepository(tmp_path)
+    session = repository.create_scope(_scope(), expected_absent=True)
+    relation_ref = RelationRef(
+        token="relation_v1_interrupted_lifecycle",
+        bot_ref=session.bot_ref,
+    )
+    old_relation = repository.activate_relation_scope(session.persona_ref, relation_ref)
+    assert repository.write_relation_component(
+        old_relation,
+        "relationship",
+        expected_generation=0,
+        payload={"old": True},
+    ) == 1
+    old_component = repository.relation_component_path(old_relation, "relationship")
+
+    def interrupt_relation_retirement(*_args, **_kwargs) -> None:
+        raise OSError("injected relation retirement interruption")
+
+    monkeypatch.setattr(
+        repository,
+        "_retire_persona_relations_locked",
+        interrupt_relation_retirement,
+    )
+    with pytest.raises(OSError, match="injected relation retirement interruption"):
+        repository.retire_persona_revision(
+            session.persona_ref,
+            expected_lifecycle_generation=session.persona_ref.lifecycle_generation,
+            reason="retire",
+        )
+    assert old_component.exists()
+
+    restarted = ScopeRepository(tmp_path)
+    reactivated_persona = restarted.activate_persona_revision(
+        replace(session.persona_ref, lifecycle_generation=0)
+    )
+    reactivated_relation = restarted.activate_relation_scope(
+        reactivated_persona,
+        relation_ref,
+    )
+
+    assert reactivated_relation.relation_generation == old_relation.relation_generation + 1
+    assert restarted.read_relation_component(reactivated_relation, "relationship") is None
+    assert old_component.exists() is False
+    with pytest.raises(StaleScopeWrite, match="persona_lifecycle_stale"):
+        restarted.write_relation_component(
+            old_relation,
+            "relationship",
+            expected_generation=1,
+            payload={"late": True},
+        )
+
+
+def test_relation_lifecycle_recovery_keeps_static_and_future_parents_fenced(
+    tmp_path: Path,
+) -> None:
+    """Only an older exact Persona lifecycle is eligible for recovery."""
+
+    repository = ScopeRepository(tmp_path)
+    session = repository.create_scope(_scope(), expected_absent=True)
+    relation_ref = RelationRef(
+        token="relation_v1_parent_fence",
+        bot_ref=session.bot_ref,
+    )
+    relation = repository.activate_relation_scope(session.persona_ref, relation_ref)
+    metadata_path = repository.relation_meta_path(relation)
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+    metadata["persona_lifecycle_generation"] = (
+        session.persona_ref.lifecycle_generation + 1
+    )
+    repository._atomic_json_replace(metadata_path, metadata)
+    with pytest.raises(ScopeParentMismatch, match="relation metadata parent mismatch"):
+        repository.activate_relation_scope(session.persona_ref, relation_ref)
+
+    metadata["persona_lifecycle_generation"] = session.persona_ref.lifecycle_generation
+    metadata["persona_ref"] = "persona_v1_foreign"
+    repository._atomic_json_replace(metadata_path, metadata)
+    with pytest.raises(ScopeParentMismatch, match="relation metadata parent mismatch"):
+        repository.activate_relation_scope(session.persona_ref, relation_ref)
 
 
 def test_scope_resolution_reloads_authoritative_parent_chain(tmp_path: Path) -> None:

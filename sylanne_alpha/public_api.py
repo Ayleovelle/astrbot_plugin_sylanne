@@ -47,6 +47,8 @@ from sylanne_alpha.provider_routing import (
     resolve_embedding_provider,
     resolve_text_provider,
 )
+from sylanne_alpha.scope_contracts import SessionScope
+from sylanne_alpha.scope_runtime import RelationRuntime, ScopedSessionRuntime
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +210,43 @@ class PublicAPI:
             return next(iter(hosts), None) if hosts else None
         except Exception:  # noqa: BLE001 - legacy diagnostics remain bounded
             return None
+
+    def _bound_scoped_identity(self) -> Any | None:
+        """Return one live full-scope opaque identity binding, or fail closed."""
+
+        registry = getattr(self._p, "_scope_runtime_registry", None)
+        if registry is None:
+            return None
+        getter = getattr(self._p, "_bound_runtime", None)
+        if not callable(getter):
+            return None
+        try:
+            binding = getter()
+        except Exception:
+            return None
+        scope = getattr(binding, "scope", None)
+        session_runtime = getattr(binding, "session_runtime", None)
+        relation_runtime = getattr(binding, "relation_runtime", None)
+        subject = getattr(binding, "subject", None)
+        if (
+            type(scope) is not SessionScope
+            or type(session_runtime) is not ScopedSessionRuntime
+            or session_runtime.scope != scope
+            or type(relation_runtime) is not RelationRuntime
+            or relation_runtime.scope.bot_ref != scope.bot_ref
+            or relation_runtime.scope.persona_ref != scope.persona_ref
+            or subject is None
+            or getattr(subject, "relation_ref", None)
+            != relation_runtime.scope.relation_ref
+            or not registry.is_live_session(scope)
+        ):
+            return None
+        try:
+            if registry.exact_session(scope) is not session_runtime:
+                return None
+        except Exception:
+            return None
+        return binding
 
     # ------------------------------------------------------------------
     # Observatory / Diagnostics group
@@ -641,6 +680,14 @@ class PublicAPI:
     # Agent identity group
     # ------------------------------------------------------------------
     def _agent_identity(self, event: Any = None) -> str:
+        if getattr(self._p, "_scope_runtime_registry", None) is not None:
+            binding = self._bound_scoped_identity()
+            relation = getattr(binding, "relation_runtime", None)
+            return (
+                relation.scope.relation_ref.token
+                if type(relation) is RelationRuntime
+                else "unknown"
+            )
         if event is None:
             return "unknown"
         sender_id = str(
@@ -667,6 +714,19 @@ class PublicAPI:
             身份档案字典。
         """
         p = self._p
+        if getattr(p, "_scope_runtime_registry", None) is not None:
+            binding = self._bound_scoped_identity()
+            if binding is None:
+                return {"ok": False, "error": "scope_unavailable"}
+            scope = binding.scope
+            relation_token = binding.relation_runtime.scope.relation_ref.token
+            return {
+                "schema_version": "astrbot.agent_identity.v1",
+                "conversation_id": scope.storage_token,
+                "speaker_track_id": relation_token,
+                "relation_ref": relation_token,
+                "updated_at": p._observed_now(),
+            }
         cache = getattr(p, "_agent_identity_profile_cache", None)
         if cache is None:
             p._agent_identity_profile_cache = {}
@@ -736,6 +796,16 @@ class PublicAPI:
         self, event: Any = None, *, limit: int = 10, **kwargs: Any
     ) -> dict[str, Any]:
         p = self._p
+        if getattr(p, "_scope_runtime_registry", None) is not None:
+            binding = self._bound_scoped_identity()
+            if binding is None:
+                return {"ok": False, "error": "scope_unavailable"}
+            return {
+                "schema_version": "astrbot.agent_trail.v1",
+                "session_key": binding.scope.storage_token,
+                "relation_ref": binding.relation_runtime.scope.relation_ref.token,
+                "items": [],
+            }
         cache = getattr(p, "_agent_trail_cache", None)
         if cache is None:
             p._agent_trail_cache = {}
@@ -771,10 +841,16 @@ class PublicAPI:
         method_name = snapshot_method_map.get(state_name)
         speaker_track_id = ""
         if track == "speaker" and event is not None:
-            sender_id = str(getattr(event, "sender_id", "") or "")
-            if not sender_id and hasattr(event, "get_sender_id"):
-                sender_id = str(event.get_sender_id() or "")
-            speaker_track_id = f"{sk}::speaker:{sender_id}"
+            if getattr(p, "_scope_runtime_registry", None) is not None:
+                binding = self._bound_scoped_identity()
+                if binding is None:
+                    return {"ok": False, "error": "scope_unavailable"}
+                speaker_track_id = binding.relation_runtime.scope.relation_ref.token
+            else:
+                sender_id = str(getattr(event, "sender_id", "") or "")
+                if not sender_id and hasattr(event, "get_sender_id"):
+                    sender_id = str(event.get_sender_id() or "")
+                speaker_track_id = f"{sk}::speaker:{sender_id}"
         effective_sk = speaker_track_id if speaker_track_id else sk
         payload: dict[str, Any] = {
             "kind": state_name,
@@ -806,14 +882,15 @@ class PublicAPI:
         payload["track"] = {"kind": track}
         if speaker_track_id:
             payload["track"]["speaker_track_id"] = speaker_track_id
-            sender_id = str(getattr(event, "sender_id", "") or "")
-            if not sender_id and hasattr(event, "get_sender_id"):
-                sender_id = str(event.get_sender_id() or "")
-            sender_name = str(getattr(event, "sender_name", "") or "")
-            if not sender_name and hasattr(event, "get_sender_name"):
-                sender_name = str(event.get_sender_name() or "")
-            payload["track"]["speaker_id"] = sender_id
-            payload["track"]["speaker_name"] = sender_name
+            if getattr(p, "_scope_runtime_registry", None) is None:
+                sender_id = str(getattr(event, "sender_id", "") or "")
+                if not sender_id and hasattr(event, "get_sender_id"):
+                    sender_id = str(event.get_sender_id() or "")
+                sender_name = str(getattr(event, "sender_name", "") or "")
+                if not sender_name and hasattr(event, "get_sender_name"):
+                    sender_name = str(event.get_sender_name() or "")
+                payload["track"]["speaker_id"] = sender_id
+                payload["track"]["speaker_name"] = sender_name
         return payload
 
     async def query_agent_state(
@@ -853,10 +930,27 @@ class PublicAPI:
                         consequences["notes"] = consequences["notes"][:2]
                 speaker_track_id = ""
                 if track == "speaker":
-                    sender_id = str(getattr(event, "sender_id", "") or "")
-                    if not sender_id and hasattr(event, "get_sender_id"):
-                        sender_id = str(event.get_sender_id() or "")
-                    speaker_track_id = f"{sk}::speaker:{sender_id}"
+                    if getattr(p, "_scope_runtime_registry", None) is not None:
+                        binding = self._bound_scoped_identity()
+                        if binding is None:
+                            return {
+                                "kind": "agent_state_query",
+                                "state": state_name,
+                                "detail": detail,
+                                "track": {"kind": track},
+                                "runtime": {"enabled": include_runtime},
+                                "snapshots": {},
+                                "ok": False,
+                                "error": "scope_unavailable",
+                            }
+                        speaker_track_id = (
+                            binding.relation_runtime.scope.relation_ref.token
+                        )
+                    else:
+                        sender_id = str(getattr(event, "sender_id", "") or "")
+                        if not sender_id and hasattr(event, "get_sender_id"):
+                            sender_id = str(event.get_sender_id() or "")
+                        speaker_track_id = f"{sk}::speaker:{sender_id}"
                 snap["track"] = {"kind": track}
                 if speaker_track_id:
                     snap["track"]["speaker_track_id"] = speaker_track_id

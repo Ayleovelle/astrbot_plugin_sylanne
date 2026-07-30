@@ -12,11 +12,14 @@ async）与 `StatePersistence` 的三个记忆持久化方法（写走单写咽�
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from sylanne_alpha.memory_system import MemorySystem
     from sylanne_alpha.protocols import PluginHost
+    from sylanne_alpha.scope_repository import ScopedPersistenceGateway
+    from sylanne_alpha.state_persistence import ScopedStatePersistence
 
 
 class MemoryFacade:
@@ -52,4 +55,42 @@ class MemoryFacade:
         await self._p._state_persistence.delete_sylanne_memory_state(session_key)
 
 
-__all__ = ["MemoryFacade"]
+class ScopedMemoryFacade:
+    """Gateway-only memory facade for inactive scoped ingress.
+
+    Unlike :class:`MemoryFacade`, this API deliberately has no session-key
+    parameter and therefore cannot resolve a current/default session or enter
+    the legacy KV/file persistence path.
+    """
+
+    __slots__ = ("_state",)
+
+    def __init__(self, state: "ScopedStatePersistence") -> None:
+        from .state_persistence import ScopedStatePersistence
+
+        if type(state) is not ScopedStatePersistence:
+            raise ValueError("state must be a ScopedStatePersistence")
+        self._state = state
+
+    @property
+    def gateway(self) -> "ScopedPersistenceGateway":
+        """Expose the frozen gateway for integration wiring only."""
+
+        return self._state.gateway
+
+    async def load_memory(self) -> "MemorySystem | None":
+        return await self._state.load_memory()
+
+    async def save_memory(self, memory: "MemorySystem") -> bool:
+        return await self._state.save_memory(memory)
+
+    def schedule_memory_save(
+        self,
+        memory: "MemorySystem",
+        *,
+        delay_seconds: float,
+    ) -> "asyncio.Task[bool]":
+        return self._state.schedule_memory_save(memory, delay_seconds=delay_seconds)
+
+
+__all__ = ["MemoryFacade", "ScopedMemoryFacade"]

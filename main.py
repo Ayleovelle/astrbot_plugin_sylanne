@@ -200,7 +200,7 @@ from sylanne_alpha.diagnostics_surface import command_surface, memory_surface, r
 from sylanne_alpha.message_dispatch import realtime_dispatch, realtime_flags  # noqa: E402
 from sylanne_alpha.host import SylanneAlphaHost, SylanneAlphaHostEvent  # noqa: E402
 from sylanne_alpha.life_simulation import LifeSimulator  # noqa: E402
-from sylanne_alpha.memory_system import MemorySystem  # noqa: E402
+from sylanne_alpha.memory_system import ConversationBuffer, MemorySystem  # noqa: E402
 from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline  # noqa: E402
 from sylanne_alpha.rhythm_learner import RhythmLearner  # noqa: E402
 from sylanne_alpha.proactive_scheduler import ProactiveScheduler  # noqa: E402
@@ -220,15 +220,24 @@ from sylanne_alpha.state_persistence import StatePersistence  # noqa: E402
 from sylanne_alpha.memory_facade import MemoryFacade  # noqa: E402
 from sylanne_alpha.realtime_dispatch import RealtimeDispatch  # noqa: E402
 from sylanne_alpha.background_queue import BackgroundPostQueue  # noqa: E402
+from sylanne_alpha.scoped_host_runtime import ScopedHostRuntime  # noqa: E402
+from sylanne_alpha.v2core.integration import ScopedV2DomainPersistence  # noqa: E402
+from sylanne_alpha.v3bridge.integration import ScopedV3ShadowState  # noqa: E402
 from sylanne_alpha.webui_routes import WebUIRoutes  # noqa: E402
 from sylanne_alpha.scope_contracts import (  # noqa: E402
     ResolvedScope,
     ResolvedTransportScope,
     SessionScope,
+    TurnSubjectProof,
+    VerifiedSubjectInput,
 )
-from sylanne_alpha.scope_identity import ScopeResolver  # noqa: E402
+from sylanne_alpha.scope_identity import (  # noqa: E402
+    PreparedPersonaScope,
+    ScopeResolver,
+)
 from sylanne_alpha.scope_runtime import (  # noqa: E402
     PersonaRuntime,
+    RequestRuntimeView,
     ScopeRuntimeRegistry,
     ScopeUnavailable,
     ScopedSessionRuntime,
@@ -557,7 +566,8 @@ class _V3PendingTurn:
 class _V3ShadowFacade:
     """插件持有的唯一 v3 对象；构造零 IO，全部失败模式 fail-close v3。"""
 
-    def __init__(self) -> None:
+    def __init__(self, plugin: Any | None = None) -> None:
+        self._plugin = plugin
         self.enabled = False
         try:
             from sylanne_alpha.v3bridge.build_flags import V3_SHADOW_ENABLED
@@ -589,6 +599,10 @@ class _V3ShadowFacade:
     async def initialize(self, *, root: Any, supervisor_kwargs: dict | None = None) -> bool:
         """Coalesce concurrent starts; caller cancellation cannot cancel startup."""
 
+        if getattr(self._plugin, "_scope_runtime_registry", None) is not None:
+            # Active scoped sessions construct their own v3-shadow capability.
+            # Never start the legacy journal/root runtime for a scoped plugin.
+            return False
         async with self._lifecycle_lock:
             if not self.enabled or self.runtime is not None:
                 return False
@@ -1029,6 +1043,56 @@ class _V3ShadowFacade:
         except Exception as exc:  # noqa: BLE001 - 结算失败只丢这一轮影子
             logger.debug(f"Sylanne v3 shadow settle skipped: {exc}")
 
+    def settle_scoped(
+        self,
+        *,
+        scope: SessionScope,
+        route_kind: str,
+        reply_kind: str | None = None,
+        part_count: int = 0,
+        after_message_sent: bool = False,
+        all_segments_succeeded: bool | None = None,
+        proactive_dispatched: bool | None = None,
+        token: int | None = None,
+    ) -> bool:
+        """Persist scoped V3 terminal evidence through the exact Session owner."""
+
+        plugin = self._plugin
+        registry = getattr(plugin, "_scope_runtime_registry", None)
+        binding_getter = getattr(plugin, "_bound_runtime", None)
+        if registry is None or not callable(binding_getter):
+            return False
+        try:
+            binding = binding_getter()
+            if (
+                binding is None
+                or binding.scope != scope
+                or type(getattr(binding, "turn_generation", None)) is not int
+                or not registry.is_live_session(scope)
+                or registry.exact_session(scope) is not binding.session_runtime
+            ):
+                return False
+            state = binding.session_runtime.v3_shadow_state
+            save = getattr(state, "save", None)
+            if not callable(save):
+                return False
+            save(
+                {
+                    "schema_version": "sylanne.v3-shadow-settlement.v1",
+                    "route_kind": str(route_kind),
+                    "reply_kind": None if reply_kind is None else str(reply_kind),
+                    "part_count": int(part_count),
+                    "after_message_sent": bool(after_message_sent),
+                    "all_segments_succeeded": all_segments_succeeded,
+                    "proactive_dispatched": proactive_dispatched,
+                    "token": token,
+                    "turn_generation": binding.turn_generation,
+                }
+            )
+            return True
+        except Exception:
+            return False
+
     def _offer_pending(
         self,
         pending: _V3PendingTurn,
@@ -1245,6 +1309,9 @@ class _ScopedRuntimeBinding:
     scope: SessionScope
     persona_runtime: PersonaRuntime
     session_runtime: ScopedSessionRuntime
+    relation_runtime: Any | None = None
+    subject: Any | None = None
+    turn_generation: int | None = None
 
 
 @register(
@@ -1298,7 +1365,8 @@ class EmotionalStatePlugin(Star):
             _ScopedRuntimeBinding | None
         ] = contextvars.ContextVar("sylanne_scope_runtime_binding", default=None)
         self._scope_runtime_registry = ScopeRuntimeRegistry(
-            self._create_persona_runtime
+            self._create_persona_runtime,
+            session_runtime_factory=self._create_session_runtime,
         )
         self._background_tasks: list[asyncio.Task] = []
         # hosts/记忆系统/对话缓冲已迁入 self._store（CP8-P2 批3）
@@ -1360,7 +1428,7 @@ class EmotionalStatePlugin(Star):
         # v3 shadow facade（plan Task 13）：纯构造、零 IO——仓库/线程池/epoch 全在
         # initialize() 里拿。默认关（源码/stable 构建 V3_SHADOW_ENABLED=False），
         # 只有 grey 打包生成的 build_flags 才翻开；不是用户可选项，故不进 _conf_schema。
-        self._v3_shadow = _V3ShadowFacade()
+        self._v3_shadow = _V3ShadowFacade(self)
         # Scope-v1 is opened lazily at the first real AstrBot adapter event.  Tests
         # with a deliberately absent Context retain the pre-scope compatibility path.
         self._scope_resolver_v1: ScopeResolver | None = None
@@ -1638,18 +1706,7 @@ class EmotionalStatePlugin(Star):
         """Construct mutable owners for exactly one Bot + Persona lifecycle."""
 
         runtime = PersonaRuntime(persona_ref=scope.persona_ref)
-        runtime.life_simulator = LifeSimulator(config=self._config)
-        runtime.rhythm_learner = RhythmLearner(intimacy_threshold=0.6)
-        runtime.social_field = SocialFieldCollector(config=self._config)
-        runtime.background_queue = BackgroundPostQueue(
-            self,
-            owner_persona_ref=scope.persona_ref,
-        )
-        runtime.proactive_scheduler = ProactiveScheduler(self)
         runtime.self_core = SelfCore(self, store=runtime.store)
-        runtime.self_core.register(
-            LifeAgent(self, life_simulator=runtime.life_simulator)
-        )
         runtime.autonomy_scheduler = AutonomyScheduler(
             self,
             runtime.self_core,
@@ -1659,17 +1716,70 @@ class EmotionalStatePlugin(Star):
         # its LRU eviction callback to this exact store here, rather than borrowing
         # a default store during plugin construction.
         self._state_persistence._wire_memory_eviction_persistence(runtime.store)
-
-        def memory_factory(memory_scope: SessionScope) -> object:
-            existing = runtime.store.memory_systems.get(memory_scope.storage_token)
-            if existing is not None:
-                return existing
-            return self._session_ctx.memory_system_for_session(
-                memory_scope.storage_token
-            )
-
-        runtime.memory_factory = memory_factory
         return runtime
+
+    def _create_session_runtime(
+        self,
+        scope: SessionScope,
+        persona_runtime: PersonaRuntime,
+        persistence: Any,
+    ) -> ScopedSessionRuntime:
+        """Construct all active Session owners through one frozen gateway."""
+
+        if persistence is None:
+            raise ScopeUnavailable("active session runtime requires scoped persistence")
+        cfg = self._config or {}
+        recall_mode = cfg.get("sylanne_alpha_recall_mode") or None
+        session_runtime = ScopedSessionRuntime.build(
+            scope=scope,
+            store=persona_runtime.store,
+            persistence=persistence,
+            host_session_factory=lambda gateway: ScopedHostRuntime(
+                gateway,
+                root=_sylanne_infra.resolve_data_root(cfg),
+                profile=None,
+                pel_enabled=False,
+            ).build_session(),
+            memory_system_factory=lambda: MemorySystem(recall_mode=recall_mode),
+            conversation_factory=ConversationBuffer.from_dict,
+            background_queue_factory=BackgroundPostQueue,
+            life_simulator_factory=lambda gateway: LifeSimulator(
+                config=cfg,
+                persistence=gateway,
+            ),
+            rhythm_learner_factory=lambda gateway: RhythmLearner(
+                intimacy_threshold=0.6,
+                persistence=gateway,
+            ),
+            social_field_factory=lambda gateway: SocialFieldCollector(
+                config=cfg,
+                persistence=gateway,
+            ),
+            proactive_scheduler_factory=lambda gateway: ProactiveScheduler(
+                self,
+                persistence=gateway,
+            ),
+            v2_persistence_factory=ScopedV2DomainPersistence,
+            v3_shadow_state_factory=ScopedV3ShadowState,
+        )
+        token = scope.storage_token
+        persona_runtime.store.hosts.set(token, session_runtime.host)
+        persona_runtime.store.memory_systems.set(token, session_runtime.memory_system)
+        persona_runtime.store.conversation_buffers.set(
+            token,
+            session_runtime.conversation_buffer,
+        )
+        self._session_ctx._bind_observation_sink(session_runtime.host)
+        personality = session_runtime.host.kernel._personality()
+        if isinstance(personality, dict) and personality:
+            session_runtime.memory_system.derive_params(personality)
+        if not self._session_ctx.memory_system_has_content(session_runtime.memory_system):
+            self._session_ctx.hydrate_memory_system_from_body_traces(
+                token,
+                session_runtime.memory_system,
+                session_runtime.host.kernel.body.memory.get("traces", []),
+            )
+        return session_runtime
 
     def _runtime_binding_for_scope(self, scope: SessionScope) -> _ScopedRuntimeBinding:
         persona_runtime = self._scope_runtime_registry.for_scope(scope)
@@ -1718,9 +1828,62 @@ class EmotionalStatePlugin(Star):
             return None
         return resolved if type(resolved) is ResolvedScope else None
 
+    @staticmethod
+    def _event_runtime_view(event: Any) -> RequestRuntimeView | None:
+        getter = getattr(event, "get_extra", None)
+        if not callable(getter):
+            return None
+        try:
+            view = getter("_sylanne_runtime_view_v1")
+        except Exception:
+            return None
+        return view if type(view) is RequestRuntimeView else None
+
+    def _validated_event_runtime_view(
+        self,
+        event: Any,
+    ) -> RequestRuntimeView | None:
+        """Validate the immutable carrier against this exact event's frozen turn."""
+
+        view = self._event_runtime_view(event)
+        if view is None:
+            return None
+        resolved = self._event_resolved_scope(event)
+        transport = ScopeResolver._event_extra(
+            event,
+            "_sylanne_transport_scope_v1",
+        )
+        turn = ScopeResolver._event_extra(
+            event,
+            "_sylanne_transport_turn_v1",
+        )
+        scope = view.resolved.scope
+        if (
+            resolved is not view.resolved
+            or scope is None
+            or type(transport) is not ResolvedTransportScope
+            or transport.private_scope_enabled is not True
+            or transport.bot_ref != scope.bot_ref
+            or transport.session_ref != scope.session_ref
+            or type(turn) is not TransportTurn
+            or turn.turn_state != "frozen"
+            or turn.session_ref != scope.session_ref.token
+            or turn.turn_generation != view.resolved.turn_generation
+            or not self._scope_runtime_registry.is_issued_request_view(view)
+            or not self._scope_runtime_registry.is_live_session(scope)
+        ):
+            return None
+        return view
+
     def _runtime_for_event(self, event: Any) -> PersonaRuntime:
         """Return only the exact runtime named by the event's frozen scope."""
 
+        raw_view = self._event_runtime_view(event)
+        view = self._validated_event_runtime_view(event)
+        if view is not None:
+            return view.persona_runtime
+        if raw_view is not None:
+            raise ScopeUnavailable("request runtime view does not match event")
         resolved = self._event_resolved_scope(event)
         if (
             resolved is None
@@ -1731,6 +1894,12 @@ class EmotionalStatePlugin(Star):
         return self._scope_runtime_registry.for_scope(resolved.scope)
 
     def _session_runtime_for_event(self, event: Any) -> ScopedSessionRuntime:
+        raw_view = self._event_runtime_view(event)
+        view = self._validated_event_runtime_view(event)
+        if view is not None:
+            return view.session_runtime
+        if raw_view is not None:
+            raise ScopeUnavailable("request runtime view does not match event")
         resolved = self._event_resolved_scope(event)
         if (
             resolved is None
@@ -1744,6 +1913,19 @@ class EmotionalStatePlugin(Star):
     def _bind_runtime_for_event(self, event: Any):
         """Bind a request-local view; no event may borrow another scope's owner."""
 
+        raw_view = self._event_runtime_view(event)
+        view = self._validated_event_runtime_view(event)
+        if view is not None:
+            with self._bind_request_runtime_view(view):
+                yield self._bound_runtime()
+            return
+        if raw_view is not None:
+            raise ScopeUnavailable("request runtime view does not match event")
+        # Historical object.__new__/SimpleNamespace tests predate the atomic
+        # request carrier. A fully initialized production plugin always has this
+        # attribute and must never reconstruct a runtime from ResolvedScope alone.
+        if hasattr(self, "_scope_resolver_v1"):
+            raise ScopeUnavailable("request runtime view is unavailable")
         resolved = self._event_resolved_scope(event)
         if (
             resolved is None
@@ -1752,6 +1934,28 @@ class EmotionalStatePlugin(Star):
         ):
             raise ScopeUnavailable("resolved private scope is unavailable")
         binding = self._runtime_binding_for_scope(resolved.scope)
+        token = self._scope_runtime_binding.set(binding)
+        try:
+            yield binding
+        finally:
+            self._scope_runtime_binding.reset(token)
+
+    @contextlib.contextmanager
+    def _bind_request_runtime_view(self, view: RequestRuntimeView):
+        """Bind only the exact immutable carrier published for this request."""
+
+        if type(view) is not RequestRuntimeView or view.resolved.scope is None:
+            raise ScopeUnavailable("an exact request runtime view is required")
+        if not self._scope_runtime_registry.is_live_session(view.resolved.scope):
+            raise ScopeUnavailable("request runtime view is stale")
+        binding = _ScopedRuntimeBinding(
+            scope=view.resolved.scope,
+            persona_runtime=view.persona_runtime,
+            session_runtime=view.session_runtime,
+            relation_runtime=view.relation_runtime,
+            subject=view.subject,
+            turn_generation=view.resolved.turn_generation,
+        )
         token = self._scope_runtime_binding.set(binding)
         try:
             yield binding
@@ -1782,10 +1986,8 @@ class EmotionalStatePlugin(Star):
         return binding.session_runtime if binding is not None else None
 
     def _active_relation_runtime(self) -> Any | None:
-        # Task 5 has no authenticated RelationScope resolver yet.  Relation
-        # observations therefore deliberately no-op instead of falling back to a
-        # session/default bucket; Task 6 wires the authenticated resolver.
-        return None
+        binding = self._bound_runtime()
+        return binding.relation_runtime if binding is not None else None
 
     @property
     def _store(self) -> SessionStateStore:
@@ -1809,7 +2011,7 @@ class EmotionalStatePlugin(Star):
     @property
     def _life_simulator(self) -> LifeSimulator:
         binding = self._bound_runtime()
-        owner = binding.persona_runtime.life_simulator if binding is not None else None
+        owner = binding.session_runtime.life_simulator if binding is not None else None
         if owner is None:
             raise ScopeUnavailable("life simulator requires a frozen scope runtime")
         return owner
@@ -1817,7 +2019,7 @@ class EmotionalStatePlugin(Star):
     @property
     def _rhythm_learner(self) -> RhythmLearner:
         binding = self._bound_runtime()
-        owner = binding.persona_runtime.rhythm_learner if binding is not None else None
+        owner = binding.session_runtime.rhythm_learner if binding is not None else None
         if owner is None:
             raise ScopeUnavailable("rhythm learner requires a frozen scope runtime")
         return owner
@@ -1825,7 +2027,7 @@ class EmotionalStatePlugin(Star):
     @property
     def _social_field(self) -> SocialFieldCollector:
         binding = self._bound_runtime()
-        owner = binding.persona_runtime.social_field if binding is not None else None
+        owner = binding.session_runtime.social_field if binding is not None else None
         if owner is None:
             raise ScopeUnavailable("social field requires a frozen scope runtime")
         return owner
@@ -1833,7 +2035,7 @@ class EmotionalStatePlugin(Star):
     @property
     def _background_queue(self) -> BackgroundPostQueue:
         binding = self._bound_runtime()
-        owner = binding.persona_runtime.background_queue if binding is not None else None
+        owner = binding.session_runtime.background_queue if binding is not None else None
         if owner is None:
             raise ScopeUnavailable("background queue requires a frozen scope runtime")
         return owner
@@ -1841,7 +2043,7 @@ class EmotionalStatePlugin(Star):
     @property
     def _proactive_scheduler(self) -> ProactiveScheduler:
         binding = self._bound_runtime()
-        owner = binding.persona_runtime.proactive_scheduler if binding is not None else None
+        owner = binding.session_runtime.proactive_scheduler if binding is not None else None
         if owner is None:
             raise ScopeUnavailable("proactive scheduler requires a frozen scope runtime")
         return owner
@@ -1871,14 +2073,14 @@ class EmotionalStatePlugin(Star):
         binding = self._bound_runtime()
         if binding is None:
             raise ScopeUnavailable("proactive scheduler task requires a frozen scope runtime")
-        return binding.persona_runtime.proactive_scheduler_task
+        return binding.session_runtime.lifecycle.proactive_scheduler_task
 
     @_proactive_scheduler_task.setter
     def _proactive_scheduler_task(self, task: asyncio.Task | None) -> None:
         binding = self._bound_runtime()
         if binding is None:
             raise ScopeUnavailable("proactive scheduler task requires a frozen scope runtime")
-        binding.persona_runtime.proactive_scheduler_task = task
+        binding.session_runtime.lifecycle.proactive_scheduler_task = task
 
     @property
     def _background_post_recovered_sessions(self) -> set[str]:
@@ -1910,7 +2112,10 @@ class EmotionalStatePlugin(Star):
         if binding is not None:
             if session_key != binding.scope.storage_token:
                 raise ScopeUnavailable("active host lookup must use frozen storage_token")
-            return self._session_ctx.host(binding.scope.storage_token)
+            host = binding.session_runtime.host
+            if not isinstance(host, SylanneAlphaHost):
+                raise ScopeUnavailable("scoped session runtime has no host")
+            return host
         if hasattr(self, "_scope_runtime_registry"):
             raise ScopeUnavailable("unbound host lookup requires a frozen scope")
         return self._legacy_host_for_raw_session(session_key)
@@ -1921,8 +2126,10 @@ class EmotionalStatePlugin(Star):
         return self._session_ctx.host(session_key)
 
     def _host_for_scope(self, scope: SessionScope) -> SylanneAlphaHost:
-        with self._bind_runtime_for_scope(scope):
-            return self._session_ctx.host(scope.storage_token)
+        runtime = self._scope_runtime_registry.exact_session(scope)
+        if not isinstance(runtime.host, SylanneAlphaHost):
+            raise ScopeUnavailable("scoped session runtime has no host")
+        return runtime.host
 
     def _forget_evolution_session(self, session_key: str) -> None:
         """收口清理某会话的进化层 per-session 状态（CP8-P6 防无界泄漏）。
@@ -1973,8 +2180,8 @@ class EmotionalStatePlugin(Star):
         return self._memory_facade.memory_system_for_session(session_key)
 
     def _memory_system_for_scope(self, scope: SessionScope) -> MemorySystem:
-        runtime = self._scope_runtime_registry.for_scope(scope)
-        memory = runtime.memory_system_for(scope)
+        runtime = self._scope_runtime_registry.exact_session(scope)
+        memory = runtime.memory_system
         if not isinstance(memory, MemorySystem):
             raise ScopeUnavailable("scoped memory factory returned an invalid owner")
         return memory
@@ -2308,7 +2515,7 @@ class EmotionalStatePlugin(Star):
     # -----------------------------------------------------------------------
 
     def _register_inbound_duplicate(self, event: Any) -> bool:
-        """Register dedup ownership only after a Persona scope has frozen."""
+        """Register the inbound delivery before any transport or identity read."""
 
         get_extra = getattr(event, "get_extra", None)
         set_extra = getattr(event, "set_extra", None)
@@ -2442,6 +2649,13 @@ class EmotionalStatePlugin(Star):
     def _scope_resolver_instance(self) -> ScopeResolver | None:
         resolver = getattr(self, "_scope_resolver_v1", None)
         if resolver is not None:
+            registry = getattr(self, "_scope_runtime_registry", None)
+            repository = getattr(resolver, "_repository", None)
+            if registry is not None and repository is not None:
+                if registry.repository is None:
+                    registry.bind_repository(repository)
+                elif registry.repository is not repository:
+                    registry.bind_repository(repository)
             return resolver
         context = getattr(self, "context", None)
         if (
@@ -2453,6 +2667,12 @@ class EmotionalStatePlugin(Star):
         root = _sylanne_infra.resolve_scope_v1_root()
         resolver = ScopeResolver.for_context(context, root)
         self._scope_resolver_v1 = resolver
+        registry = getattr(self, "_scope_runtime_registry", None)
+        if registry is not None:
+            if registry.repository is None:
+                registry.bind_repository(resolver._repository)
+            elif registry.repository is not resolver._repository:
+                registry.bind_repository(resolver._repository)
         return resolver
 
     def _begin_scope_transport(self, event: Any) -> bool:
@@ -2557,6 +2777,108 @@ class EmotionalStatePlugin(Star):
         except Exception:
             return None
 
+    def _attach_turn_subject_proof(
+        self,
+        event: Any,
+        raw_identity: object,
+    ) -> bool:
+        """Convert one ephemeral adapter identity into an opaque turn proof."""
+
+        verified_turn = EmotionalStatePlugin._verified_transport_turn(self, event)
+        if verified_turn is None:
+            return False
+        resolver, transport, turn = verified_turn
+        existing = ScopeResolver._event_extra(event, "_sylanne_turn_subject_v1")
+        if type(existing) is TurnSubjectProof:
+            return (
+                existing.transport_session_token == turn.session_ref
+                and existing.turn_generation == turn.turn_generation
+            )
+
+        subject = None
+        try:
+            if type(raw_identity) is VerifiedSubjectInput:
+                if transport.bot_ref is not None:
+                    subject = resolver._identity.authenticated_subject(
+                        transport.bot_ref,
+                        raw_identity,
+                    )
+            elif type(raw_identity) is dict:
+                sender_id = raw_identity.get("sender_id")
+                platform_realm = raw_identity.get("platform")
+                if (
+                    type(sender_id) is str
+                    and sender_id
+                    and type(platform_realm) is str
+                    and platform_realm
+                    and transport.bot_ref is not None
+                ):
+                    verified_subject = VerifiedSubjectInput(
+                        platform_realm=platform_realm,
+                        subject_id=sender_id,
+                    )
+                    subject = resolver._identity.authenticated_subject(
+                        transport.bot_ref,
+                        verified_subject,
+                    )
+        except Exception:
+            subject = None
+
+        proof = TurnSubjectProof(
+            transport_session_token=turn.session_ref,
+            turn_generation=turn.turn_generation,
+            subject=subject,
+        )
+        if not resolver.set_event_extra(event, "_sylanne_turn_subject_v1", proof):
+            return False
+        return True
+
+    def _verified_turn_subject_proof(
+        self,
+        event: Any,
+    ) -> tuple[
+        ScopeResolver,
+        ResolvedTransportScope,
+        TransportTurn,
+        TurnSubjectProof,
+    ] | None:
+        """Validate the exact transport turn and subject carrier before Persona IO."""
+
+        verified_turn = EmotionalStatePlugin._verified_transport_turn(self, event)
+        if verified_turn is None:
+            return None
+        resolver, transport, turn = verified_turn
+        proof = ScopeResolver._event_extra(event, "_sylanne_turn_subject_v1")
+        if (
+            type(proof) is not TurnSubjectProof
+            or transport.session_ref is None
+            or proof.transport_session_token != transport.session_ref.token
+            or proof.transport_session_token != turn.session_ref
+            or proof.turn_generation != turn.turn_generation
+            or (
+                proof.subject is not None
+                and proof.subject.relation_ref.bot_ref != transport.bot_ref
+            )
+        ):
+            return None
+        return resolver, transport, turn, proof
+
+    def _publish_turn_subject_proof_mismatch(self, event: Any) -> ResolvedScope:
+        """Publish one stable fail-closed result without touching private runtimes."""
+
+        disabled = ResolvedScope.disabled(
+            "turn_subject_proof_mismatch",
+            resolved_at_ms=time.time_ns() // 1_000_000,
+        )
+        ScopeResolver.set_event_extra(event, "_sylanne_runtime_view_v1", None)
+        ScopeResolver.set_event_extra(event, "_sylanne_turn_subject_v1", None)
+        ScopeResolver.set_event_extra(
+            event,
+            "_sylanne_resolved_scope_v1",
+            disabled,
+        )
+        return disabled
+
     def _verified_legacy_delivery_locator(
         self,
         event: Any,
@@ -2644,6 +2966,28 @@ class EmotionalStatePlugin(Star):
             locator,
         )
 
+    async def _prepare_scope_persona(
+        self,
+        event: Any,
+        request: Any,
+    ) -> PreparedPersonaScope | ResolvedScope:
+        try:
+            resolver = EmotionalStatePlugin._scope_resolver_instance(self)
+        except Exception:
+            resolver = None
+        if resolver is None:
+            disabled = ResolvedScope.disabled(
+                "scope_resolver_unavailable",
+                resolved_at_ms=time.time_ns() // 1_000_000,
+            )
+            ScopeResolver.set_event_extra(
+                event,
+                "_sylanne_resolved_scope_v1",
+                disabled,
+            )
+            return disabled
+        return await resolver.prepare(event, request)
+
     async def _freeze_scope_persona(self, event: Any, request: Any) -> ResolvedScope:
         try:
             resolver = EmotionalStatePlugin._scope_resolver_instance(self)
@@ -2660,6 +3004,8 @@ class EmotionalStatePlugin(Star):
                 disabled,
             )
             return disabled
+        if type(request) is PreparedPersonaScope:
+            return resolver.freeze(event, request)
         return await resolver.resolve(event, request)
 
     @filter.event_message_type(filter.EventMessageType.ALL)
@@ -2671,13 +3017,55 @@ class EmotionalStatePlugin(Star):
         `handler(event, *args, **kwargs)`）。签名固定为 (event) 会在这些版本上报
         TypeError "takes 2 positional but N given"，故一律用 *args/**kwargs 兜住，
         本插件只用 event。"""
+        ingress_marker = "_sylanne_transport_ingress_v1"
+        ingress_state = ScopeResolver._event_extra(event, ingress_marker)
+        if ingress_state is not None:
+            return
+        if not ScopeResolver.set_event_extra(event, ingress_marker, "running"):
+            return
         try:
+            # A replay must stop before either resolver transport work or the
+            # authenticated identity read.  The later scoped hook keeps the
+            # same registration check as a defense in depth for alternate
+            # framework entry paths.
+            if EmotionalStatePlugin._register_inbound_duplicate(self, event):
+                ScopeResolver.set_event_extra(
+                    event,
+                    "_sylanne_legacy_on_message_v1",
+                    "duplicate",
+                )
+                stop_event = getattr(event, "stop_event", None)
+                if callable(stop_event):
+                    try:
+                        stop_event()
+                    except Exception:
+                        pass
+                ScopeResolver.set_event_extra(event, ingress_marker, "complete")
+                return
             transport_ready = EmotionalStatePlugin._begin_scope_transport(self, event)
             if transport_ready is not True:
+                ScopeResolver.set_event_extra(event, ingress_marker, "failed")
                 return
             EmotionalStatePlugin._on_transport_ready_safety(self, event)
         except Exception:
+            ScopeResolver.set_event_extra(event, ingress_marker, "failed")
             return
+        ScopeResolver.set_event_extra(event, ingress_marker, "complete")
+
+    def _registry_free_legacy_identity_stash(
+        self,
+        event: Any,
+        session_key: str,
+    ) -> None:
+        """Compatibility for historical test hosts without scoped runtime owners."""
+
+        if getattr(self, "_scope_runtime_registry", None) is not None:
+            return
+        try:
+            identity = self._session_ctx.resolve_authenticated_identity(event)
+            self._store.stash_authenticated_identity(session_key, identity)
+        except Exception:
+            pass
 
     async def _on_message_after_scope_frozen(
         self,
@@ -2728,36 +3116,27 @@ class EmotionalStatePlugin(Star):
                 return False
             session_key = scope.storage_token
             now = time.time()
-            # v2.5.0 slice-1b（design §8 BLOCKER B1，全矩阵扎实版修正）：主判据
-            # 消费——供三写点（货架写/profile 软同步/出生播种，本 slice 货架写
-            # 已接线）将来只读的"已认证身份记录"。on_message 覆盖
-            # EventMessageType.ALL（含未触发 LLM 的群聊噪音），比 on_llm_request
-            # 覆盖面更广。
-            # 取值改用 `SessionContext.resolve_authenticated_identity`——只用
-            # event 的公开方法（get_sender_id/get_message_type/get_group_id/
-            # session_id），不再复用 `raw_bucket_sender_id`（只读裸属性
-            # sender_id/user_id，真实 AstrBot 事件从不设这两个属性，在生产上
-            # 对**所有**事件恒返回空串，曾让本暂存层永久哑火——连本该天生
-            # per-user 的私聊都不例外，详见两个方法各自的文档字符串）。
-            # `stash_authenticated_identity` 内部叠加次判据（发言人一致性坍缩）
-            # 与"已坍缩 session_key 永久 SKIP"逻辑，本处只负责主判据求值 + 落地。
-            # 独立 try/except：本插桩失败绝不能连带吞掉本函数其余的 tempo/proactive
-            # 记录逻辑（与下方 rhythm_learner 支路同一收敛纪律）。
-            try:
-                identity = self._session_ctx.resolve_authenticated_identity(event)
-                self._store.stash_authenticated_identity(session_key, identity)
-            except Exception:
-                pass
+            # Production consumed authenticated sender material in on_message and
+            # retained only an opaque TurnSubjectProof.  The old raw identity stash
+            # survives solely for registry-free historical test hosts.
+            EmotionalStatePlugin._registry_free_legacy_identity_stash(
+                self,
+                event,
+                session_key,
+            )
             # 更新最后消息时间，供 proactive scheduler 计算沉默时长
             self._store.last_user_message_time.set(session_key, now)
             sched = getattr(self, "_proactive_scheduler", None)
-            if sched is not None and hasattr(sched, "record_message_time"):
-                sched.record_message_time(session_key, now)
+            if sched is not None and hasattr(sched, "record_scoped_message_time"):
+                sched.record_scoped_message_time(now)
             # T2-07①：喂主动反馈回路——用户真的回应了，把该会话所有 pending
             # outreach 标 answered（此前只有超时会标 unanswered，她学不到"他回我了"）。
             life_sim = getattr(self, "_life_simulator", None)
-            if life_sim is not None and hasattr(life_sim, "record_user_response"):
-                life_sim.record_user_response(session_key, now)
+            if life_sim is not None and hasattr(
+                life_sim,
+                "record_scoped_user_response",
+            ):
+                life_sim.record_scoped_user_response(now)
             # T1-04①：复活 RhythmLearner 画像学习（内部已含 _record_tempo，
             # 始终记录 tempo、亲密度不够时跳过画像学习——不再只调低层 _record_tempo）。
             # 用 hosts.get() 非创建式查询：on_message 对 EventMessageType.ALL 触发，
@@ -2776,8 +3155,10 @@ class EmotionalStatePlugin(Star):
                     # 宿主/内核链路部分初始化时的任何异常都退化为 engine_obs={}，
                     # 绝不能让 tempo 记录（observe_user_message）跟着一起被吞掉。
                     engine_obs = {}
-                self._rhythm_learner.observe_user_message(
-                    session_key, message_text, now, engine_obs
+                self._rhythm_learner.observe_scoped_user_message(
+                    text=message_text,
+                    timestamp=now,
+                    engine_observation=engine_obs,
                 )
                 # T2-06④：早安/晚安等重复问候模式观察（关键词兜底识别，见
                 # session_context._detect_greeting_ritual_pattern 的偏差说明）。
@@ -2800,11 +3181,19 @@ class EmotionalStatePlugin(Star):
     ) -> None:
         # *args/**kwargs：兜住 AstrBot 各版本多传的钩子参数（req 仍固定为第 2 位，
         # 见 4.26.5 文档 (event, req: ProviderRequest)）；否则新版报 TypeError。
+        ingress_marker = "_sylanne_request_ingress_v1"
+        ingress_state = ScopeResolver._event_extra(event, ingress_marker)
+        if ingress_state is not None:
+            return
+        if not ScopeResolver.set_event_extra(event, ingress_marker, "running"):
+            return
         try:
             await self._on_llm_request_inner(event, request)
         except Exception as e:
+            ScopeResolver.set_event_extra(event, ingress_marker, "failed")
             logger.error(f"Sylanne on_llm_request error: {e}", exc_info=True)
             return
+        ScopeResolver.set_event_extra(event, ingress_marker, "complete")
 
     def _session_lock(self, session_key: str) -> asyncio.Lock:
         binding = self._bound_runtime()
@@ -2860,14 +3249,136 @@ class EmotionalStatePlugin(Star):
             return False
 
     async def _on_llm_request_inner(self, event: Any, request: Any) -> None:
-        resolved_scope = await EmotionalStatePlugin._freeze_scope_persona(
-            self, event, request
+        registry = getattr(self, "_scope_runtime_registry", None)
+        strict_subject_carrier = registry is not None or hasattr(
+            self,
+            "_scope_resolver_v1",
         )
+        subject_carrier = None
+        if strict_subject_carrier and EmotionalStatePlugin._verified_transport_turn(
+            self,
+            event,
+        ) is None:
+            EmotionalStatePlugin._publish_turn_subject_proof_mismatch(self, event)
+            return
+        prepared = await EmotionalStatePlugin._prepare_scope_persona(
+            self,
+            event,
+            request,
+        )
+        if type(prepared) is ResolvedScope:
+            resolved_scope = prepared
+            if (
+                resolved_scope.private_scope_enabled is not True
+                or resolved_scope.scope is None
+            ):
+                return
+        else:
+            if strict_subject_carrier:
+                # This is the sole production sender read. Persona/config has
+                # already prepared successfully, while no scope/runtime/private
+                # owner exists yet. The raw value survives only long enough to
+                # mint the opaque turn proof used by the freeze step below.
+                try:
+                    raw_identity = self._session_ctx.resolve_authenticated_identity(
+                        event
+                    )
+                except Exception:
+                    raw_identity = None
+                if not EmotionalStatePlugin._attach_turn_subject_proof(
+                    self,
+                    event,
+                    raw_identity,
+                ):
+                    EmotionalStatePlugin._publish_turn_subject_proof_mismatch(
+                        self,
+                        event,
+                    )
+                    return
+                raw_identity = None
+                subject_carrier = EmotionalStatePlugin._verified_turn_subject_proof(
+                    self,
+                    event,
+                )
+                if subject_carrier is None:
+                    EmotionalStatePlugin._publish_turn_subject_proof_mismatch(
+                        self,
+                        event,
+                    )
+                    return
+            resolved_scope = await EmotionalStatePlugin._freeze_scope_persona(
+                self,
+                event,
+                prepared,
+            )
+        if strict_subject_carrier and subject_carrier is None:
+            EmotionalStatePlugin._publish_turn_subject_proof_mismatch(self, event)
+            return
         if (
             type(resolved_scope) is not ResolvedScope
             or resolved_scope.private_scope_enabled is not True
+            or resolved_scope.scope is None
         ):
             return
+
+        request_view: RequestRuntimeView | None = None
+        if strict_subject_carrier:
+            assert subject_carrier is not None
+            resolver, transport, _resolving_turn, proof = subject_carrier
+            frozen_turn = ScopeResolver._event_extra(
+                event,
+                "_sylanne_transport_turn_v1",
+            )
+            scope = resolved_scope.scope
+            if (
+                ScopeResolver._event_extra(event, "_sylanne_turn_subject_v1")
+                is not proof
+                or type(frozen_turn) is not TransportTurn
+                or frozen_turn.turn_state != "frozen"
+                or frozen_turn.session_ref != proof.transport_session_token
+                or frozen_turn.turn_generation != proof.turn_generation
+                or resolved_scope.turn_generation != proof.turn_generation
+                or scope.session_ref.token != proof.transport_session_token
+                or transport.bot_ref != scope.bot_ref
+                or transport.session_ref != scope.session_ref
+                or not resolver._matches_published_scope(event, resolved_scope)
+            ):
+                EmotionalStatePlugin._publish_turn_subject_proof_mismatch(self, event)
+                return
+            if registry is not None:
+                try:
+                    relation_runtime = registry.relation_for(scope, proof.subject)
+                    request_view = registry.issue_request_view(
+                        resolved_scope,
+                        relation_runtime=relation_runtime,
+                        subject=proof.subject,
+                    )
+                except Exception:
+                    EmotionalStatePlugin._publish_turn_subject_proof_mismatch(
+                        self,
+                        event,
+                    )
+                    return
+                if not resolver.set_event_extra(
+                    event,
+                    "_sylanne_runtime_view_v1",
+                    request_view,
+                ):
+                    EmotionalStatePlugin._publish_turn_subject_proof_mismatch(
+                        self,
+                        event,
+                    )
+                    return
+                if not resolver.set_event_extra(
+                    event,
+                    "_sylanne_turn_subject_v1",
+                    None,
+                ):
+                    EmotionalStatePlugin._publish_turn_subject_proof_mismatch(
+                        self,
+                        event,
+                    )
+                    return
 
         async def _run_bound_request() -> None:
             legacy_ready = await EmotionalStatePlugin._on_message_after_scope_frozen(
@@ -2891,11 +3402,15 @@ class EmotionalStatePlugin(Star):
                 request,
             )
 
+        if request_view is not None:
+            with EmotionalStatePlugin._bind_request_runtime_view(self, request_view):
+                return await _run_bound_request()
+
         binder = getattr(self, "_bind_runtime_for_event", None)
         if not callable(binder):
             # Only narrow registry-free test doubles may retain the old direct
             # hook seam.  A real scoped plugin without a binding must no-op.
-            if getattr(self, "_scope_runtime_registry", None) is not None:
+            if registry is not None:
                 return
             return await _run_bound_request()
         try:
@@ -2970,6 +3485,29 @@ class EmotionalStatePlugin(Star):
 
     async def _flush_pending_kernel_persists(self) -> None:
         await self._state_persistence.flush_pending_kernel_persists()
+
+    async def _save_live_scoped_queue_checkpoints(self) -> None:
+        """Persist every live queue through its exact runtime-owned gateway."""
+
+        registry = getattr(self, "_scope_runtime_registry", None)
+        if registry is None:
+            return
+        for session_runtime in registry.live_session_runtimes():
+            checkpoint = getattr(
+                session_runtime.background_queue,
+                "save_checkpoint",
+                None,
+            )
+            if not callable(checkpoint):
+                continue
+            try:
+                await checkpoint()
+            except Exception as exc:
+                logger.debug(
+                    "Sylanne scoped background queue checkpoint skipped [%s]: %s",
+                    session_runtime.storage_token,
+                    exc,
+                )
 
     async def _do_buffer_persist(self, session_key: str) -> None:
         await self._state_persistence._do_buffer_persist(session_key)
@@ -3524,6 +4062,22 @@ class EmotionalStatePlugin(Star):
                 exc_info=True,
             )
 
+    @filter.after_message_sent(priority=-10_000)
+    async def _release_request_runtime_view(
+        self,
+        event: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Terminally invalidate this exact turn view after later hooks finish."""
+
+        del args, kwargs
+        view = self._event_runtime_view(event)
+        if view is None:
+            return
+        if self._scope_runtime_registry.release_request_view(view):
+            ScopeResolver.set_event_extra(event, "_sylanne_runtime_view_v1", None)
+
     def _on_session_reset(self, session_key: str) -> None:
         """/reset 触发的幽灵源清理（同步、可测试）。
 
@@ -3564,6 +4118,12 @@ class EmotionalStatePlugin(Star):
             self._store.pending_outreach_context.pop(session_key, None)
         except Exception as e:
             logger.debug(f"Sylanne _on_session_reset pop outreach [{session_key}]: {e}")
+
+    def _release_scoped_session(self, scope: object) -> bool:
+        """Forward an already-frozen lifecycle scope without raw-key selection."""
+
+        release = getattr(self._state_persistence, "release_scoped_session", None)
+        return bool(release(scope)) if callable(release) else False
 
     async def _maybe_takeover_segments(self, event: Any) -> bool:
         """若 event 对应的 origin 被桥接登记为待接管分段：
@@ -4149,9 +4709,6 @@ class EmotionalStatePlugin(Star):
     def _sylanne_memory_kv_key(self, session_key: str) -> str:
         return self._state_persistence.sylanne_memory_kv_key(session_key)
 
-    def _background_post_checkpoint_kv_key(self, session_key: str) -> str:
-        return self._background_queue.checkpoint_kv_key(session_key)
-
     # KV-first persistence helpers
     def _kernel_kv_key(self, session_key: str) -> str:
         return self._state_persistence.kernel_kv_key(session_key)
@@ -4660,34 +5217,6 @@ class EmotionalStatePlugin(Star):
     def _last_request_text_for_session(self, session_key: str = "") -> str:
         return str(self._store.last_request_text.get(session_key, ""))
 
-    def _background_post_adaptive_worker_decision(
-        self, session_key: str = "", *, commit_scale: bool = False
-    ) -> dict[str, Any]:
-        return self._background_queue.adaptive_worker_decision(
-            session_key, commit_scale=commit_scale
-        )
-
-    def _background_post_max_workers(self, session_key: str = "") -> int:
-        return self._background_queue.max_workers(session_key)
-
-    def _background_post_job_to_dict(self, job: Any) -> dict[str, Any]:
-        return self._background_queue.job_to_dict(job)
-
-    def _recover_expired_background_post_active(self, session_key: str) -> int:
-        return self._background_queue.recover_expired_active(session_key)
-
-    def _schedule_background_post_checkpoint(self, session_key: str) -> None:
-        self._background_queue.schedule_checkpoint(session_key)
-
-    async def _drain_background_post_assessments(self, session_key: str) -> None:
-        await self._background_queue.drain_assessments(session_key)
-
-    async def _save_background_post_checkpoint(self, session_key: str) -> None:
-        await self._background_queue.save_checkpoint(session_key)
-
-    async def _recover_background_post_queue(self, session_key: str) -> bool:
-        return await self._background_queue.recover_queue(session_key)
-
     @_scoped_private_event_hook
     async def on_waiting_llm_request(self, event: Any, **kwargs: Any) -> None:
         await self._realtime_dispatch.on_waiting_llm_request(event, **kwargs)
@@ -4947,12 +5476,13 @@ class EmotionalStatePlugin(Star):
             # It must wait for a scoped scheduler path instead of selecting recent
             # state or constructing a default Persona runtime.
             return
-        if binding.persona_runtime.life_simulator_started:
+        lifecycle = binding.session_runtime.lifecycle
+        if lifecycle.life_simulator_started:
             return
         life_sim = getattr(self, "_life_simulator", None)
         if life_sim is None:
             return
-        binding.persona_runtime.life_simulator_started = True
+        lifecycle.life_simulator_started = True
         # issue#43 Wave1：启用了生活模拟却没配 provider_id 是「静默冻结」的配置陷阱根源，
         # 启动时响亮告警一次（_life_sim_llm_call 里还会按 cause 节流告警，但这条最早可见）。
         if life_sim.enabled and not str(
@@ -4979,7 +5509,7 @@ class EmotionalStatePlugin(Star):
         # LifeSim 持久化状态恢复在 async initialize 里 await（KV 读为异步）。
         scheduler = binding.persona_runtime.autonomy_scheduler
         if scheduler is None:
-            binding.persona_runtime.life_simulator_started = False
+            lifecycle.life_simulator_started = False
             return
         scheduler.start()
         binding.persona_runtime.autonomy_scheduler_task = getattr(
@@ -5124,7 +5654,7 @@ class EmotionalStatePlugin(Star):
         binding = self._bound_runtime()
         if binding is None:
             return
-        runtime = binding.persona_runtime
+        runtime = binding.session_runtime.lifecycle
         now = time.time()
         if runtime.life_sim_dirty_in_flight:
             return
@@ -5134,7 +5664,10 @@ class EmotionalStatePlugin(Star):
         # owner dirty marker only; Task 6 supplies the scoped persistence writer.
         runtime.life_sim_dirty_in_flight = True
         runtime.life_sim_last_save_ts = now
-        runtime.life_sim_dirty_in_flight = False
+        try:
+            self._life_simulator.flush_scoped_state()
+        finally:
+            runtime.life_sim_dirty_in_flight = False
 
     async def _qzone_audit_throttled_save(self) -> None:
         """PR-Qzone：节流落盘说说审计/频率闸状态（镜像 _life_sim_throttled_save）。
@@ -5181,7 +5714,10 @@ class EmotionalStatePlugin(Star):
             return
         runtime.rhythm_learner_dirty_in_flight = True
         runtime.rhythm_learner_last_save_ts = now
-        runtime.rhythm_learner_dirty_in_flight = False
+        try:
+            self._rhythm_learner.flush_scoped_state()
+        finally:
+            runtime.rhythm_learner_dirty_in_flight = False
 
     async def _rel_state_throttled_save(self) -> None:
         """PR-H 解耦：关系层状态独立节流落盘到 KV（独立 KV key）。
@@ -5271,6 +5807,7 @@ class EmotionalStatePlugin(Star):
                 e,
                 exc_info=True,
             )
+        await self._save_live_scoped_queue_checkpoints()
         # emotion_spirit 桥：卸载前还原它的 persona_mode（接管时我们把它设成了 disabled，不还原
         # 会把人家插件永久静音、需重启才恢复，红队 lifecycle MAJOR）。cheap getattr/setattr、吞错。
         try:
@@ -5287,23 +5824,25 @@ class EmotionalStatePlugin(Star):
         # before stop() clears its task pointer, and every Persona is handled
         # independently instead of consulting an unbound plugin-global owner.
         persona_runtimes = self._scope_runtime_registry.live_persona_runtimes()
+        session_runtimes = self._scope_runtime_registry.live_session_runtimes()
         tasks_to_cancel: list = []
         for task in list(self._background_tasks):
             if not task.done():
                 task.cancel()
                 tasks_to_cancel.append(task)
         self._background_tasks.clear()
+        for session_runtime in session_runtimes:
+            sched_task = session_runtime.lifecycle.proactive_scheduler_task
+            if sched_task and not sched_task.done():
+                sched_task.cancel()
+                tasks_to_cancel.append(sched_task)
+            session_runtime.lifecycle.proactive_scheduler_task = None
         for runtime in persona_runtimes:
             for task in list(runtime.store.background_post_checkpoint_tasks.values()):
                 if not task.done():
                     task.cancel()
                     tasks_to_cancel.append(task)
             runtime.store.background_post_checkpoint_tasks.clear()
-            sched_task = runtime.proactive_scheduler_task
-            if sched_task and not sched_task.done():
-                sched_task.cancel()
-                tasks_to_cancel.append(sched_task)
-            runtime.proactive_scheduler_task = None
             autonomy = runtime.autonomy_scheduler
             autonomy_task = runtime.autonomy_scheduler_task
             if autonomy_task is None and autonomy is not None:

@@ -27,6 +27,9 @@ import collections
 import time
 from typing import TYPE_CHECKING, Any
 
+from .scoped_session_components import ScopedSessionComponentStore
+from .scope_repository import ScopedPersistenceGateway
+
 if TYPE_CHECKING:
     from sylanne_alpha.protocols import PluginHost
 
@@ -50,7 +53,19 @@ class ProactiveScheduler:
       - 通过 host.on_proactive_check 与计算栈交互
     """
 
-    def __init__(self, plugin: PluginHost) -> None:
+    def __init__(
+        self,
+        plugin: PluginHost,
+        *,
+        persistence: ScopedPersistenceGateway | None = None,
+    ) -> None:
+        """Create the legacy scheduler or a capability-bound scoped scheduler.
+
+        A scoped scheduler owns exactly one SessionScope component.  It does not
+        discover a current/default session from plugin maps; delivery remains a
+        separately wired outbox concern.
+        """
+
         self._p = plugin
         # 仪式注册表：session_key → {ritual_name: (start_hour, end_hour)}
         # 初始为空，后续可通过对话学习填充
@@ -59,6 +74,15 @@ class ProactiveScheduler:
         self._last_message_times: dict[str, float] = {}
         # Item 6: 主动发言反馈历史（限制最近 200 条防止无界增长）
         self._feedback_history: collections.deque = collections.deque(maxlen=200)
+        self._scoped_components = (
+            None if persistence is None else ScopedSessionComponentStore(persistence)
+        )
+        if self._scoped_components is not None:
+            self._restore_scoped_state()
+
+    def _require_legacy_session_api(self) -> None:
+        if self._scoped_components is not None:
+            raise ValueError("scoped scheduler requires scoped methods")
 
     def _bound_session_runtime(self, session_key: str) -> Any | None:
         """Resolve only the session already authenticated by the active binding."""
@@ -104,6 +128,7 @@ class ProactiveScheduler:
         两个视角的 unanswered/cold_reply 合并计数。ShareIntent 侧 unanswered_penalty
         维持 * 0.0（M8 单一惩罚通道——scheduler gate 独占，不与 intent 侧双罚）。
         """
+        self._require_legacy_session_api()
         cfg = self._p.config or {}
         cooldown = float(cfg.get("proactive_speech_dispatch_cooldown_seconds", 1800.0))
         scoped_runtime_required = (
@@ -175,6 +200,7 @@ class ProactiveScheduler:
         }
 
     def observe_dispatch_feedback(self, session_key: str = "", **kwargs: Any) -> None:
+        self._require_legacy_session_api()
         pass
 
     def record_feedback(self, session_key: str, timestamp: float, rating: str) -> None:
@@ -185,6 +211,7 @@ class ProactiveScheduler:
             timestamp: 主动发言的时间戳（用于关联具体哪条发言）。
             rating: "positive" 或 "negative"。
         """
+        self._require_legacy_session_api()
         self._feedback_history.append({
             "session_key": session_key,
             "timestamp": timestamp,
@@ -193,6 +220,7 @@ class ProactiveScheduler:
         })
 
     def should_exit_after_idle(self, session_key: str = "", **kwargs: Any) -> bool:
+        self._require_legacy_session_api()
         return True
 
     # ------------------------------------------------------------------
@@ -217,6 +245,7 @@ class ProactiveScheduler:
         Returns:
             调度请求字典，包含 message_text、quiet_gate、realtime_chat_plan。
         """
+        self._require_legacy_session_api()
         cfg = self._p.config or {}
         topic_judgement = {}
         if isinstance(decision, dict):
@@ -251,6 +280,7 @@ class ProactiveScheduler:
         Returns:
             阻塞原因字符串，空字符串表示可以发言。
         """
+        self._require_legacy_session_api()
         if force:
             return ""
         cfg = self._p.config or {}
@@ -302,6 +332,7 @@ class ProactiveScheduler:
         Returns:
             (allowed, reason): allowed=False 时 reason 给出 gate 名（供 reason_code）。
         """
+        self._require_legacy_session_api()
         if not session_key:
             return False, "no_session_key"
         synth_session = type("_S", (), {"unified_msg_origin": session_key})()
@@ -336,6 +367,7 @@ class ProactiveScheduler:
         Returns:
             扫描结果字典，包含 checked（检查数）和 dispatched（发送数）。
         """
+        self._require_legacy_session_api()
         self.ensure_state()
         candidates = dict(self._p._store.proactive_candidate_sessions.items())
         checked = 0
@@ -371,8 +403,7 @@ class ProactiveScheduler:
         Returns:
             决策字典，包含 should_speak、reason 等字段。
         """
-
-
+        self._require_legacy_session_api()
         sk = (
             session_key
             or (
@@ -400,6 +431,7 @@ class ProactiveScheduler:
 
     async def request_dispatch(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """主动发言 dispatch：决策 → 桥接发送（或 dry_run 只返回决策）。"""
+        self._require_legacy_session_api()
         from sylanne_alpha.engine_adapter import derive_should_send
 
         event_or_session = args[0] if args else kwargs.get("event_or_session")
@@ -524,6 +556,7 @@ class ProactiveScheduler:
         }
 
     async def judge_topic(self, session_key: str = "", **kwargs: Any) -> dict[str, Any]:
+        self._require_legacy_session_api()
         return {"topic": "", "confidence": 0.0, "should_speak": False}
 
     # ------------------------------------------------------------------
@@ -544,6 +577,8 @@ class ProactiveScheduler:
             start_hour: 仪式窗口开始小时（0-23）。
             end_hour: 仪式窗口结束小时（0-23）。
         """
+        if self._scoped_components is not None and not session_key.startswith("relation_v1_"):
+            raise ValueError("scoped scheduler accepts only an opaque relation token")
         if session_key not in self._ritual_registry:
             self._ritual_registry[session_key] = {}
         self._ritual_registry[session_key][ritual_name] = (start_hour, end_hour)
@@ -555,11 +590,15 @@ class ProactiveScheduler:
             session_key: 会话标识。
             ritual_name: 仪式名称。
         """
+        if self._scoped_components is not None and not session_key.startswith("relation_v1_"):
+            raise ValueError("scoped scheduler accepts only an opaque relation token")
         if session_key in self._ritual_registry:
             self._ritual_registry[session_key].pop(ritual_name, None)
 
     def _last_user_ts(self, session_key: str) -> float:
         """用户最后消息时间：本地缓存优先，回落 SessionStateStore（T2 双源对齐）。"""
+        if self._scoped_components is not None:
+            return float(self._last_message_times.get("_scoped", 0.0) or 0.0)
         ts = float(self._last_message_times.get(session_key, 0.0) or 0.0)
         if ts > 0:
             return ts
@@ -575,6 +614,7 @@ class ProactiveScheduler:
             session_key: 会话标识。
             ts: 时间戳，默认为当前时间。
         """
+        self._require_legacy_session_api()
         when = ts if ts is not None else time.time()
         self._last_message_times[session_key] = when
         store = getattr(self._p, "_store", None)
@@ -595,6 +635,8 @@ class ProactiveScheduler:
         Returns:
             缺席的仪式名，或 None（无缺席）。
         """
+        if self._scoped_components is not None and not session_key.startswith("relation_v1_"):
+            raise ValueError("scoped scheduler accepts only an opaque relation token")
         if now is None:
             now = time.time()
 
@@ -620,3 +662,147 @@ class ProactiveScheduler:
                 return ritual_name
 
         return None
+
+    # ------------------------------------------------------------------
+    # Scope-v1 session component persistence
+    # ------------------------------------------------------------------
+
+    @property
+    def persistence(self) -> ScopedPersistenceGateway | None:
+        components = self._scoped_components
+        return None if components is None else components.gateway
+
+    def record_scoped_feedback(self, timestamp: float, rating: str) -> None:
+        """Record feedback for the captured scope with no session argument."""
+
+        if self._scoped_components is None:
+            raise ValueError("scoped persistence is not configured")
+        self._feedback_history.append(
+            {
+                "timestamp": float(timestamp),
+                "rating": str(rating),
+                "recorded_at": time.time(),
+            }
+        )
+
+    def record_scoped_message_time(self, ts: float | None = None) -> None:
+        """Set this frozen session's last-user timestamp without a key lookup."""
+
+        if self._scoped_components is None:
+            raise ValueError("scoped persistence is not configured")
+        self._last_message_times["_scoped"] = time.time() if ts is None else float(ts)
+
+    def scoped_last_message_time(self) -> float:
+        if self._scoped_components is None:
+            raise ValueError("scoped persistence is not configured")
+        return float(self._last_message_times.get("_scoped", 0.0) or 0.0)
+
+    def register_scoped_ritual(self, ritual_name: str, start_hour: int, end_hour: int) -> None:
+        """Register a session-local timing hint without a raw selector."""
+
+        if self._scoped_components is None:
+            raise ValueError("scoped persistence is not configured")
+        self._ritual_registry.setdefault("_scoped", {})[str(ritual_name)] = (
+            int(start_hour),
+            int(end_hour),
+        )
+
+    def check_scoped_ritual_absence(self, now: float | None = None) -> str | None:
+        """Check only the scoped local ritual bucket."""
+
+        if self._scoped_components is None:
+            raise ValueError("scoped persistence is not configured")
+        if now is None:
+            now = time.time()
+        rituals = self._ritual_registry.get("_scoped")
+        if not rituals:
+            return None
+        current_hour = time.localtime(now).tm_hour
+        silence_seconds = now - self.scoped_last_message_time() if self.scoped_last_message_time() > 0 else float("inf")
+        for ritual_name, (start_hour, end_hour) in rituals.items():
+            in_window = (
+                start_hour <= current_hour <= end_hour
+                if start_hour <= end_hour
+                else current_hour >= start_hour or current_hour <= end_hour
+            )
+            if in_window and silence_seconds >= 30 * 60:
+                return ritual_name
+        return None
+
+    def _scoped_payload(self) -> dict[str, object]:
+        relation_rituals = {
+            relation_token: {
+                name: [int(hours[0]), int(hours[1])]
+                for name, hours in rituals.items()
+            }
+            for relation_token, rituals in self._ritual_registry.items()
+            if relation_token == "_scoped" or relation_token.startswith("relation_v1_")
+        }
+        feedback = [
+            {
+                key: value
+                for key, value in item.items()
+                if key != "session_key"
+            }
+            for item in self._feedback_history
+            if isinstance(item, dict)
+        ]
+        return {
+            "schema_version": "sylanne.scheduler.scoped.v1",
+            "rituals": relation_rituals,
+            "last_message_time": self.scoped_last_message_time(),
+            "feedback_history": feedback,
+        }
+
+    def _restore_scoped_state(self) -> None:
+        components = self._scoped_components
+        if components is None:
+            return
+        payload = components.load("scheduler")
+        if payload is None:
+            return
+        rituals = payload.get("rituals")
+        if isinstance(rituals, dict):
+            for relation_token, entries in rituals.items():
+                if (
+                    not isinstance(relation_token, str)
+                    or (relation_token != "_scoped" and not relation_token.startswith("relation_v1_"))
+                    or not isinstance(entries, dict)
+                ):
+                    continue
+                parsed: dict[str, tuple[int, int]] = {}
+                for name, hours in entries.items():
+                    if (
+                        isinstance(name, str)
+                        and isinstance(hours, list)
+                        and len(hours) == 2
+                        and all(type(hour) is int and 0 <= hour <= 23 for hour in hours)
+                    ):
+                        parsed[name] = (hours[0], hours[1])
+                if parsed:
+                    self._ritual_registry[relation_token] = parsed
+        last_message_time = payload.get("last_message_time")
+        if isinstance(last_message_time, (int, float)):
+            self._last_message_times["_scoped"] = float(last_message_time)
+        history = payload.get("feedback_history")
+        if isinstance(history, list):
+            self._feedback_history = collections.deque(
+                (dict(item) for item in history if isinstance(item, dict)),
+                maxlen=200,
+            )
+
+    def flush_scoped_state(self) -> int:
+        components = self._scoped_components
+        if components is None:
+            raise ValueError("scoped persistence is not configured")
+        return components.save("scheduler", self._scoped_payload())
+
+    def schedule_scoped_flush(self, *, delay_seconds: float) -> asyncio.Task[bool]:
+        components = self._scoped_components
+        if components is None:
+            raise ValueError("scoped persistence is not configured")
+        return components.schedule_save(
+            "scheduler",
+            self._scoped_payload(),
+            delay_seconds=delay_seconds,
+        )

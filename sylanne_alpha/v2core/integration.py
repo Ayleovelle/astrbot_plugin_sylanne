@@ -44,9 +44,11 @@ import logging
 import math
 import random
 import time
-from typing import Any
+from typing import Any, Coroutine
 
+from sylanne_alpha.scoped_engine_persistence import ScopedEnginePersistence
 from sylanne_alpha.scope_contracts import ResolvedScope, SessionScope
+from sylanne_alpha.scope_repository import ScopedPersistenceGateway, StaleScopeWrite
 from sylanne_alpha.scope_runtime import ScopeMismatch, ScopeUnavailable
 
 logger = logging.getLogger("astrbot_plugin_sylanne")
@@ -68,6 +70,7 @@ _NIGHT_WAKE_CUE_PROB = 0.25   # T1-03③ 命中"首条夜间消息"时，附加"
 # Narrow compatibility anchor for old test/plugin stubs which do not expose a
 # scoped registry.  Production tasks belong to PersonaRuntime instead.
 _PENDING_SAVES: set[Any] = set()
+_SCOPED_V2_SCHEMA = "sylanne.v2.domains.scoped.v1"
 
 
 def _safe_session_key(session_key: str) -> str:
@@ -78,6 +81,109 @@ def _kv(plugin: Any) -> Any:
     if hasattr(plugin, "get_kv_data") and hasattr(plugin, "put_kv_data"):
         return plugin
     return None
+
+
+class ScopedV2DomainPersistence:
+    """Persist V2 domains through one frozen ``v2`` component capability.
+
+    The legacy V2 implementation used a session-shaped KV key.  This owner is
+    deliberately constructed only with :class:`ScopedPersistenceGateway`, so a
+    scoped runtime cannot find a default/latest session or reach the legacy KV
+    branch.  Its engine adapter retains the component CAS generation across
+    restores and delayed saves.
+    """
+
+    def __init__(self, persistence: ScopedPersistenceGateway) -> None:
+        self._engine = ScopedEnginePersistence(persistence)
+
+    @property
+    def persistence(self) -> ScopedPersistenceGateway:
+        return self._engine.persistence
+
+    @staticmethod
+    def _serialize_domains(
+        domains: dict[str, Any],
+        behavior_last_fired: dict[str, float] | None,
+    ) -> dict[str, object]:
+        encoded_domains: dict[str, object] = {}
+        for name, domain in domains.items():
+            if type(name) is not str:
+                raise ValueError("scoped V2 domain names must be exact str")
+            dumper = getattr(domain, "overlay_to_dict" if name == "memory" else "to_dict", None)
+            if callable(dumper):
+                encoded_domains[name] = dumper()
+        behavior: dict[str, float] = {}
+        if isinstance(behavior_last_fired, dict):
+            behavior = {
+                str(name): float(timestamp)
+                for name, timestamp in behavior_last_fired.items()
+                if isinstance(timestamp, (int, float)) and math.isfinite(timestamp)
+            }
+        return {
+            "schema_version": _SCOPED_V2_SCHEMA,
+            "domains": encoded_domains,
+            "behavior_last_fired": behavior,
+        }
+
+    def load_into(self, domains: dict[str, Any]) -> dict[str, float]:
+        """Restore exact serializable V2 domains and return valid cooldowns."""
+
+        snapshot = self._engine.load_v2()
+        if snapshot is None:
+            return {}
+        payload = snapshot.payload
+        if payload.get("schema_version") != _SCOPED_V2_SCHEMA:
+            return {}
+        saved_domains = payload.get("domains")
+        if isinstance(saved_domains, dict):
+            for name, domain in domains.items():
+                state = saved_domains.get(name)
+                if not isinstance(state, dict):
+                    continue
+                loader = getattr(domain, "overlay_load_dict" if name == "memory" else "load_dict", None)
+                if callable(loader):
+                    loader(state)
+        behavior = payload.get("behavior_last_fired")
+        if not isinstance(behavior, dict):
+            return {}
+        return {
+            str(name): float(timestamp)
+            for name, timestamp in behavior.items()
+            if isinstance(timestamp, (int, float)) and math.isfinite(timestamp)
+        }
+
+    def save(
+        self,
+        domains: dict[str, Any],
+        *,
+        behavior_last_fired: dict[str, float] | None = None,
+    ) -> int:
+        return self._engine.save_v2(self._serialize_domains(domains, behavior_last_fired))
+
+    def save_delayed(
+        self,
+        domains: dict[str, Any],
+        *,
+        behavior_last_fired: dict[str, float] | None = None,
+    ) -> Coroutine[Any, Any, bool]:
+        """Capture a V2 payload and discard it if its frozen scope went stale."""
+
+        payload = self._serialize_domains(domains, behavior_last_fired)
+        return self._engine.save_v2_delayed(payload)
+
+    def schedule_save(
+        self,
+        domains: dict[str, Any],
+        *,
+        behavior_last_fired: dict[str, float] | None = None,
+        delay_seconds: float = 0.0,
+    ) -> asyncio.Task[bool]:
+        """Schedule an already-captured V2 component CAS write."""
+
+        return self._engine.schedule_v2_save(
+            self._serialize_domains(domains, behavior_last_fired),
+            delay_seconds=delay_seconds,
+        )
 
 
 def _frozen_scope(event: Any) -> SessionScope | None:
@@ -139,7 +245,7 @@ def _session_lock(plugin: Any, session_key: str) -> Any:
 # 域状态持久化（键格式与旧档兼容）
 # ===========================================================================
 
-async def _load_domains(plugin: Any, session_key: str, domains: dict[str, Any]) -> dict[str, float]:
+async def _load_legacy_domains(plugin: Any, session_key: str, domains: dict[str, Any]) -> dict[str, float]:
     """从域状态总键恢复各域（容缺：键不存在/某域缺=空起步，铁律④）。
 
     返回恢复出的缺陷行为不应期表（behavior_last_fired，{id: ts}），供 _ensure_loaded 灌回 rt——
@@ -175,8 +281,8 @@ async def _load_domains(plugin: Any, session_key: str, domains: dict[str, Any]) 
     return {}
 
 
-async def _save_domains(plugin: Any, session_key: str, domains: dict[str, Any],
-                        behavior_last_fired: dict[str, float] | None = None) -> None:
+async def _save_legacy_domains(plugin: Any, session_key: str, domains: dict[str, Any],
+                               behavior_last_fired: dict[str, float] | None = None) -> None:
     """各域状态落进域总键。memory 域只存重固化影子层（底层 MemorySystem 自有键）。
 
     behavior_last_fired（缺陷行为不应期表）随域 blob 一同落盘——piggyback 既有 debounce 落盘，
@@ -210,33 +316,25 @@ async def _save_scoped_domains(
     domains: dict[str, Any],
     behavior_last_fired: dict[str, float] | None = None,
 ) -> None:
-    """Persist only while this exact scope generation is still live.
-
-    The per-storage-token lock provides write ordering across generations.  An old
-    callback that resumes after a replacement generation has been installed sees
-    ``is_live_session == False`` and cannot overwrite its successor's snapshot.
-    """
+    """CAS-write only the V2 component captured by this exact scope runtime."""
 
     registry = getattr(plugin, "_scope_runtime_registry", None)
     if registry is None or not registry.is_live_session(scope):
         return
     try:
-        persona_runtime = registry.for_scope(scope)
+        runtime = _runtime_for_scope(plugin, scope)
     except ScopeMismatch:
         return
-    lock = persona_runtime.v2core_save_locks.get(scope.storage_token)
-    if lock is None:
-        lock = asyncio.Lock()
-        persona_runtime.v2core_save_locks[scope.storage_token] = lock
-    async with lock:
-        if not registry.is_live_session(scope):
-            return
-        await _save_domains(
-            plugin,
-            scope.storage_token,
-            domains,
-            behavior_last_fired,
-        )
+    persistence = runtime.get("scoped_domain_persistence")
+    if type(persistence) is not ScopedV2DomainPersistence:
+        return
+    try:
+        persistence.save(domains, behavior_last_fired=behavior_last_fired)
+    except (StaleScopeWrite, ValueError):
+        # A delayed/background owner is bound to this gateway; it cannot select
+        # a newer scope and must simply lose its stale CAS.  Invalid payloads
+        # are also discarded rather than leaking into a legacy fallback.
+        return
 
 
 def _pending_save_bucket(plugin: Any, scope: SessionScope | None) -> set[Any] | None:
@@ -265,15 +363,46 @@ def _schedule_domain_save(
     """
 
     scope = scope_or_session if type(scope_or_session) is SessionScope else None
-    if scope is None:
-        if _requires_frozen_scope(plugin) or not isinstance(scope_or_session, str):
+    if scope is not None:
+        bucket = _pending_save_bucket(plugin, scope)
+        if bucket is None:
             return
-        session_key = scope_or_session
-        coro = _save_domains(plugin, session_key, domains, behavior_last_fired)
-    else:
-        session_key = scope.storage_token
-        coro = _save_scoped_domains(plugin, scope, domains, behavior_last_fired)
-    bucket = _pending_save_bucket(plugin, scope)
+        try:
+            runtime = _runtime_for_scope(plugin, scope)
+        except ScopeMismatch:
+            return
+        persistence = runtime.get("scoped_domain_persistence")
+        if type(persistence) is not ScopedV2DomainPersistence:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is None:
+            try:
+                persistence.save(domains, behavior_last_fired=behavior_last_fired)
+            except (StaleScopeWrite, ValueError):
+                return
+            return
+        try:
+            task = persistence.schedule_save(
+                domains,
+                behavior_last_fired=behavior_last_fired,
+            )
+        except ValueError:
+            return
+        bucket.add(task)
+        task.add_done_callback(bucket.discard)
+        registry = getattr(plugin, "_scope_runtime_registry", None)
+        if registry is None or not registry.track_session_task(scope, task):
+            task.cancel()
+        return
+
+    if _requires_frozen_scope(plugin) or not isinstance(scope_or_session, str):
+        return
+    session_key = scope_or_session
+    coro = _save_legacy_domains(plugin, session_key, domains, behavior_last_fired)
+    bucket = _pending_save_bucket(plugin, None)
     if bucket is None:
         coro.close()
         return
@@ -285,10 +414,6 @@ def _schedule_domain_save(
         task = loop.create_task(coro)
         bucket.add(task)
         task.add_done_callback(bucket.discard)
-        if scope is not None:
-            registry = getattr(plugin, "_scope_runtime_registry", None)
-            if registry is None or not registry.track_session_task(scope, task):
-                task.cancel()
     else:
         try:
             asyncio.run(coro)
@@ -350,8 +475,8 @@ async def save_all_domains(plugin: Any) -> None:
         domains = rt.get("domains") if isinstance(rt, dict) else None
         if isinstance(domains, dict) and domains:
             try:
-                await _save_domains(plugin, session_key, domains,
-                                    rt.get("behavior_last_fired") if isinstance(rt, dict) else None)
+                await _save_legacy_domains(plugin, session_key, domains,
+                                           rt.get("behavior_last_fired") if isinstance(rt, dict) else None)
             except Exception as exc:  # noqa: BLE001
                 logger.debug("Sylanne v2core 终扫落盘失败 [%s]: %s", session_key, exc)
 
@@ -370,13 +495,17 @@ def _runtime_for_scope(plugin: Any, scope: SessionScope) -> dict[str, Any]:
         raise ScopeUnavailable("scoped v2core registry is unavailable")
     # This rejects an old scope generation before it can reuse a same-token V2
     # cache entry from a newer session incarnation.
-    registry.exact_session(scope)
+    session_runtime = registry.exact_session(scope)
+    gateway = session_runtime.persistence
     persona_runtime = registry.for_scope(scope)
     return _build_runtime(
         plugin,
         scope.storage_token,
         persona_runtime.v2core_runtimes,
         scope=scope,
+        scoped_domain_persistence=(
+            None if type(gateway) is not ScopedPersistenceGateway else ScopedV2DomainPersistence(gateway)
+        ),
     )
 
 
@@ -411,6 +540,15 @@ def _runtime_from_scope_or_legacy(
     return _legacy_runtime_for_raw_session(plugin, scope_or_session)
 
 
+def _runtime_for(
+    plugin: Any,
+    scope_or_session: SessionScope | str,
+) -> dict[str, Any] | None:
+    """Private compatibility alias with the same scoped fail-closed boundary."""
+
+    return _runtime_from_scope_or_legacy(plugin, scope_or_session)
+
+
 def _runtime_cache_key(storage_token: str, scope: SessionScope | None) -> str:
     """Keep same-token replacement generations as independent V2 runtimes."""
 
@@ -425,6 +563,7 @@ def _build_runtime(
     cache: dict[str, dict[str, Any]],
     *,
     scope: SessionScope | None,
+    scoped_domain_persistence: ScopedV2DomainPersistence | None = None,
 ) -> dict[str, Any]:
     """Construct one V2 bundle; caller already selected its only legal cache."""
     from sylanne_alpha.v2core.body_port_v2 import CanonicalKernelBodyPort
@@ -513,14 +652,31 @@ def _build_runtime(
         "storage_token": storage_token,
         "scope_generation": scope.scope_generation if scope is not None else None,
         "scope": scope,
+        "scoped_domain_persistence": scoped_domain_persistence,
     }
     cache[cache_key] = rt
     return rt
 
 
-async def _ensure_loaded(plugin: Any, session_key: str, rt: dict[str, Any]) -> None:
+async def _ensure_loaded(
+    plugin: Any,
+    scope_or_session: SessionScope | str,
+    rt: dict[str, Any],
+) -> None:
     if not rt.get("loaded"):
-        rt["behavior_last_fired"] = await _load_domains(plugin, session_key, rt["domains"])
+        if type(scope_or_session) is SessionScope:
+            persistence = rt.get("scoped_domain_persistence")
+            rt["behavior_last_fired"] = (
+                {}
+                if type(persistence) is not ScopedV2DomainPersistence
+                else persistence.load_into(rt["domains"])
+            )
+        else:
+            rt["behavior_last_fired"] = await _load_legacy_domains(
+                plugin,
+                scope_or_session,
+                rt["domains"],
+            )
         rt["loaded"] = True
 
 
@@ -956,7 +1112,7 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
         text = _user_text(plugin, event)
         if not text.strip():
             return
-        await _ensure_loaded(plugin, session_key, rt)
+        await _ensure_loaded(plugin, scope if scope is not None else session_key, rt)
 
         ctx = rt["runner"].run_percept_stage(
             session_key, event, text, domains=rt["domains"],
@@ -1263,7 +1419,13 @@ def consume_dispatch_modulators(
 # 阶段二：response 钩子（DELIBERATE+EVOLVE，持锁）
 # ===========================================================================
 
-def _v3_settle_v2core_reply(plugin: Any, session_key: str, kind: Any, reply_kind_enum: Any) -> None:
+def _v3_settle_v2core_reply(
+    plugin: Any,
+    scope: SessionScope | None,
+    session_key: str,
+    kind: Any,
+    reply_kind_enum: Any,
+) -> None:
     """把 v2core 的权威 ReplyKind 决策交给 v3 shadow（默认关时是空操作）。
 
     只处理终局的两类：SILENT（这轮不说话，不会再有投递证据）与 FALLBACK（兜底文案，
@@ -1272,7 +1434,25 @@ def _v3_settle_v2core_reply(plugin: Any, session_key: str, kind: Any, reply_kind
     """
 
     facade = getattr(plugin, "_v3_shadow", None)
-    if facade is None or not session_key:
+    if facade is None:
+        return
+    if scope is not None:
+        # A scoped V3 facade must receive the frozen scope/capability.  Do not
+        # silently feed its legacy session-key API from an active V2 scope.
+        settle_scoped = getattr(facade, "settle_scoped", None)
+        if not callable(settle_scoped):
+            return
+        if kind is reply_kind_enum.SILENT:
+            settle_scoped(scope=scope, route_kind="SILENT", reply_kind="SILENT")
+        elif kind is reply_kind_enum.FALLBACK:
+            settle_scoped(
+                scope=scope,
+                route_kind="FALLBACK",
+                reply_kind="FALLBACK",
+                part_count=1,
+            )
+        return
+    if not session_key:
         return
     if kind is reply_kind_enum.SILENT:
         facade.settle(session_key=session_key, route_kind="SILENT", reply_kind="SILENT")
@@ -1312,7 +1492,7 @@ async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
         # 继续投递管线时会 consume_dispatch_modulators——这里先清空，保证
         # 拿到的要么是本轮真算出来的调制器，要么是 None（中性），绝不是上一轮的陈旧值。
         rt["turn_dispatch_modulators"] = None
-        await _ensure_loaded(plugin, session_key, rt)
+        await _ensure_loaded(plugin, scope if scope is not None else session_key, rt)
 
         # realtime 投递接管开启时，投递管线的 observe_response 会打 response tick
         cfg = getattr(plugin, "_config", None) or getattr(plugin, "config", None) or {}
@@ -1449,7 +1629,7 @@ async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
             # 这个点读。SILENT → HOLD（这轮到此为止，不会再有投递证据）；FALLBACK → 恒 UNKNOWN。
             # SPEAK 【故意不结算】：SPEAK 要由真投递（分段全成功）证明，这里继续投递管线，
             # 让 _dispatch_segmented_parts 那条终端证据来结算。默认关时 settle 是空操作。
-            _v3_settle_v2core_reply(plugin, session_key, reply.kind, ReplyKind)
+            _v3_settle_v2core_reply(plugin, scope, session_key, reply.kind, ReplyKind)
 
             suppress_delivery: bool
             if reply.kind is ReplyKind.SILENT:
@@ -1531,7 +1711,7 @@ async def consult_idle_reach(
             if type(scope_or_session) is SessionScope
             else scope_or_session
         )
-        await _ensure_loaded(plugin, session_key, rt)
+        await _ensure_loaded(plugin, scope_or_session, rt)
         # T2-03⑤ MAJOR 修复（红队 finding）：忙线窗口内不该一边"要去忙了"一边又高频
         # 主动找你——旧实现想通过 _apply_winddown_window_scratch 把 winddown_hold_bias
         # 也塞进这条空闲咨询的 g_hold，指望"压一压"reach 倾向；但 ignition 的空闲分支

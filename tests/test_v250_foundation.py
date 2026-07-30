@@ -3,7 +3,8 @@
 design: docs/architecture/v250-cross-group-memory-design.md §8（B1/B2/B3）+ §6（6 开关）。
 
 本 slice 边界（严格遵守，测试同样只覆盖这些）：
-- B1：已认证实时 sender 暂存层（session_state_store.py + main.py on_message 接线）。
+- B1：仅 registry-free 历史兼容宿主的已认证 sender 暂存
+  （SessionStateStore + helper；生产 scoped runtime 不写 raw identity）。
 - ShelfItem / PersonShelfBucket（person_shelf.py）：dataclass + KV 读写 + B2 载入加固。
 - PersonProfile（person_profile.py）：dataclass + KV 读写 + B2 载入加固 + 衰减纯函数。
 - 6 个跨群开关默认值（_conf_schema.json + cross_session_config.py）。
@@ -45,9 +46,9 @@ from sylanne_alpha.person_shelf import (
     platform_from_umo,
     save_person_shelf,
 )
-from sylanne_alpha.rhythm_learner import RhythmLearner
 from sylanne_alpha.session_context import SessionContext
 from sylanne_alpha.session_state_store import SessionStateStore
+from sylanne_alpha.scope_runtime import ScopeRuntimeRegistry
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -69,7 +70,7 @@ class _FakeKVPlugin:
 
 
 # ===========================================================================
-# B1：已认证实时 sender 暂存层
+# B1：仅 registry-free 历史兼容暂存
 # ===========================================================================
 
 
@@ -146,8 +147,8 @@ def test_store_collapsed_session_stays_skipped_even_for_original_sender():
 # 生产形态事件替身：只暴露 get_sender_id()/get_message_type()/get_group_id()/
 # get_platform_id()/session_id/unified_msg_origin，绝不设裸 sender_id/user_id
 # 属性——镜像真实 AstrMessageEvent 的可见接口（astr_message_event.py:183-207）。
-# 本次要修的哑火缺陷正是被"假事件带裸 sender_id 属性"掩盖过一次（见 design
-# 背景段），故本文件所有 on_message 测试改用这套替身，禁止再靠裸属性造 per-user。
+# 兼容 helper 的直接合同和余下 on_message 安全用例均使用这套替身，禁止再靠裸属性
+# 造 per-user。
 # ---------------------------------------------------------------------------
 
 
@@ -228,114 +229,135 @@ def _other_event(sender_id: str = "u1") -> _ProdEvent:
     )
 
 
-def _mk_on_message_plugin() -> Any:
-    """构造仅含 on_message 依赖的最小 fake plugin（沿用 test_wave_l1_g1_liveness.py 的
-    既有模式：把插件真实方法用 MethodType 绑到最小 fake plugin，测真实逻辑）。
-    """
+def _mk_registry_free_legacy_identity_host() -> Any:
+    """构造兼容 helper 所需的最小历史宿主（不带 scoped runtime registry）。"""
     p = types.SimpleNamespace()
     p._session_ctx = SessionContext(p)
     p._store = SessionStateStore()
-    p._life_simulator = None
-    p._rhythm_learner = RhythmLearner(intimacy_threshold=0.6)
-
-    async def _noop_save() -> None:
-        return None
-
-    p._rhythm_learner_throttled_save = _noop_save
-    p.on_message = types.MethodType(main_mod.EmotionalStatePlugin.on_message, p)
     return p
 
 
-def test_on_message_private_event_stashes_identity():
-    """私聊天生 per-user：主判据首条即放行，暂存 sender/platform/origin=private。"""
-    p = _mk_on_message_plugin()
+def test_registry_free_legacy_identity_stash_private_event_uses_explicit_session_key():
+    """私聊兼容暂存按调用方给定的 key 写入，身份仅来自事件公开方法。"""
+    p = _mk_registry_free_legacy_identity_host()
     ev = _private_event("2300184498")
-    asyncio.run(p.on_message(ev))
-    session_key = p._session_ctx.session_key(ev)
-    assert session_key == "2300184498"  # 生产上无裸属性，session_key 不再叠加后缀
+    session_key = "legacy-private-session"
+    main_mod.EmotionalStatePlugin._registry_free_legacy_identity_stash(
+        p,
+        ev,
+        session_key,
+    )
     rec = p._store.get_authenticated_identity(session_key)
     assert rec == {
-        "sender_id": "2300184498", "platform": "aiocqhttp",
-        "origin_scope": "private", "origin_id": session_key,
+        "sender_id": "2300184498",
+        "platform": "aiocqhttp",
+        "origin_scope": "private",
+        "origin_id": "2300184498",
     }
 
 
-def test_on_message_group_unique_session_on_stashes_identity_with_group_origin():
-    """群聊 unique_session ON（session_id != 裸 group_id）：per-user，放行暂存，
-    origin_scope=group、origin_id=group:{真实群号}。
-    """
-    p = _mk_on_message_plugin()
+def test_registry_free_legacy_identity_stash_unique_group_keeps_group_origin():
+    """unique-session 群聊兼容暂存保留真实群来源，而不是由 storage key 反推。"""
+    p = _mk_registry_free_legacy_identity_host()
     ev = _group_event("2300184498", "123456", unique_session=True)
-    asyncio.run(p.on_message(ev))
-    session_key = p._session_ctx.session_key(ev)
-    assert session_key == "2300184498_123456"
+    session_key = "legacy-unique-group-session"
+    main_mod.EmotionalStatePlugin._registry_free_legacy_identity_stash(
+        p,
+        ev,
+        session_key,
+    )
     rec = p._store.get_authenticated_identity(session_key)
     assert rec == {
-        "sender_id": "2300184498", "platform": "aiocqhttp",
-        "origin_scope": "group", "origin_id": "group:123456",
+        "sender_id": "2300184498",
+        "platform": "aiocqhttp",
+        "origin_scope": "group",
+        "origin_id": "group:123456",
     }
 
 
-def test_on_message_group_unique_session_off_does_not_stash_shared_bucket():
-    """B1 红线核心用例：群聊 unique_session OFF（session_id == 裸 group_id，
-    共享桶）——首条消息即确定性 SKIP，不依赖任何历史/一致性积累（无冷启动洞）。
-    """
-    p = _mk_on_message_plugin()
+def test_registry_free_legacy_identity_stash_shared_bucket_writes_nothing():
+    """unique_session OFF 的共享群桶首条消息即零写。"""
+    p = _mk_registry_free_legacy_identity_host()
     ev = _group_event("2300184498", "123456", unique_session=False)
-    asyncio.run(p.on_message(ev))
-    session_key = p._session_ctx.session_key(ev)
-    assert session_key == "123456"  # 塌缩桶：裸群号，多用户共享
+    session_key = "legacy-shared-bucket-session"
+    assert ev.session_id == ev.get_group_id() == "123456"
+    main_mod.EmotionalStatePlugin._registry_free_legacy_identity_stash(
+        p,
+        ev,
+        session_key,
+    )
     assert p._store.get_authenticated_identity(session_key) is None
     assert p._store.get_authenticated_sender(session_key) is None
 
 
-def test_on_message_group_unique_session_off_multiple_senders_never_leak():
-    """同一共享桶下多个不同真实发言人轮流发言，暂存层始终为空（不会有任何
-    一人被错误钉成"已认证 sender"）。
-    """
-    p = _mk_on_message_plugin()
+def test_registry_free_legacy_identity_stash_shared_bucket_multiple_senders_never_write():
+    """同一共享桶内不同 sender 都不能写入 raw identity。"""
+    p = _mk_registry_free_legacy_identity_host()
+    session_key = "legacy-shared-multiple-senders-session"
     for sender in ("alice", "bob", "carol"):
         ev = _group_event(sender, "g_shared", unique_session=False)
-        asyncio.run(p.on_message(ev))
-    session_key = "g_shared"
+        assert ev.session_id == ev.get_group_id() == "g_shared"
+        main_mod.EmotionalStatePlugin._registry_free_legacy_identity_stash(
+            p,
+            ev,
+            session_key,
+        )
     assert p._store.get_authenticated_identity(session_key) is None
+    assert p._store.get_authenticated_sender(session_key) is None
 
 
-def test_on_message_other_message_type_does_not_stash():
-    """OTHER_MESSAGE（系统/未知类型）保守不放行。"""
-    p = _mk_on_message_plugin()
+def test_registry_free_legacy_identity_stash_other_message_writes_nothing():
+    """OTHER_MESSAGE（系统/未知类型）由兼容 helper 保守零写。"""
+    p = _mk_registry_free_legacy_identity_host()
     ev = _other_event("u1")
-    asyncio.run(p.on_message(ev))
-    session_key = p._session_ctx.session_key(ev)
+    session_key = "legacy-other-message-session"
+    assert ev.get_message_type() is _OTHER_MT
+    main_mod.EmotionalStatePlugin._registry_free_legacy_identity_stash(
+        p,
+        ev,
+        session_key,
+    )
     assert p._store.get_authenticated_identity(session_key) is None
 
 
-def test_on_message_private_and_group_do_not_cross_contaminate():
-    """私聊与共享群桶落在不同 session_key，暂存互不污染。"""
-    p = _mk_on_message_plugin()
-    asyncio.run(p.on_message(_group_event("u42", "g1", unique_session=False)))
-    asyncio.run(p.on_message(_private_event("u42")))
+def test_registry_free_legacy_identity_stash_shared_group_skips_without_private_cross_contamination():
+    """共享群桶零写；同一 sender 的私聊显式 key 仍可独立暂存。"""
+    p = _mk_registry_free_legacy_identity_host()
+    shared_session_key = "legacy-shared-group-session"
+    private_session_key = "legacy-private-u42-session"
+    main_mod.EmotionalStatePlugin._registry_free_legacy_identity_stash(
+        p,
+        _group_event("u42", "g1", unique_session=False),
+        shared_session_key,
+    )
+    main_mod.EmotionalStatePlugin._registry_free_legacy_identity_stash(
+        p,
+        _private_event("u42"),
+        private_session_key,
+    )
 
-    assert p._store.get_authenticated_identity("g1") is None
-    assert p._store.get_authenticated_sender("u42") == "u42"
+    assert p._store.get_authenticated_identity(shared_session_key) is None
+    assert p._store.get_authenticated_sender(private_session_key) == "u42"
 
 
-def test_on_message_survives_missing_sender_attrs_without_crashing():
-    """事件完全没有 unified_msg_origin/sender 相关字段时也不应炸（on_message 外层
-    已有 try/except，这里断言不抛异常且暂存层保持空)。
-    """
-    p = _mk_on_message_plugin()
+def test_registry_free_legacy_identity_stash_missing_sender_attributes_is_noop():
+    """缺少事件身份公开字段时 helper 不抛异常且保持零写。"""
+    p = _mk_registry_free_legacy_identity_host()
     ev = types.SimpleNamespace(message_str="hi")
-    asyncio.run(p.on_message(ev))  # 不应抛异常
+    session_key = "legacy-missing-sender-session"
+    main_mod.EmotionalStatePlugin._registry_free_legacy_identity_stash(
+        p,
+        ev,
+        session_key,
+    )
     assert len(p._store.authenticated_senders) == 0
+    assert p._store.get_authenticated_identity(session_key) is None
 
 
-def test_on_message_secondary_heuristic_collapses_shared_bucket_misjudged_as_per_user():
-    """次判据兜底（design open_risks）：某假想平台的 unique_session 语义特殊，
-    共享群的 session_id 恰好也不等于 group_id（主判据误判为 per-user）——同一
-    session_key 先后来自两个不同真实发言人时，第二条起判定坍缩，此后永久 SKIP。
-    """
-    p = _mk_on_message_plugin()
+def test_registry_free_legacy_identity_stash_sender_flip_collapses_monotonically():
+    """同一显式 key 观察到 sender 翻转时坍缩，之后不会解除坍缩。"""
+    p = _mk_registry_free_legacy_identity_host()
+    session_key = "legacy-ambiguous-group-session"
     weird_group_ev_alice = _ProdEvent(
         sender_id="alice", message_type=_GROUP_MT,
         session_id="weird_shared_sid", group_id="g_weird",
@@ -344,31 +366,32 @@ def test_on_message_secondary_heuristic_collapses_shared_bucket_misjudged_as_per
         sender_id="bob", message_type=_GROUP_MT,
         session_id="weird_shared_sid", group_id="g_weird",
     )
-    asyncio.run(p.on_message(weird_group_ev_alice))
-    assert p._store.get_authenticated_sender("weird_shared_sid") == "alice"
+    main_mod.EmotionalStatePlugin._registry_free_legacy_identity_stash(
+        p,
+        weird_group_ev_alice,
+        session_key,
+    )
+    assert p._store.get_authenticated_sender(session_key) == "alice"
 
-    asyncio.run(p.on_message(weird_group_ev_bob))
-    assert p._store.get_authenticated_sender("weird_shared_sid") is None
-    assert p._store.is_collapsed_shared_session("weird_shared_sid")
+    main_mod.EmotionalStatePlugin._registry_free_legacy_identity_stash(
+        p,
+        weird_group_ev_bob,
+        session_key,
+    )
+    assert p._store.get_authenticated_sender(session_key) is None
+    assert p._store.is_collapsed_shared_session(session_key)
 
     # 坍缩后 alice 再发言也不再被暂存（单调收紧，不解除坍缩）。
-    asyncio.run(p.on_message(weird_group_ev_alice))
-    assert p._store.get_authenticated_sender("weird_shared_sid") is None
+    main_mod.EmotionalStatePlugin._registry_free_legacy_identity_stash(
+        p,
+        weird_group_ev_alice,
+        session_key,
+    )
+    assert p._store.get_authenticated_sender(session_key) is None
 
 
-def test_on_message_real_astrbot_shaped_event_now_stashes_instead_of_leaking():
-    """曾是哑火根因的回归用例（反向重写）：此前的实现用"裸属性判空"代理 B1
-    判定，真实 AstrBot 事件（只暴露 get_sender_id()，无裸属性）对**所有**
-    事件都会判定为空——包括私聊和 unique_session ON 的群聊，导致货架写点
-    在生产上永久 SKIP，连本该天生 per-user 的私聊都不例外（连"跨群"都没
-    跨到，插件在生产上从未真正写过一条货架）。
-
-    修复：改用 `resolve_authenticated_identity`（get_sender_id + get_message_type
-    + get_group_id + session_id 的组合矩阵），不再依赖裸属性。同一份"只暴露
-    get_sender_id()"的生产形态事件，私聊/unique-on 群现在应该真正 stash；只有
-    unique_session OFF 的共享桶（session_id == group_id）才继续 SKIP——B1 红线
-    没有被放松，只是判定方式从"裸属性代理"换成了"事件方法直判"。
-    """
+def test_registry_free_legacy_identity_stash_reads_real_astrbot_public_methods():
+    """兼容 helper 只用 AstrBot 公开方法：私聊写入，共享群仍零写。"""
 
     class _RealisticFriendEvent:
         unified_msg_origin = "aiocqhttp:FriendMessage:real_u7"
@@ -404,21 +427,45 @@ def test_on_message_real_astrbot_shaped_event_now_stashes_instead_of_leaking():
         def get_platform_id(self) -> str:
             return "aiocqhttp"
 
-    p = _mk_on_message_plugin()
+    p = _mk_registry_free_legacy_identity_host()
 
     friend_ev = _RealisticFriendEvent()
-    asyncio.run(p.on_message(friend_ev))
-    friend_sk = p._session_ctx.session_key(friend_ev)
-    assert friend_sk == "real_u7"  # session_key() 自身未改（既有行为）
-    assert p._store.get_authenticated_sender(friend_sk) == "real_u7"  # 修复：现在真写入
+    friend_session_key = "legacy-realistic-friend-session"
+    main_mod.EmotionalStatePlugin._registry_free_legacy_identity_stash(
+        p,
+        friend_ev,
+        friend_session_key,
+    )
+    assert p._store.get_authenticated_identity(friend_session_key) == {
+        "sender_id": "real_u7",
+        "platform": "aiocqhttp",
+        "origin_scope": "private",
+        "origin_id": "real_u7",
+    }
 
-    p2 = _mk_on_message_plugin()
+    p2 = _mk_registry_free_legacy_identity_host()
     group_ev = _RealisticSharedGroupEvent()
-    asyncio.run(p2.on_message(group_ev))
-    group_sk = p2._session_ctx.session_key(group_ev)
-    assert group_sk == "g3"  # 塌缩桶：裸 base，未变
-    # B1 红线保留：共享桶（session_id == group_id）依旧零暂存。
-    assert p2._store.get_authenticated_sender(group_sk) is None
+    group_session_key = "legacy-realistic-shared-group-session"
+    main_mod.EmotionalStatePlugin._registry_free_legacy_identity_stash(
+        p2,
+        group_ev,
+        group_session_key,
+    )
+    assert p2._store.get_authenticated_sender(group_session_key) is None
+
+
+def test_registry_free_legacy_identity_stash_skips_when_scope_registry_present():
+    """生产 scoped runtime 存在时，兼容 helper 必须完全不写 raw identity。"""
+    p = _mk_registry_free_legacy_identity_host()
+    p._scope_runtime_registry = ScopeRuntimeRegistry.for_test()
+    session_key = "scoped-runtime-session"
+    main_mod.EmotionalStatePlugin._registry_free_legacy_identity_stash(
+        p,
+        _private_event("u99"),
+        session_key,
+    )
+    assert p._store.get_authenticated_identity(session_key) is None
+    assert p._store.get_authenticated_sender(session_key) is None
 
 
 # ===========================================================================

@@ -25,7 +25,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import deque
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
+
+if TYPE_CHECKING:
+    from .memory_system import MemorySystem
+    from .scope_repository import ScopedPersistenceGateway
+    from .state_persistence import ScopedStatePersistence
 
 logger = logging.getLogger("astrbot_plugin_sylanne")
 
@@ -346,4 +351,43 @@ class MemoryWriteThroat:
         }
 
 
-__all__ = ["MemoryWriteThroat"]
+class ScopedMemoryWriteThroat:
+    """Small gateway-bound write seam for the inactive scoped memory path.
+
+    It serializes direct writes made through one ``ScopedStatePersistence``
+    object.  Delayed work stays inside that object so the captured gateway and
+    component generation remain the authority when its timer fires.
+    """
+
+    __slots__ = ("_lock", "_state")
+
+    def __init__(self, state: "ScopedStatePersistence") -> None:
+        from .state_persistence import ScopedStatePersistence
+
+        if type(state) is not ScopedStatePersistence:
+            raise ValueError("state must be a ScopedStatePersistence")
+        self._state = state
+        self._lock = asyncio.Lock()
+
+    @property
+    def gateway(self) -> "ScopedPersistenceGateway":
+        """The frozen gateway inherited from the scoped state object."""
+
+        return self._state.gateway
+
+    async def save_memory(self, memory: "MemorySystem") -> bool:
+        """Serialize a direct scoped memory save without accepting a raw key."""
+
+        async with self._lock:
+            return await self._state.save_memory(memory)
+
+    def schedule_memory_save(
+        self,
+        memory: "MemorySystem",
+        *,
+        delay_seconds: float,
+    ) -> "asyncio.Task[bool]":
+        return self._state.schedule_memory_save(memory, delay_seconds=delay_seconds)
+
+
+__all__ = ["MemoryWriteThroat", "ScopedMemoryWriteThroat"]

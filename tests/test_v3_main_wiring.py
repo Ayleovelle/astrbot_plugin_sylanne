@@ -24,6 +24,7 @@ from typing import Any
 import pytest
 
 import main as main_mod
+from sylanne_alpha.scope_identity import ScopeResolver
 from sylanne_alpha.v3bridge.actual_action import ActualAction
 
 
@@ -84,11 +85,104 @@ class FakeEvent:
         return "1"
 
 
-async def _build_plugin() -> Any:
-    return main_mod.EmotionalStatePlugin(FakeContext(), {})
+async def _build_scoped_plugin(
+    *,
+    config: dict[str, Any] | None = None,
+    scope_root: Path | None = None,
+    fixture_root: Path | None = None,
+) -> Any:
+    """Build the normal production-shaped plugin with its scoped registry."""
+
+    plugin_config = dict(config or {})
+    if "sylanne_alpha_root" not in plugin_config:
+        isolated_root = scope_root if scope_root is not None else fixture_root
+        assert isolated_root is not None, "test plugins require an isolated fixture root"
+        plugin_config["sylanne_alpha_root"] = str(isolated_root / "plugin-data")
+    plugin = main_mod.EmotionalStatePlugin(FakeContext(), plugin_config)
+    try:
+        if scope_root is not None:
+            resolver = ScopeResolver.for_test(None, root=scope_root)
+            plugin._scope_resolver_v1 = resolver
+            assert plugin._scope_resolver_instance() is resolver
+            assert plugin._scope_runtime_registry.repository is resolver._repository
+            resolved = await resolver.resolve_test_values(
+                platform_id="qq",
+                self_id="bot",
+                umo=SESSION_ORIGIN,
+                persona_id="v3-main-wiring-fixture",
+            )
+            assert resolved.private_scope_enabled is True
+            assert resolved.scope is not None
+            plugin._v3_test_runtime_view = plugin._scope_runtime_registry.issue_request_view(
+                resolved,
+                subject=None,
+                relation_runtime=None,
+            )
+        return plugin
+    except BaseException:
+        await plugin.terminate()
+        raise
+
+
+async def _build_legacy_plugin(
+    *,
+    config: dict[str, Any] | None = None,
+    scope_root: Path | None = None,
+    fixture_root: Path | None = None,
+) -> Any:
+    """Keep production state intact but install an unbound legacy V3 facade."""
+
+    plugin = await _build_scoped_plugin(
+        config=config,
+        scope_root=scope_root,
+        fixture_root=fixture_root,
+    )
+    try:
+        registry = plugin._scope_runtime_registry
+        plugin._v3_shadow = main_mod._V3ShadowFacade()
+        assert plugin._scope_runtime_registry is registry
+        assert plugin._v3_shadow._plugin is None
+        return plugin
+    except BaseException:
+        await plugin.terminate()
+        raise
 
 
 SESSION_ORIGIN = "qq:GroupMessage:1"
+
+
+def _bind_test_scope(plugin: Any) -> Any:
+    return plugin._bind_request_runtime_view(plugin._v3_test_runtime_view)
+
+
+def _test_scope(plugin: Any) -> Any:
+    scope = plugin._v3_test_runtime_view.resolved.scope
+    assert scope is not None
+    return scope
+
+
+def _private_key(plugin: Any) -> str:
+    return _test_scope(plugin).storage_token
+
+
+def test_scoped_fixture_uses_production_scope_capability(tmp_path: Path) -> None:
+    async def go() -> None:
+        plugin = await _build_scoped_plugin(scope_root=tmp_path / "scope")
+        try:
+            resolver = plugin._scope_resolver_v1
+            registry = plugin._scope_runtime_registry
+            view = plugin._v3_test_runtime_view
+
+            assert Path(plugin.config["sylanne_alpha_root"]) == tmp_path / "scope" / "plugin-data"
+            assert plugin._scope_resolver_instance() is resolver
+            assert registry.repository is resolver._repository
+            assert registry.is_issued_request_view(view)
+            with _bind_test_scope(plugin):
+                assert plugin._bound_runtime().scope is view.resolved.scope
+        finally:
+            await plugin.terminate()
+
+    _run(go())
 
 
 def _run(coro: Any) -> Any:
@@ -101,21 +195,45 @@ def _run(coro: Any) -> Any:
 
 
 def test_init_creates_facade_without_io(tmp_path: Path) -> None:
-    async def go() -> Any:
-        plugin = await _build_plugin()
-        facade = getattr(plugin, "_v3_shadow", None)
-        assert facade is not None, "__init__ 必须造出 v3 shadow facade"
-        # 未 initialize 前：无 runtime、无 counters、无 epoch、不收轮。
-        assert facade.runtime is None
-        assert facade.counters is None
-        assert facade.accepting is False
-        assert facade.pending_count == 0
-        return facade
+    async def go() -> None:
+        plugin = await _build_scoped_plugin(fixture_root=tmp_path / "fixture")
+        try:
+            facade = getattr(plugin, "_v3_shadow", None)
+            assert facade is not None, "__init__ 必须造出 v3 shadow facade"
+            # 未 initialize 前：无 runtime、无 counters、无 epoch、不收轮。
+            assert facade.runtime is None
+            assert facade.counters is None
+            assert facade.accepting is False
+            assert facade.pending_count == 0
+            # 插件自己的 scoped 数据根可以在构造期建立；未初始化 facade 不得建立
+            # legacy V3 repository。
+            assert not (tmp_path / "v3-container").exists()
+        finally:
+            await plugin.terminate()
 
-    facade = _run(go())
-    # facade 构造绝不碰文件系统（同步核对，避免在协程里做阻塞 pathlib 调用）。
-    assert not any(tmp_path.iterdir())
-    assert facade.runtime is None
+    _run(go())
+
+
+def test_scoped_plugin_initialize_fails_closed_without_legacy_io(
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        plugin = await _build_scoped_plugin(fixture_root=tmp_path / "fixture")
+        try:
+            registry = plugin._scope_runtime_registry
+            facade = plugin._v3_shadow
+            facade.enabled = True
+            legacy_root = tmp_path / "legacy-v3"
+
+            assert await facade.initialize(root=legacy_root) is False
+            assert facade.runtime is None
+            assert facade.accepting is False
+            assert plugin._scope_runtime_registry is registry
+            assert not legacy_root.exists()
+        finally:
+            await plugin.terminate()
+
+    _run(go())
 
 
 def test_source_build_defaults_shadow_disabled() -> None:
@@ -143,40 +261,61 @@ def test_no_v3_selector_in_conf_schema_or_webui() -> None:
 
 def test_initialize_acquires_epoch_before_worker_start(tmp_path: Path) -> None:
     async def go() -> None:
-        plugin = await _build_plugin()
-        facade = plugin._v3_shadow
-        facade.enabled = True
-        started = await facade.initialize(root=tmp_path / "v3")
-        assert started is True
-        assert facade.runtime is not None
-        assert facade.runtime.epoch is not None
-        # epoch 先于 worker：supervisor 拿到的正是 facade 的 epoch。
-        assert facade.runtime.supervisor.epoch == facade.runtime.epoch
-        assert facade.accepting is True
-        await facade.terminate()
+        plugin = await _build_legacy_plugin(fixture_root=tmp_path / "plugin")
+        try:
+            facade = plugin._v3_shadow
+            facade.enabled = True
+            started = await facade.initialize(
+                root=tmp_path / "v3-container" / "repository"
+            )
+            assert started is True
+            assert facade.runtime is not None
+            assert facade.runtime.epoch is not None
+            # epoch 先于 worker：supervisor 拿到的正是 facade 的 epoch。
+            assert facade.runtime.supervisor.epoch == facade.runtime.epoch
+            assert facade.accepting is True
+            await facade.terminate()
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
 
 def test_session_identity_survives_plugin_restart(tmp_path: Path) -> None:
     async def go() -> None:
-        root = tmp_path / "v3"
-        first_plugin = await _build_plugin()
-        first = first_plugin._v3_shadow
-        first.enabled = True
-        assert await first.initialize(root=root)
-        first_ref = first._identity.session_ref("qq", SESSION_ORIGIN, session_generation=0)
-        await first.terminate()
+        root = tmp_path / "v3-container" / "repository"
+        first_plugin = await _build_legacy_plugin(fixture_root=tmp_path / "plugin-first")
+        try:
+            first = first_plugin._v3_shadow
+            first.enabled = True
+            assert await first.initialize(root=root)
+            first_ref = first._identity.session_ref(
+                "qq",
+                SESSION_ORIGIN,
+                session_generation=0,
+            )
+            await first.terminate()
 
-        second_plugin = await _build_plugin()
-        second = second_plugin._v3_shadow
-        second.enabled = True
-        assert await second.initialize(root=root)
-        second_ref = second._identity.session_ref("qq", SESSION_ORIGIN, session_generation=0)
-        await second.terminate()
+            second_plugin = await _build_legacy_plugin(
+                fixture_root=tmp_path / "plugin-second"
+            )
+            try:
+                second = second_plugin._v3_shadow
+                second.enabled = True
+                assert await second.initialize(root=root)
+                second_ref = second._identity.session_ref(
+                    "qq",
+                    SESSION_ORIGIN,
+                    session_generation=0,
+                )
+                await second.terminate()
 
-        assert first_ref == second_ref
-        assert (root / "session_identity.key").is_file()
+                assert first_ref == second_ref
+                assert (root / "session_identity.key").is_file()
+            finally:
+                await second_plugin.terminate()
+        finally:
+            await first_plugin.terminate()
 
     _run(go())
 
@@ -207,94 +346,110 @@ def test_concurrent_initialize_coalesces_one_runtime(
     monkeypatch.setattr(integration, "V3ShadowRuntime", SlowRuntime)
 
     async def go() -> None:
-        plugin = await _build_plugin()
-        facade = plugin._v3_shadow
-        facade.enabled = True
-        first = asyncio.create_task(facade.initialize(root=tmp_path / "v3"))
-        await entered.wait()
-        second = asyncio.create_task(facade.initialize(root=tmp_path / "v3"))
-        await asyncio.sleep(0.05)
-        assert constructions == 1
-        release.set()
-        assert await asyncio.gather(first, second) == [True, True]
-        await facade.terminate()
+        plugin = await _build_legacy_plugin(fixture_root=tmp_path / "plugin")
+        try:
+            facade = plugin._v3_shadow
+            facade.enabled = True
+            first = asyncio.create_task(
+                facade.initialize(root=tmp_path / "v3-container" / "repository")
+            )
+            await entered.wait()
+            second = asyncio.create_task(
+                facade.initialize(root=tmp_path / "v3-container" / "repository")
+            )
+            await asyncio.sleep(0.05)
+            assert constructions == 1
+            release.set()
+            assert await asyncio.gather(first, second) == [True, True]
+            await facade.terminate()
+        finally:
+            release.set()
+            await plugin.terminate()
 
     _run(go())
 
 
-def test_cancelled_terminate_keeps_one_tracked_cleanup_until_worker_exits() -> None:
+def test_cancelled_terminate_keeps_one_tracked_cleanup_until_worker_exits(tmp_path: Path) -> None:
     async def go() -> None:
-        plugin = await _build_plugin()
-        facade = plugin._v3_shadow
-        facade.enabled = True
-        facade.accepting = True
+        plugin = await _build_legacy_plugin(fixture_root=tmp_path / "plugin")
         entered = asyncio.Event()
         release = asyncio.Event()
+        try:
+            facade = plugin._v3_shadow
+            facade.enabled = True
+            facade.accepting = True
 
-        class SlowRuntime:
-            counters = object()
+            class SlowRuntime:
+                counters = object()
 
-            def __init__(self) -> None:
-                self.calls = 0
+                def __init__(self) -> None:
+                    self.calls = 0
 
-            async def terminate(self) -> None:
-                self.calls += 1
-                entered.set()
-                await release.wait()
+                async def terminate(self) -> None:
+                    self.calls += 1
+                    entered.set()
+                    await release.wait()
 
-        runtime = SlowRuntime()
-        facade.runtime = runtime
-        first = asyncio.create_task(facade.terminate())
-        await entered.wait()
-        second = asyncio.create_task(facade.terminate())
-        await asyncio.sleep(0)
-        assert runtime.calls == 1
-        first.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await first
-        assert facade.runtime is runtime
-        release.set()
-        await asyncio.wait_for(second, timeout=2.0)
-        assert facade.runtime is None
-        assert runtime.calls == 1
+            runtime = SlowRuntime()
+            facade.runtime = runtime
+            first = asyncio.create_task(facade.terminate())
+            await entered.wait()
+            second = asyncio.create_task(facade.terminate())
+            await asyncio.sleep(0)
+            assert runtime.calls == 1
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            assert facade.runtime is runtime
+            release.set()
+            await asyncio.wait_for(second, timeout=2.0)
+            assert facade.runtime is None
+            assert runtime.calls == 1
+        finally:
+            release.set()
+            await plugin.terminate()
 
     _run(go())
 
 
-def test_facade_terminate_has_a_bounded_wait_without_cancelling_cleanup() -> None:
+def test_facade_terminate_has_a_bounded_wait_without_cancelling_cleanup(tmp_path: Path) -> None:
     """A wedged v3 runtime must not hold plugin/v2 teardown forever."""
 
     async def go() -> None:
-        plugin = await _build_plugin()
-        facade = plugin._v3_shadow
-        facade.enabled = True
-        facade.accepting = True
+        plugin = await _build_legacy_plugin(fixture_root=tmp_path / "plugin")
         entered = asyncio.Event()
         release = asyncio.Event()
+        try:
+            facade = plugin._v3_shadow
+            facade.enabled = True
+            facade.accepting = True
 
-        class WedgedRuntime:
-            counters = object()
+            class WedgedRuntime:
+                counters = object()
 
-            def __init__(self) -> None:
-                self.calls = 0
+                def __init__(self) -> None:
+                    self.calls = 0
 
-            async def terminate(self) -> None:
-                self.calls += 1
-                entered.set()
-                await release.wait()
+                async def terminate(self) -> None:
+                    self.calls += 1
+                    entered.set()
+                    await release.wait()
 
-        runtime = WedgedRuntime()
-        facade.runtime = runtime
+            runtime = WedgedRuntime()
+            facade.runtime = runtime
 
-        await asyncio.wait_for(facade.terminate(timeout=0.05), timeout=0.5)
-        await entered.wait()
-        assert facade.runtime is runtime
-        assert facade._terminate_task is not None and not facade._terminate_task.done()
+            await asyncio.wait_for(facade.terminate(timeout=0.05), timeout=0.5)
+            await entered.wait()
+            assert facade.runtime is runtime
+            assert facade._terminate_task is not None and not facade._terminate_task.done()
 
-        release.set()
-        await asyncio.wait_for(facade.terminate(timeout=1.0), timeout=1.5)
-        assert runtime.calls == 1
-        assert facade.runtime is None
+            release.set()
+            await asyncio.wait_for(facade.terminate(timeout=1.0), timeout=1.5)
+            assert runtime.calls == 1
+            assert facade.runtime is None
+        finally:
+            release.set()
+            await plugin.terminate()
 
     _run(go())
 
@@ -312,43 +467,50 @@ def test_first_live_turn_migrates_before_deferred_offer(
     monkeypatch.setattr(shadow_snapshot, "freeze_seed_snapshot_fallback", freeze)
 
     async def go() -> None:
-        plugin = await _build_plugin()
-        facade = plugin._v3_shadow
-        facade.enabled = True
-        assert await facade.initialize(root=tmp_path / "v3")
+        plugin = await _build_legacy_plugin(fixture_root=tmp_path / "plugin")
+        try:
+            facade = plugin._v3_shadow
+            facade.enabled = True
+            assert await facade.initialize(root=tmp_path / "v3-container" / "repository")
 
-        assert not facade.ensure_session(
-            plugin=plugin,
-            session_key=SESSION_ORIGIN,
-            platform_id="qq",
-            unified_msg_origin=SESSION_ORIGIN,
-        )
-        facade.capture_request(
-            session_key=SESSION_ORIGIN,
-            platform_id="qq",
-            unified_msg_origin=SESSION_ORIGIN,
-            message_id="m-first",
-            text_length=4,
-            history_present=False,
-            gap_seconds=1.0,
-            body=None,
-            sender_id="user-1",
-            is_group=True,
-        )
-        facade.settle(
-            session_key=SESSION_ORIGIN,
-            route_kind="SILENT",
-            reply_kind="SILENT",
-        )
-        await facade.join_private_tasks()
-        await facade.runtime.join()
+            assert not facade.ensure_session(
+                plugin=plugin,
+                session_key=SESSION_ORIGIN,
+                platform_id="qq",
+                unified_msg_origin=SESSION_ORIGIN,
+            )
+            facade.capture_request(
+                session_key=SESSION_ORIGIN,
+                platform_id="qq",
+                unified_msg_origin=SESSION_ORIGIN,
+                message_id="m-first",
+                text_length=4,
+                history_present=False,
+                gap_seconds=1.0,
+                body=None,
+                sender_id="user-1",
+                is_group=True,
+            )
+            facade.settle(
+                session_key=SESSION_ORIGIN,
+                route_kind="SILENT",
+                reply_kind="SILENT",
+            )
+            await facade.join_private_tasks()
+            await facade.runtime.join()
 
-        session_ref = facade._identity.session_ref("qq", SESSION_ORIGIN, session_generation=0)
-        loaded = facade.runtime.committer.load_state(session_ref)
-        assert loaded is not None
-        assert loaded.state.revision >= 1
-        assert loaded.base.last_committed_turn_sequence.local_sequence >= 2
-        await facade.terminate()
+            session_ref = facade._identity.session_ref(
+                "qq",
+                SESSION_ORIGIN,
+                session_generation=0,
+            )
+            loaded = facade.runtime.committer.load_state(session_ref)
+            assert loaded is not None
+            assert loaded.state.revision >= 1
+            assert loaded.base.last_committed_turn_sequence.local_sequence >= 2
+            await facade.terminate()
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
@@ -371,45 +533,64 @@ def test_restart_recovers_corrupt_journal_without_refreezing_v2(
     monkeypatch.setattr(shadow_snapshot, "freeze_seed_snapshot_fallback", initial_freeze)
 
     async def go() -> None:
-        root = tmp_path / "v3"
-        first_plugin = await _build_plugin()
-        first = first_plugin._v3_shadow
-        first.enabled = True
-        assert await first.initialize(root=root)
-        first.ensure_session(
-            plugin=first_plugin,
-            session_key=SESSION_ORIGIN,
-            platform_id="qq",
-            unified_msg_origin=SESSION_ORIGIN,
-        )
-        await first.join_private_tasks()
-        session_ref = first._identity.session_ref("qq", SESSION_ORIGIN, session_generation=0)
-        assert session_ref is not None
-        repository = first.runtime.committer.repository
-        pointer = repository._load_pointer(session_filename_token(session_ref))
-        assert pointer is not None
-        (repository.root / pointer.current_journal).write_bytes(b"corrupt")
-        await first.terminate()
+        root = tmp_path / "v3-container" / "repository"
+        first_plugin = await _build_legacy_plugin(fixture_root=tmp_path / "plugin-first")
+        try:
+            first = first_plugin._v3_shadow
+            first.enabled = True
+            assert await first.initialize(root=root)
+            first.ensure_session(
+                plugin=first_plugin,
+                session_key=SESSION_ORIGIN,
+                platform_id="qq",
+                unified_msg_origin=SESSION_ORIGIN,
+            )
+            await first.join_private_tasks()
+            session_ref = first._identity.session_ref(
+                "qq",
+                SESSION_ORIGIN,
+                session_generation=0,
+            )
+            assert session_ref is not None
+            repository = first.runtime.committer.repository
+            pointer = repository._load_pointer(session_filename_token(session_ref))
+            assert pointer is not None
+            (repository.root / pointer.current_journal).write_bytes(b"corrupt")
+            await first.terminate()
 
-        async def forbidden_refreeze(_plugin: object, _session_key: str) -> V2SeedSnapshotV1:
-            raise AssertionError("existing v3 state must recover before any v2 refreeze")
+            async def forbidden_refreeze(
+                _plugin: object,
+                _session_key: str,
+            ) -> V2SeedSnapshotV1:
+                raise AssertionError("existing v3 state must recover before any v2 refreeze")
 
-        monkeypatch.setattr(shadow_snapshot, "freeze_seed_snapshot_fallback", forbidden_refreeze)
-        second_plugin = await _build_plugin()
-        second = second_plugin._v3_shadow
-        second.enabled = True
-        assert await second.initialize(root=root)
-        second.ensure_session(
-            plugin=second_plugin,
-            session_key=SESSION_ORIGIN,
-            platform_id="qq",
-            unified_msg_origin=SESSION_ORIGIN,
-        )
-        await second.join_private_tasks()
-        assert session_ref in second._ready_sessions
-        assert second.runtime.committer.load_state(session_ref) is not None
-        assert freezes == 1
-        await second.terminate()
+            monkeypatch.setattr(
+                shadow_snapshot,
+                "freeze_seed_snapshot_fallback",
+                forbidden_refreeze,
+            )
+            second_plugin = await _build_legacy_plugin(
+                fixture_root=tmp_path / "plugin-second"
+            )
+            try:
+                second = second_plugin._v3_shadow
+                second.enabled = True
+                assert await second.initialize(root=root)
+                second.ensure_session(
+                    plugin=second_plugin,
+                    session_key=SESSION_ORIGIN,
+                    platform_id="qq",
+                    unified_msg_origin=SESSION_ORIGIN,
+                )
+                await second.join_private_tasks()
+                assert session_ref in second._ready_sessions
+                assert second.runtime.committer.load_state(session_ref) is not None
+                assert freezes == 1
+                await second.terminate()
+            finally:
+                await second_plugin.terminate()
+        finally:
+            await first_plugin.terminate()
 
     _run(go())
 
@@ -421,86 +602,99 @@ def test_runtime_wires_real_plugin_budget_into_repository_admission(tmp_path: Pa
         plugin_root = tmp_path / "plugin-data"
         plugin_root.mkdir()
         (plugin_root / "legacy.bin").write_bytes(b"x" * 1_000_000)
-        plugin = await _build_plugin()
-        facade = plugin._v3_shadow
-        facade.enabled = True
-        assert await facade.initialize(
-            root=plugin_root / "v3_shadow",
-            supervisor_kwargs={"plugin_cap_bytes": 6_000_000},
-        )
-        assert facade.runtime.committer.repository.hard_limit_bytes == 3_000_000
-        snapshot = await facade.runtime.supervisor._load_snapshot()
-        assert snapshot.repository_admission is RepositoryAdmissionState.HARD_STOP
-        await facade.terminate()
+        plugin = await _build_legacy_plugin(fixture_root=tmp_path / "fixture")
+        try:
+            facade = plugin._v3_shadow
+            facade.enabled = True
+            assert await facade.initialize(
+                root=plugin_root / "v3_shadow",
+                supervisor_kwargs={"plugin_cap_bytes": 6_000_000},
+            )
+            assert facade.runtime.committer.repository.hard_limit_bytes == 3_000_000
+            snapshot = await facade.runtime.supervisor._load_snapshot()
+            assert snapshot.repository_admission is RepositoryAdmissionState.HARD_STOP
+            await facade.terminate()
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
 
 def test_initialize_failure_fail_closes_v3_only(tmp_path: Path) -> None:
     async def go() -> None:
-        plugin = await _build_plugin()
-        facade = plugin._v3_shadow
-        facade.enabled = True
-        # 只读仓库根：epoch 获取必炸。
-        broken = tmp_path / "not-a-dir"
-        broken.write_text("occupied", encoding="utf-8")
-        started = await facade.initialize(root=broken / "v3")
-        assert started is False
-        assert facade.runtime is None
-        assert facade.enabled is False, "v3 失败必须 fail-close v3 自己"
-        assert facade.accepting is False
-        # v2 侧完全不受影响：capture/settle 变纯空操作，绝不抛。
-        facade.capture_request(
-            session_key="s",
-            platform_id="qq",
-            unified_msg_origin="qq:GroupMessage:1",
-            message_id="m-1",
-            text_length=3,
-            history_present=True,
-            gap_seconds=1.0,
-            body=None,
-        )
-        facade.settle(session_key="s", route_kind="SILENT", reply_kind="SILENT")
+        plugin = await _build_legacy_plugin(fixture_root=tmp_path / "plugin")
+        try:
+            facade = plugin._v3_shadow
+            facade.enabled = True
+            # 只读仓库根：epoch 获取必炸。
+            broken = tmp_path / "not-a-dir"
+            broken.write_text("occupied", encoding="utf-8")
+            started = await facade.initialize(root=broken / "v3")
+            assert started is False
+            assert facade.runtime is None
+            assert facade.enabled is False, "v3 失败必须 fail-close v3 自己"
+            assert facade.accepting is False
+            # v2 侧完全不受影响：capture/settle 变纯空操作，绝不抛。
+            facade.capture_request(
+                session_key="s",
+                platform_id="qq",
+                unified_msg_origin="qq:GroupMessage:1",
+                message_id="m-1",
+                text_length=3,
+                history_present=True,
+                gap_seconds=1.0,
+                body=None,
+            )
+            facade.settle(session_key="s", route_kind="SILENT", reply_kind="SILENT")
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
 
 def test_initialize_and_terminate_are_idempotent(tmp_path: Path) -> None:
     async def go() -> None:
-        plugin = await _build_plugin()
-        facade = plugin._v3_shadow
-        facade.enabled = True
-        assert await facade.initialize(root=tmp_path / "v3") is True
-        assert await facade.initialize(root=tmp_path / "v3") is False  # 第二次是 no-op
-        await facade.terminate()
-        await facade.terminate()
-        assert facade.runtime is None
+        plugin = await _build_legacy_plugin(fixture_root=tmp_path / "plugin")
+        try:
+            facade = plugin._v3_shadow
+            facade.enabled = True
+            root = tmp_path / "v3-container" / "repository"
+            assert await facade.initialize(root=root) is True
+            assert await facade.initialize(root=root) is False  # 第二次是 no-op
+            await facade.terminate()
+            await facade.terminate()
+            assert facade.runtime is None
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
 
 def test_begin_shutdown_is_sync_and_closes_admission(tmp_path: Path) -> None:
     async def go() -> None:
-        plugin = await _build_plugin()
-        facade = plugin._v3_shadow
-        facade.enabled = True
-        await facade.initialize(root=tmp_path / "v3")
-        assert facade.accepting is True
-        facade.begin_shutdown()  # 同步、不 await
-        assert facade.accepting is False
-        # 关闸后新捕获一律不进 v3。
-        facade.capture_request(
-            session_key="s",
-            platform_id="qq",
-            unified_msg_origin="qq:GroupMessage:1",
-            message_id="m-1",
-            text_length=3,
-            history_present=True,
-            gap_seconds=1.0,
-            body=None,
-        )
-        assert facade.pending_count == 0
-        await facade.terminate()
+        plugin = await _build_legacy_plugin(fixture_root=tmp_path / "plugin")
+        try:
+            facade = plugin._v3_shadow
+            facade.enabled = True
+            await facade.initialize(root=tmp_path / "v3-container" / "repository")
+            assert facade.accepting is True
+            facade.begin_shutdown()  # 同步、不 await
+            assert facade.accepting is False
+            # 关闸后新捕获一律不进 v3。
+            facade.capture_request(
+                session_key="s",
+                platform_id="qq",
+                unified_msg_origin="qq:GroupMessage:1",
+                message_id="m-1",
+                text_length=3,
+                history_present=True,
+                gap_seconds=1.0,
+                body=None,
+            )
+            assert facade.pending_count == 0
+            await facade.terminate()
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
@@ -509,140 +703,151 @@ def test_terminate_order_v3_shutdown_before_generic_task_cancel(tmp_path: Path) 
     """terminate(): begin_shutdown → v2 save drain → v3 shutdown → 通用 task 取消。"""
 
     async def go() -> None:
-        plugin = await _build_plugin()
+        plugin = await _build_legacy_plugin(fixture_root=tmp_path / "plugin")
         order: list[str] = []
+        try:
+            facade = plugin._v3_shadow
+            facade.enabled = True
+            await facade.initialize(root=tmp_path / "v3-container" / "repository")
 
-        facade = plugin._v3_shadow
-        facade.enabled = True
-        await facade.initialize(root=tmp_path / "v3")
+            real_begin = facade.begin_shutdown
+            real_terminate = facade.terminate
 
-        real_begin = facade.begin_shutdown
-        real_terminate = facade.terminate
+            def _begin() -> None:
+                order.append("v3_begin_shutdown")
+                real_begin()
 
-        def _begin() -> None:
-            order.append("v3_begin_shutdown")
-            real_begin()
+            async def _term() -> None:
+                order.append("v3_terminate")
+                await real_terminate()
 
-        async def _term() -> None:
-            order.append("v3_terminate")
-            await real_terminate()
+            facade.begin_shutdown = _begin  # type: ignore[method-assign]
+            facade.terminate = _term  # type: ignore[method-assign]
 
-        facade.begin_shutdown = _begin  # type: ignore[method-assign]
-        facade.terminate = _term  # type: ignore[method-assign]
+            async def _never() -> None:
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    order.append("generic_task_cancelled")
+                    raise
 
-        async def _never() -> None:
-            try:
-                await asyncio.sleep(3600)
-            except asyncio.CancelledError:
-                order.append("generic_task_cancelled")
-                raise
+            task = asyncio.get_running_loop().create_task(_never())
+            plugin._background_tasks.append(task)
+            await asyncio.sleep(0)
 
-        task = asyncio.get_running_loop().create_task(_never())
-        plugin._background_tasks.append(task)
-        await asyncio.sleep(0)
+            await plugin.terminate()
 
-        await plugin.terminate()
-
-        assert "v3_begin_shutdown" in order, "terminate 必须先调 begin_shutdown()"
-        assert "v3_terminate" in order, "terminate 必须 await v3 shutdown"
-        assert "generic_task_cancelled" in order
-        assert order.index("v3_begin_shutdown") < order.index("v3_terminate")
-        assert order.index("v3_terminate") < order.index("generic_task_cancelled"), (
-            "v3 shutdown 必须在既有通用 task 取消【之前】完成"
-        )
+            assert "v3_begin_shutdown" in order, "terminate 必须先调 begin_shutdown()"
+            assert "v3_terminate" in order, "terminate 必须 await v3 shutdown"
+            assert "generic_task_cancelled" in order
+            assert order.index("v3_begin_shutdown") < order.index("v3_terminate")
+            assert order.index("v3_terminate") < order.index("generic_task_cancelled"), (
+                "v3 shutdown 必须在既有通用 task 取消【之前】完成"
+            )
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
 
 def test_v3_future_never_enters_plugin_background_tasks(tmp_path: Path) -> None:
     async def go() -> None:
-        plugin = await _build_plugin()
-        facade = plugin._v3_shadow
-        facade.enabled = True
-        await facade.initialize(root=tmp_path / "v3")
-        # supervisor 自己有 tracked 任务，但一个都不能出现在插件的 _background_tasks 里。
-        assert facade.runtime.supervisor.tracked_task_count >= 1
-        assert plugin._background_tasks == []
-        await facade.terminate()
-        assert plugin._background_tasks == []
+        plugin = await _build_legacy_plugin(fixture_root=tmp_path / "plugin")
+        try:
+            facade = plugin._v3_shadow
+            facade.enabled = True
+            await facade.initialize(root=tmp_path / "v3-container" / "repository")
+            # supervisor 自己有 tracked 任务，但一个都不能出现在插件的 _background_tasks 里。
+            assert facade.runtime.supervisor.tracked_task_count >= 1
+            assert plugin._background_tasks == []
+            await facade.terminate()
+            assert plugin._background_tasks == []
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
 
 def test_v3_identity_never_written_into_event_extra(tmp_path: Path) -> None:
     async def go() -> None:
-        plugin = await _build_plugin()
-        facade = plugin._v3_shadow
-        facade.enabled = True
-        await facade.initialize(root=tmp_path / "v3")
-        event = FakeEvent()
-        facade.capture_request(
-            session_key="s",
-            platform_id="qq",
-            unified_msg_origin=event.unified_msg_origin,
-            message_id="m-1",
-            text_length=3,
-            history_present=True,
-            gap_seconds=1.0,
-            body=None,
-        )
-        assert facade.pending_count == 1
-        for key in event._extras:
-            assert "v3" not in key.lower()
-            assert "shadow" not in key.lower()
-        await facade.terminate()
+        plugin = await _build_legacy_plugin(fixture_root=tmp_path / "plugin")
+        try:
+            facade = plugin._v3_shadow
+            facade.enabled = True
+            await facade.initialize(root=tmp_path / "v3-container" / "repository")
+            event = FakeEvent()
+            facade.capture_request(
+                session_key="s",
+                platform_id="qq",
+                unified_msg_origin=event.unified_msg_origin,
+                message_id="m-1",
+                text_length=3,
+                history_present=True,
+                gap_seconds=1.0,
+                body=None,
+            )
+            assert facade.pending_count == 1
+            for key in event._extras:
+                assert "v3" not in key.lower()
+                assert "shadow" not in key.lower()
+            await facade.terminate()
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
 
 def test_live_reaction_facts_use_hmac_speaker_equality_and_text_cues(tmp_path: Path) -> None:
     async def go() -> None:
-        plugin = await _build_plugin()
-        facade = plugin._v3_shadow
-        facade.enabled = True
-        await facade.initialize(root=tmp_path / "v3")
-        offers: list[dict[str, Any]] = []
-        facade.runtime.offer_response = lambda **kwargs: offers.append(kwargs)
+        plugin = await _build_legacy_plugin(fixture_root=tmp_path / "plugin")
+        try:
+            facade = plugin._v3_shadow
+            facade.enabled = True
+            await facade.initialize(root=tmp_path / "v3-container" / "repository")
+            offers: list[dict[str, Any]] = []
+            facade.runtime.offer_response = lambda **kwargs: offers.append(kwargs)
 
-        def one_turn(message_id: str, sender_id: str) -> None:
-            facade.capture_request(
-                session_key=SESSION_ORIGIN,
-                platform_id="qq",
-                unified_msg_origin=SESSION_ORIGIN,
-                message_id=message_id,
-                text_length=8,
-                history_present=True,
-                gap_seconds=2.0,
-                body=None,
-                text_warm=1.25,
-                text_cold=0.0,
-                text_distress=0.0,
-                text_question=True,
-                text_exclaim=0.0,
-                text_punct=1.25,
-                text_valence_cue=1.25,
-                text_engagement_cue=0.5,
-                sender_id=sender_id,
-                is_group=True,
-            )
-            facade.settle(
-                session_key=SESSION_ORIGIN,
-                route_kind="SILENT",
-                reply_kind="SILENT",
-            )
+            def one_turn(message_id: str, sender_id: str) -> None:
+                facade.capture_request(
+                    session_key=SESSION_ORIGIN,
+                    platform_id="qq",
+                    unified_msg_origin=SESSION_ORIGIN,
+                    message_id=message_id,
+                    text_length=8,
+                    history_present=True,
+                    gap_seconds=2.0,
+                    body=None,
+                    text_warm=1.25,
+                    text_cold=0.0,
+                    text_distress=0.0,
+                    text_question=True,
+                    text_exclaim=0.0,
+                    text_punct=1.25,
+                    text_valence_cue=1.25,
+                    text_engagement_cue=0.5,
+                    sender_id=sender_id,
+                    is_group=True,
+                )
+                facade.settle(
+                    session_key=SESSION_ORIGIN,
+                    route_kind="SILENT",
+                    reply_kind="SILENT",
+                )
 
-        one_turn("m-1", "alice")
-        one_turn("m-2", "alice")
-        one_turn("m-3", "bob")
+            one_turn("m-1", "alice")
+            one_turn("m-2", "alice")
+            one_turn("m-3", "bob")
 
-        assert offers[0]["reaction_facts"].same_sender is None
-        assert offers[1]["reaction_facts"].same_sender is True
-        assert offers[2]["reaction_facts"].same_sender is False
-        raw_values = offers[1]["observation"][0]
-        assert raw_values[25] == 1.25
-        assert raw_values[26] == 0.5
-        assert b"alice" not in repr(offers).encode("utf-8")
-        await facade.terminate()
+            assert offers[0]["reaction_facts"].same_sender is None
+            assert offers[1]["reaction_facts"].same_sender is True
+            assert offers[2]["reaction_facts"].same_sender is False
+            raw_values = offers[1]["observation"][0]
+            assert raw_values[25] == 1.25
+            assert raw_values[26] == 0.5
+            assert b"alice" not in repr(offers).encode("utf-8")
+            await facade.terminate()
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
@@ -659,44 +864,55 @@ def test_reaction_facts_freeze_at_response_boundary_under_overlapping_turns(
     """
 
     async def go() -> None:
-        plugin = await _build_plugin()
-        facade = plugin._v3_shadow
-        facade.enabled = True
-        await facade.initialize(root=tmp_path / "v3")
-        offers: list[dict[str, Any]] = []
-        facade.runtime.offer_response = lambda **kwargs: offers.append(kwargs)
+        plugin = await _build_legacy_plugin(fixture_root=tmp_path / "plugin")
+        try:
+            facade = plugin._v3_shadow
+            facade.enabled = True
+            await facade.initialize(root=tmp_path / "v3-container" / "repository")
+            offers: list[dict[str, Any]] = []
+            facade.runtime.offer_response = lambda **kwargs: offers.append(kwargs)
 
-        def capture(delivery_key: str, message_id: str, sender_id: str) -> None:
-            facade.capture_request(
-                session_key=delivery_key,
-                platform_id="qq",
-                unified_msg_origin=SESSION_ORIGIN,
-                message_id=message_id,
-                text_length=4,
-                history_present=True,
-                gap_seconds=1.0,
-                body=None,
-                sender_id=sender_id,
-                is_group=True,
+            def capture(delivery_key: str, message_id: str, sender_id: str) -> None:
+                facade.capture_request(
+                    session_key=delivery_key,
+                    platform_id="qq",
+                    unified_msg_origin=SESSION_ORIGIN,
+                    message_id=message_id,
+                    text_length=4,
+                    history_present=True,
+                    gap_seconds=1.0,
+                    body=None,
+                    sender_id=sender_id,
+                    is_group=True,
+                )
+
+            # Establish Alice as the previous settled speaker.
+            capture("seed", "m-seed", "alice")
+            facade.settle(session_key="seed", route_kind="SILENT", reply_kind="SILENT")
+
+            # Both requests arrive before either response settles.  B therefore sees Alice
+            # at request time, but A settles Bob before B reaches its response boundary.
+            capture("delivery-a", "m-a", "bob")
+            capture("delivery-b", "m-b", "alice")
+            facade.settle(
+                session_key="delivery-a",
+                route_kind="SILENT",
+                reply_kind="SILENT",
+            )
+            facade.settle(
+                session_key="delivery-b",
+                route_kind="SILENT",
+                reply_kind="SILENT",
             )
 
-        # Establish Alice as the previous settled speaker.
-        capture("seed", "m-seed", "alice")
-        facade.settle(session_key="seed", route_kind="SILENT", reply_kind="SILENT")
-
-        # Both requests arrive before either response settles.  B therefore sees Alice
-        # at request time, but A settles Bob before B reaches its response boundary.
-        capture("delivery-a", "m-a", "bob")
-        capture("delivery-b", "m-b", "alice")
-        facade.settle(session_key="delivery-a", route_kind="SILENT", reply_kind="SILENT")
-        facade.settle(session_key="delivery-b", route_kind="SILENT", reply_kind="SILENT")
-
-        assert [offer["reaction_facts"].same_sender for offer in offers] == [
-            None,
-            False,
-            False,
-        ]
-        await facade.terminate()
+            assert [offer["reaction_facts"].same_sender for offer in offers] == [
+                None,
+                False,
+                False,
+            ]
+            await facade.terminate()
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
@@ -718,41 +934,44 @@ def test_local_g2_shadow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(shadow_snapshot, "freeze_seed_snapshot_fallback", freeze_seed)
 
     async def go() -> dict[str, Any]:
-        plugin = await _build_plugin()
-        facade = plugin._v3_shadow
-        facade.enabled = True
-        assert await facade.initialize(root=tmp_path / "v3")
+        plugin = await _build_legacy_plugin(fixture_root=tmp_path / "plugin")
+        try:
+            facade = plugin._v3_shadow
+            facade.enabled = True
+            assert await facade.initialize(root=tmp_path / "v3-container" / "repository")
 
-        facade.ensure_session(
-            plugin=plugin,
-            session_key=SESSION_ORIGIN,
-            platform_id="qq",
-            unified_msg_origin=SESSION_ORIGIN,
-        )
-        facade.capture_request(
-            session_key=SESSION_ORIGIN,
-            platform_id="qq",
-            unified_msg_origin=SESSION_ORIGIN,
-            message_id="g2-turn-1",
-            text_length=8,
-            history_present=False,
-            gap_seconds=1.0,
-            body=None,
-            sender_id="g2-user",
-            is_group=True,
-        )
-        facade.settle(
-            session_key=SESSION_ORIGIN,
-            route_kind="SILENT",
-            reply_kind="SILENT",
-        )
-        await facade.join_private_tasks()
-        await facade.runtime.join()
+            facade.ensure_session(
+                plugin=plugin,
+                session_key=SESSION_ORIGIN,
+                platform_id="qq",
+                unified_msg_origin=SESSION_ORIGIN,
+            )
+            facade.capture_request(
+                session_key=SESSION_ORIGIN,
+                platform_id="qq",
+                unified_msg_origin=SESSION_ORIGIN,
+                message_id="g2-turn-1",
+                text_length=8,
+                history_present=False,
+                gap_seconds=1.0,
+                body=None,
+                sender_id="g2-user",
+                is_group=True,
+            )
+            facade.settle(
+                session_key=SESSION_ORIGIN,
+                route_kind="SILENT",
+                reply_kind="SILENT",
+            )
+            await facade.join_private_tasks()
+            await facade.runtime.join()
 
-        report = facade.write_local_g2_report_from_environment()
-        assert report is not None
-        await facade.terminate()
-        return report
+            report = facade.write_local_g2_report_from_environment()
+            assert report is not None
+            await facade.terminate()
+            return report
+        finally:
+            await plugin.terminate()
 
     report = _run(go())
     target = Path(os.environ["SYLANNE_V3_GATE_REPORT"])
@@ -809,22 +1028,31 @@ def test_main_source_has_no_v3_conf_or_extra_key() -> None:
 # --------------------------------------------------------------------------- #
 
 
-async def _facade_with_capture(tmp_path: Path, session_key: str = "s") -> Any:
-    plugin = main_mod.EmotionalStatePlugin(FakeContext(), {})
-    facade = plugin._v3_shadow
-    facade.enabled = True
-    await facade.initialize(root=tmp_path / "v3")
-    facade.capture_request(
-        session_key=session_key,
-        platform_id="qq",
-        unified_msg_origin="qq:GroupMessage:1",
-        message_id="m-1",
-        text_length=3,
-        history_present=True,
-        gap_seconds=1.5,
-        body={"warmth": 0.5, "tension": 0.2},
-    )
-    return plugin, facade
+async def _facade_with_capture(
+    tmp_path: Path,
+    origin: str = SESSION_ORIGIN,
+) -> Any:
+    plugin = await _build_legacy_plugin(scope_root=tmp_path / "scope")
+    try:
+        facade = plugin._v3_shadow
+        facade.enabled = True
+        assert await facade.initialize(
+            root=tmp_path / "v3-container" / "repository"
+        ) is True
+        facade.capture_request(
+            session_key=_private_key(plugin),
+            platform_id="qq",
+            unified_msg_origin=origin,
+            message_id="m-1",
+            text_length=3,
+            history_present=True,
+            gap_seconds=1.5,
+            body={"warmth": 0.5, "tension": 0.2},
+        )
+        return plugin, facade
+    except BaseException:
+        await plugin.terminate()
+        raise
 
 
 @pytest.mark.parametrize(
@@ -889,28 +1117,36 @@ async def _facade_with_capture(tmp_path: Path, session_key: str = "s") -> Any:
 )
 def test_terminal_evidence_matrix(tmp_path: Path, kwargs: dict, expected: ActualAction) -> None:
     async def go() -> None:
-        _plugin, facade = await _facade_with_capture(tmp_path)
-        facade.settle(session_key="s", **kwargs)
-        assert list(facade.settled_actions) == [expected]
-        await facade.terminate()
+        plugin, facade = await _facade_with_capture(tmp_path)
+        try:
+            facade.settle(session_key=_private_key(plugin), **kwargs)
+            assert list(facade.settled_actions) == [expected]
+            await facade.terminate()
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
 
 def test_duplicate_terminal_callback_settles_only_once(tmp_path: Path) -> None:
     async def go() -> None:
-        _plugin, facade = await _facade_with_capture(tmp_path)
-        for _ in range(3):
-            facade.settle(
-                session_key="s",
-                route_kind="SEGMENTED_TEXT",
-                reply_kind="SPEAK",
-                part_count=2,
-                all_segments_succeeded=True,
+        plugin, facade = await _facade_with_capture(tmp_path)
+        try:
+            for _ in range(3):
+                facade.settle(
+                    session_key=_private_key(plugin),
+                    route_kind="SEGMENTED_TEXT",
+                    reply_kind="SPEAK",
+                    part_count=2,
+                    all_segments_succeeded=True,
+                )
+            assert list(facade.settled_actions) == [ActualAction.SPEAK], (
+                "重复终端回调只能结算一次"
             )
-        assert list(facade.settled_actions) == [ActualAction.SPEAK], "重复终端回调只能结算一次"
-        assert facade.pending_count == 0
-        await facade.terminate()
+            assert facade.pending_count == 0
+            await facade.terminate()
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
@@ -921,30 +1157,45 @@ def test_fallback_after_valid_candidate_is_unknown_and_blocks_later_speak(
     """FALLBACK 在有效候选之后结算 UNKNOWN；后到的 SPEAK 不得改写已结算的轮。"""
 
     async def go() -> None:
-        _plugin, facade = await _facade_with_capture(tmp_path)
-        facade.settle(session_key="s", route_kind="FALLBACK", reply_kind="FALLBACK", part_count=1)
-        facade.settle(
-            session_key="s",
-            route_kind="SEGMENTED_TEXT",
-            reply_kind="SPEAK",
-            part_count=2,
-            all_segments_succeeded=True,
-        )
-        assert list(facade.settled_actions) == [ActualAction.UNKNOWN]
-        await facade.terminate()
+        plugin, facade = await _facade_with_capture(tmp_path)
+        try:
+            facade.settle(
+                session_key=_private_key(plugin),
+                route_kind="FALLBACK",
+                reply_kind="FALLBACK",
+                part_count=1,
+            )
+            facade.settle(
+                session_key=_private_key(plugin),
+                route_kind="SEGMENTED_TEXT",
+                reply_kind="SPEAK",
+                part_count=2,
+                all_segments_succeeded=True,
+            )
+            assert list(facade.settled_actions) == [ActualAction.UNKNOWN]
+            await facade.terminate()
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
 
 def test_settle_without_capture_is_a_noop(tmp_path: Path) -> None:
     async def go() -> None:
-        plugin = main_mod.EmotionalStatePlugin(FakeContext(), {})
-        facade = plugin._v3_shadow
-        facade.enabled = True
-        await facade.initialize(root=tmp_path / "v3")
-        facade.settle(session_key="never-captured", route_kind="SILENT", reply_kind="SILENT")
-        assert list(facade.settled_actions) == []
-        await facade.terminate()
+        plugin = await _build_legacy_plugin(fixture_root=tmp_path / "plugin")
+        try:
+            facade = plugin._v3_shadow
+            facade.enabled = True
+            await facade.initialize(root=tmp_path / "v3-container" / "repository")
+            facade.settle(
+                session_key="never-captured",
+                route_kind="SILENT",
+                reply_kind="SILENT",
+            )
+            assert list(facade.settled_actions) == []
+            await facade.terminate()
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
@@ -963,52 +1214,70 @@ def test_capture_fires_at_the_real_request_boundary(tmp_path: Path) -> None:
     """真生产路径：`_process_llm_request_final` 走完，Step 4.5 必须冻结这一轮。"""
 
     async def go() -> None:
-        plugin = main_mod.EmotionalStatePlugin(FakeContext(), {})
-        facade = plugin._v3_shadow
-        facade.enabled = True
-        await facade.initialize(root=tmp_path / "v3")
-        event, request = FakeEvent(), FakeRequest()
-        await plugin._llm_request_pipeline._process_llm_request_final(
-            event, request, "hi there", "qq:GroupMessage:1", False, False
-        )
-        assert facade.pending_count == 1, "请求边界必须在 final prompt assembly 之前捕获这一轮"
-        # 捕获点在 assembly 之前，但 assembly 照常发生（v3 没挡住 v2）。
-        assert request.system_prompt.startswith("PERSONA")
-        await facade.terminate()
+        plugin = await _build_legacy_plugin(scope_root=tmp_path / "scope")
+        try:
+            facade = plugin._v3_shadow
+            facade.enabled = True
+            await facade.initialize(root=tmp_path / "v3-container" / "repository")
+            event, request = FakeEvent(), FakeRequest()
+            session_key = _private_key(plugin)
+            with _bind_test_scope(plugin):
+                await plugin._llm_request_pipeline._process_llm_request_final(
+                    event,
+                    request,
+                    "hi there",
+                    session_key,
+                    False,
+                    False,
+                )
+                assert facade.pending_count == 1, (
+                    "请求边界必须在 final prompt assembly 之前捕获这一轮"
+                )
+                # 捕获点在 assembly 之前，但 assembly 照常发生（v3 没挡住 v2）。
+                assert request.system_prompt.startswith("PERSONA")
+            await facade.terminate()
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
 
 def test_request_boundary_projects_v2_lexicon_cues_without_raw_text(tmp_path: Path) -> None:
     async def go() -> None:
-        plugin = main_mod.EmotionalStatePlugin(FakeContext(), {})
-        facade = plugin._v3_shadow
-        facade.enabled = True
-        await facade.initialize(root=tmp_path / "v3")
-        event, request = FakeEvent(), FakeRequest()
-        await plugin._llm_request_pipeline._process_llm_request_final(
-            event,
-            request,
-            "抱抱你吗？",
-            SESSION_ORIGIN,
-            False,
-            False,
-        )
+        plugin = await _build_legacy_plugin(scope_root=tmp_path / "scope")
+        try:
+            facade = plugin._v3_shadow
+            facade.enabled = True
+            await facade.initialize(root=tmp_path / "v3-container" / "repository")
+            event, request = FakeEvent(), FakeRequest()
+            session_key = _private_key(plugin)
+            with _bind_test_scope(plugin):
+                await plugin._llm_request_pipeline._process_llm_request_final(
+                    event,
+                    request,
+                    "抱抱你吗？",
+                    session_key,
+                    False,
+                    False,
+                )
 
-        pending = next(iter(facade._pending.values()))
-        raw_values = pending.observation[0]
-        assert raw_values[19] > 0.0
-        assert raw_values[22] == 1.0
-        assert raw_values[25] > 0.0
-        assert raw_values[26] > 0.0
-        assert "抱抱你吗" not in repr(pending.observation)
-        await facade.terminate()
+                pending = next(iter(facade._pending.values()))
+                raw_values = pending.observation[0]
+                assert raw_values[19] > 0.0
+                assert raw_values[22] == 1.0
+                assert raw_values[25] > 0.0
+                assert raw_values[26] > 0.0
+                assert "抱抱你吗" not in repr(pending.observation)
+            await facade.terminate()
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
 
 def test_disabled_v3_never_imports_or_scans_lexicon(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     from sylanne_alpha.v2core import integration, lexicon
 
@@ -1022,18 +1291,23 @@ def test_disabled_v3_never_imports_or_scans_lexicon(
     monkeypatch.setattr(lexicon, "read_signals", forbidden_read)
 
     async def go() -> None:
-        plugin = await _build_plugin()
-        assert plugin._v3_shadow.accepting is False
-        event, request = FakeEvent(), FakeRequest()
-        await plugin._llm_request_pipeline._process_llm_request_final(
-            event,
-            request,
-            "关闭时不应扫描",
-            SESSION_ORIGIN,
-            False,
-            False,
-        )
-        assert request.system_prompt.startswith("PERSONA")
+        plugin = await _build_scoped_plugin(scope_root=tmp_path / "scope")
+        try:
+            assert plugin._v3_shadow.accepting is False
+            event, request = FakeEvent(), FakeRequest()
+            session_key = _private_key(plugin)
+            with _bind_test_scope(plugin):
+                await plugin._llm_request_pipeline._process_llm_request_final(
+                    event,
+                    request,
+                    "关闭时不应扫描",
+                    session_key,
+                    False,
+                    False,
+                )
+                assert request.system_prompt.startswith("PERSONA")
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
@@ -1055,26 +1329,28 @@ async def _prompt_bytes(
     import random
 
     random.seed(20260715)
-    plugin = main_mod.EmotionalStatePlugin(
-        FakeContext(),
-        {"sylanne_alpha_root": str(state_root)},
+    plugin = await _build_legacy_plugin(
+        config={"sylanne_alpha_root": str(state_root)},
+        scope_root=state_root / "scope",
     )
     try:
-        facade = plugin._v3_shadow
-        facade.enabled = enabled
-        if enabled:
-            assert root is not None
-            assert await facade.initialize(root=root) is True
-        event, request = FakeEvent(), FakeRequest()
-        await plugin._llm_request_pipeline._process_llm_request_final(
-            event, request, "hi there", "qq:GroupMessage:1", False, False
-        )
-        if enabled:
-            assert facade.pending_count == 1, "开启时这一轮必须被捕获（否则相等是空证）"
-        return (
-            str(request.system_prompt).encode("utf-8"),
-            repr(request.contexts).encode("utf-8"),
-        )
+        with _bind_test_scope(plugin):
+            facade = plugin._v3_shadow
+            facade.enabled = enabled
+            if enabled:
+                assert root is not None
+                assert await facade.initialize(root=root) is True
+            event, request = FakeEvent(), FakeRequest()
+            session_key = _private_key(plugin)
+            await plugin._llm_request_pipeline._process_llm_request_final(
+                event, request, "hi there", session_key, False, False
+            )
+            if enabled:
+                assert facade.pending_count == 1, "开启时这一轮必须被捕获（否则相等是空证）"
+            return (
+                str(request.system_prompt).encode("utf-8"),
+                repr(request.contexts).encode("utf-8"),
+            )
     finally:
         await plugin.terminate()
 
@@ -1109,7 +1385,7 @@ def test_request_boundary_prompt_is_byte_identical_with_shadow_on(tmp_path: Path
         )
         on_prompt, on_contexts = await _prompt_bytes(
             enabled=True,
-            root=tmp_path / "v3",
+            root=tmp_path / "v3-container" / "repository",
             state_root=tmp_path / "on-v2",
         )
         assert off_prompt == on_prompt, "开启 v3 后 final system_prompt 必须逐字节相同"
@@ -1122,60 +1398,89 @@ def test_segmented_dispatch_settles_speak_only_on_full_success(tmp_path: Path) -
     """真生产路径：`_dispatch_segmented_parts` 全段发完才结算 SPEAK。"""
 
     async def go() -> None:
-        plugin, facade = await _facade_with_capture(tmp_path, session_key="qq:GroupMessage:1")
-        parts = [{"text": "a", "delay_before_seconds": 0}, {"text": "b", "delay_before_seconds": 0}]
-        await plugin._llm_response_pipeline._dispatch_segmented_parts(
-            "qq:GroupMessage:1", parts, session_key="qq:GroupMessage:1"
-        )
-        assert plugin.context.sent == [
-            ("qq:GroupMessage:1", plugin.context.sent[0][1]),
-            ("qq:GroupMessage:1", plugin.context.sent[1][1]),
-        ]
-        assert list(facade.settled_actions) == [ActualAction.SPEAK]
-        await facade.terminate()
+        plugin, facade = await _facade_with_capture(tmp_path, origin="qq:GroupMessage:1")
+        try:
+            parts = [
+                {"text": "a", "delay_before_seconds": 0},
+                {"text": "b", "delay_before_seconds": 0},
+            ]
+            session_key = _private_key(plugin)
+            with _bind_test_scope(plugin):
+                await plugin._llm_response_pipeline._dispatch_segmented_parts(
+                    "qq:GroupMessage:1",
+                    parts,
+                    session_key=session_key,
+                )
+            assert plugin.context.sent == [
+                ("qq:GroupMessage:1", plugin.context.sent[0][1]),
+                ("qq:GroupMessage:1", plugin.context.sent[1][1]),
+            ]
+            assert list(facade.settled_actions) == [ActualAction.SPEAK]
+            await facade.terminate()
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
 
 def test_segmented_dispatch_first_segment_failure_is_unknown(tmp_path: Path) -> None:
     async def go() -> None:
-        plugin, facade = await _facade_with_capture(tmp_path, session_key="qq:GroupMessage:1")
+        plugin, facade = await _facade_with_capture(tmp_path, origin="qq:GroupMessage:1")
+        try:
+            async def boom(origin: str, message: Any) -> None:
+                raise RuntimeError("send failed")
 
-        async def boom(origin: str, message: Any) -> None:
-            raise RuntimeError("send failed")
-
-        plugin.context.send_message = boom  # type: ignore[method-assign]
-        parts = [{"text": "a", "delay_before_seconds": 0}, {"text": "b", "delay_before_seconds": 0}]
-        with pytest.raises(RuntimeError):
-            await plugin._llm_response_pipeline._dispatch_segmented_parts(
-                "qq:GroupMessage:1", parts, session_key="qq:GroupMessage:1"
-            )
-        assert list(facade.settled_actions) == [ActualAction.UNKNOWN]
-        assert plugin._store.unfinished_replies.get("qq:GroupMessage:1") == "ab"
-        await facade.terminate()
+            plugin.context.send_message = boom  # type: ignore[method-assign]
+            parts = [
+                {"text": "a", "delay_before_seconds": 0},
+                {"text": "b", "delay_before_seconds": 0},
+            ]
+            session_key = _private_key(plugin)
+            with _bind_test_scope(plugin):
+                with pytest.raises(RuntimeError):
+                    await plugin._llm_response_pipeline._dispatch_segmented_parts(
+                        "qq:GroupMessage:1",
+                        parts,
+                        session_key=session_key,
+                    )
+                assert plugin._store.unfinished_replies.get(session_key) == "ab"
+            assert list(facade.settled_actions) == [ActualAction.UNKNOWN]
+            await facade.terminate()
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
 
 def test_segmented_dispatch_second_segment_failure_is_unknown(tmp_path: Path) -> None:
     async def go() -> None:
-        plugin, facade = await _facade_with_capture(tmp_path, session_key="qq:GroupMessage:1")
-        calls: list[int] = []
+        plugin, facade = await _facade_with_capture(tmp_path, origin="qq:GroupMessage:1")
+        try:
+            calls: list[int] = []
 
-        async def boom_on_second(origin: str, message: Any) -> None:
-            calls.append(1)
-            if len(calls) >= 2:
-                raise RuntimeError("second segment failed")
+            async def boom_on_second(origin: str, message: Any) -> None:
+                calls.append(1)
+                if len(calls) >= 2:
+                    raise RuntimeError("second segment failed")
 
-        plugin.context.send_message = boom_on_second  # type: ignore[method-assign]
-        parts = [{"text": "a", "delay_before_seconds": 0}, {"text": "b", "delay_before_seconds": 0}]
-        with pytest.raises(RuntimeError):
-            await plugin._llm_response_pipeline._dispatch_segmented_parts(
-                "qq:GroupMessage:1", parts, session_key="qq:GroupMessage:1"
-            )
-        assert list(facade.settled_actions) == [ActualAction.UNKNOWN]
-        assert plugin._store.unfinished_replies.get("qq:GroupMessage:1") == "b"
-        await facade.terminate()
+            plugin.context.send_message = boom_on_second  # type: ignore[method-assign]
+            parts = [
+                {"text": "a", "delay_before_seconds": 0},
+                {"text": "b", "delay_before_seconds": 0},
+            ]
+            session_key = _private_key(plugin)
+            with _bind_test_scope(plugin):
+                with pytest.raises(RuntimeError):
+                    await plugin._llm_response_pipeline._dispatch_segmented_parts(
+                        "qq:GroupMessage:1",
+                        parts,
+                        session_key=session_key,
+                    )
+                assert plugin._store.unfinished_replies.get(session_key) == "b"
+            assert list(facade.settled_actions) == [ActualAction.UNKNOWN]
+            await facade.terminate()
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
@@ -1186,28 +1491,34 @@ def test_segmented_dispatch_cancelled_before_first_send_keeps_full_reply(
     async def go() -> None:
         plugin, facade = await _facade_with_capture(
             tmp_path,
-            session_key="qq:GroupMessage:1",
+            origin="qq:GroupMessage:1",
         )
-        parts = [{"text": "整条都还没发", "delay_before_seconds": 30}]
-        task = asyncio.create_task(
-            plugin._llm_response_pipeline._dispatch_segmented_parts(
-                "qq:GroupMessage:1",
-                parts,
-                session_key="qq:GroupMessage:1",
-            )
-        )
-        await asyncio.sleep(0.05)
+        task: asyncio.Task[Any] | None = None
+        try:
+            parts = [{"text": "整条都还没发", "delay_before_seconds": 30}]
+            session_key = _private_key(plugin)
+            with _bind_test_scope(plugin):
+                task = asyncio.create_task(
+                    plugin._llm_response_pipeline._dispatch_segmented_parts(
+                        "qq:GroupMessage:1",
+                        parts,
+                        session_key=session_key,
+                    )
+                )
+                await asyncio.sleep(0.05)
 
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
 
-        assert plugin.context.sent == []
-        assert (
-            plugin._store.unfinished_replies.get("qq:GroupMessage:1")
-            == "整条都还没发"
-        )
-        await facade.terminate()
+                assert plugin.context.sent == []
+                assert plugin._store.unfinished_replies.get(session_key) == "整条都还没发"
+            await facade.terminate()
+        finally:
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await plugin.terminate()
 
     _run(go())
 
@@ -1221,35 +1532,50 @@ def test_afterthought_dispatch_never_settles_the_next_turn(tmp_path: Path) -> No
     """
 
     async def go() -> None:
-        plugin, facade = await _facade_with_capture(tmp_path, session_key=SESSION_ORIGIN)
-        pipeline = plugin._llm_response_pipeline
-        parts = [{"text": "a", "delay_before_seconds": 0}]
+        plugin, facade = await _facade_with_capture(tmp_path, origin=SESSION_ORIGIN)
+        try:
+            pipeline = plugin._llm_response_pipeline
+            parts = [{"text": "a", "delay_before_seconds": 0}]
+            session_key = _private_key(plugin)
 
-        # 第 N 轮：正常投递 → 结算 SPEAK，pending 清空。
-        await pipeline._dispatch_segmented_parts(SESSION_ORIGIN, parts, session_key=SESSION_ORIGIN)
-        assert list(facade.settled_actions) == [ActualAction.SPEAK]
-        assert facade.pending_count == 0
+            # 第 N 轮：正常投递 → 结算 SPEAK，pending 清空。
+            with _bind_test_scope(plugin):
+                await pipeline._dispatch_segmented_parts(
+                    SESSION_ORIGIN,
+                    parts,
+                    session_key=session_key,
+                )
+            assert list(facade.settled_actions) == [ActualAction.SPEAK]
+            assert facade.pending_count == 0
 
-        # 第 N+1 轮进来：同一个 key 上落了新的捕获。
-        facade.capture_request(
-            session_key=SESSION_ORIGIN,
-            platform_id="qq",
-            unified_msg_origin=SESSION_ORIGIN,
-            message_id="m-2",
-            text_length=3,
-            history_present=True,
-            gap_seconds=1.0,
-            body=None,
-        )
-        assert facade.pending_count == 1
+            # 第 N+1 轮进来：同一个 key 上落了新的捕获。
+            facade.capture_request(
+                session_key=session_key,
+                platform_id="qq",
+                unified_msg_origin=SESSION_ORIGIN,
+                message_id="m-2",
+                text_length=3,
+                history_present=True,
+                gap_seconds=1.0,
+                body=None,
+            )
+            assert facade.pending_count == 1
 
-        # 补刀（settle_v3=False）：v2 照常发，但绝不碰第 N+1 轮的 pending。
-        await pipeline._dispatch_segmented_parts(
-            SESSION_ORIGIN, parts, session_key=SESSION_ORIGIN, settle_v3=False
-        )
-        assert list(facade.settled_actions) == [ActualAction.SPEAK], "补刀不得再结算一次"
-        assert facade.pending_count == 1, "第 N+1 轮必须还在，等它自己的终端证据"
-        await facade.terminate()
+            # 补刀（settle_v3=False）：v2 照常发，但绝不碰第 N+1 轮的 pending。
+            with _bind_test_scope(plugin):
+                await pipeline._dispatch_segmented_parts(
+                    SESSION_ORIGIN,
+                    parts,
+                    session_key=session_key,
+                    settle_v3=False,
+                )
+            assert list(facade.settled_actions) == [ActualAction.SPEAK], (
+                "补刀不得再结算一次"
+            )
+            assert facade.pending_count == 1, "第 N+1 轮必须还在，等它自己的终端证据"
+            await facade.terminate()
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
@@ -1265,53 +1591,68 @@ def test_stale_cancel_never_settles_the_turn_that_replaced_it(tmp_path: Path) ->
     """
 
     async def go() -> None:
-        plugin, facade = await _facade_with_capture(tmp_path, session_key=SESSION_ORIGIN)
-        token_n = facade.pending_token(SESSION_ORIGIN)
-        assert token_n is not None
+        plugin, facade = await _facade_with_capture(tmp_path, origin=SESSION_ORIGIN)
+        task: asyncio.Task[Any] | None = None
+        try:
+            session_key = _private_key(plugin)
+            token_n = facade.pending_token(session_key)
+            assert token_n is not None
 
-        parts = [
-            {"text": "a", "delay_before_seconds": 0},
-            {"text": "b", "delay_before_seconds": 30},
-        ]
-        task = asyncio.get_running_loop().create_task(
-            plugin._llm_response_pipeline._dispatch_segmented_parts(
-                SESSION_ORIGIN, parts, session_key=SESSION_ORIGIN
+            parts = [
+                {"text": "a", "delay_before_seconds": 0},
+                {"text": "b", "delay_before_seconds": 30},
+            ]
+            with _bind_test_scope(plugin):
+                task = asyncio.get_running_loop().create_task(
+                    plugin._llm_response_pipeline._dispatch_segmented_parts(
+                        SESSION_ORIGIN,
+                        parts,
+                        session_key=session_key,
+                    )
+                )
+                await asyncio.sleep(0.05)  # 第 N 轮已发出第一段，正卡在段间 sleep
+
+                # 第 N+1 轮抢先落在同一个 key 上（模拟 cancel 送达之前捕获就跑完了）。
+                facade.capture_request(
+                    session_key=session_key,
+                    platform_id="qq",
+                    unified_msg_origin=SESSION_ORIGIN,
+                    message_id="m-2",
+                    text_length=3,
+                    history_present=True,
+                    gap_seconds=1.0,
+                    body=None,
+                )
+                token_n1 = facade.pending_token(session_key)
+                assert token_n1 is not None and token_n1 != token_n, (
+                    "新一轮必须拿到新令牌"
+                )
+
+                # 现在第 N 轮才被取消 —— 它带的是 token_n，对不上 token_n1，必须放手。
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+            assert list(facade.settled_actions) == [], "过期的取消不得结算任何一轮"
+            assert facade.pending_token(session_key) == token_n1, (
+                "第 N+1 轮必须原封不动"
             )
-        )
-        await asyncio.sleep(0.05)  # 第 N 轮已发出第一段，正卡在段间 sleep
+            assert facade.pending_count == 1
 
-        # 第 N+1 轮抢先落在同一个 key 上（模拟 cancel 送达之前捕获就跑完了）。
-        facade.capture_request(
-            session_key=SESSION_ORIGIN,
-            platform_id="qq",
-            unified_msg_origin=SESSION_ORIGIN,
-            message_id="m-2",
-            text_length=3,
-            history_present=True,
-            gap_seconds=1.0,
-            body=None,
-        )
-        token_n1 = facade.pending_token(SESSION_ORIGIN)
-        assert token_n1 is not None and token_n1 != token_n, "新一轮必须拿到新令牌"
-
-        # 现在第 N 轮才被取消 —— 它带的是 token_n，对不上 token_n1，必须放手。
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-        assert list(facade.settled_actions) == [], "过期的取消不得结算任何一轮"
-        assert facade.pending_token(SESSION_ORIGIN) == token_n1, "第 N+1 轮必须原封不动"
-        assert facade.pending_count == 1
-
-        # 第 N+1 轮仍然能被它自己的终端证据正常结算。
-        facade.settle(
-            session_key=SESSION_ORIGIN,
-            route_kind="SILENT",
-            reply_kind="SILENT",
-            token=token_n1,
-        )
-        assert list(facade.settled_actions) == [ActualAction.HOLD]
-        await facade.terminate()
+            # 第 N+1 轮仍然能被它自己的终端证据正常结算。
+            facade.settle(
+                session_key=session_key,
+                route_kind="SILENT",
+                reply_kind="SILENT",
+                token=token_n1,
+            )
+            assert list(facade.settled_actions) == [ActualAction.HOLD]
+            await facade.terminate()
+        finally:
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await plugin.terminate()
 
     _run(go())
 
@@ -1320,28 +1661,32 @@ def test_stale_token_is_rejected_but_matching_token_settles(tmp_path: Path) -> N
     """栅栏令牌的正反面：对不上就放手，对得上就照常结算（防"靠瘫痪换绿"）。"""
 
     async def go() -> None:
-        _plugin, facade = await _facade_with_capture(tmp_path, session_key=SESSION_ORIGIN)
-        token = facade.pending_token(SESSION_ORIGIN)
-        assert token is not None
+        plugin, facade = await _facade_with_capture(tmp_path, origin=SESSION_ORIGIN)
+        try:
+            session_key = _private_key(plugin)
+            token = facade.pending_token(session_key)
+            assert token is not None
 
-        facade.settle(
-            session_key=SESSION_ORIGIN,
-            route_kind="SILENT",
-            reply_kind="SILENT",
-            token=token + 999,  # 过期令牌
-        )
-        assert list(facade.settled_actions) == [], "过期令牌必须放手"
-        assert facade.pending_count == 1, "放手不等于丢掉这轮"
+            facade.settle(
+                session_key=session_key,
+                route_kind="SILENT",
+                reply_kind="SILENT",
+                token=token + 999,  # 过期令牌
+            )
+            assert list(facade.settled_actions) == [], "过期令牌必须放手"
+            assert facade.pending_count == 1, "放手不等于丢掉这轮"
 
-        facade.settle(
-            session_key=SESSION_ORIGIN,
-            route_kind="SILENT",
-            reply_kind="SILENT",
-            token=token,  # 正确令牌
-        )
-        assert list(facade.settled_actions) == [ActualAction.HOLD]
-        assert facade.pending_count == 0
-        await facade.terminate()
+            facade.settle(
+                session_key=session_key,
+                route_kind="SILENT",
+                reply_kind="SILENT",
+                token=token,  # 正确令牌
+            )
+            assert list(facade.settled_actions) == [ActualAction.HOLD]
+            assert facade.pending_count == 0
+            await facade.terminate()
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
@@ -1362,21 +1707,32 @@ def test_plugin_wrapper_forwards_settle_v3(tmp_path: Path) -> None:
     """F1 补漏：插件层的转发壳必须原样传 settle_v3，不能吞掉。"""
 
     async def go() -> None:
-        plugin, facade = await _facade_with_capture(tmp_path, session_key=SESSION_ORIGIN)
-        parts = [{"text": "a", "delay_before_seconds": 0}]
-        # 经插件转发壳走补刀式投递：v2 照发，但绝不结算。
-        await plugin._dispatch_segmented_parts(
-            SESSION_ORIGIN, parts, session_key=SESSION_ORIGIN, settle_v3=False
-        )
-        assert plugin.context.sent, "v2 必须照常发出去"
-        assert list(facade.settled_actions) == [], "转发壳吞掉 settle_v3 就会重开 F1"
-        assert facade.pending_count == 1
-        # 默认仍然结算（不能为了挡住上面把正常路也关死）。
-        await plugin._dispatch_segmented_parts(
-            SESSION_ORIGIN, parts, session_key=SESSION_ORIGIN
-        )
-        assert list(facade.settled_actions) == [ActualAction.SPEAK]
-        await facade.terminate()
+        plugin, facade = await _facade_with_capture(tmp_path, origin=SESSION_ORIGIN)
+        try:
+            parts = [{"text": "a", "delay_before_seconds": 0}]
+            session_key = _private_key(plugin)
+            # 经插件转发壳走补刀式投递：v2 照发，但绝不结算。
+            with _bind_test_scope(plugin):
+                await plugin._dispatch_segmented_parts(
+                    SESSION_ORIGIN,
+                    parts,
+                    session_key=session_key,
+                    settle_v3=False,
+                )
+            assert plugin.context.sent, "v2 必须照常发出去"
+            assert list(facade.settled_actions) == [], "转发壳吞掉 settle_v3 就会重开 F1"
+            assert facade.pending_count == 1
+            # 默认仍然结算（不能为了挡住上面把正常路也关死）。
+            with _bind_test_scope(plugin):
+                await plugin._dispatch_segmented_parts(
+                    SESSION_ORIGIN,
+                    parts,
+                    session_key=session_key,
+                )
+            assert list(facade.settled_actions) == [ActualAction.SPEAK]
+            await facade.terminate()
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
@@ -1385,26 +1741,34 @@ def test_terminate_never_abandons_a_live_runtime_worker(tmp_path: Path) -> None:
     """关停不得用超时遗弃仍存活的私有 executor/runtime。"""
 
     async def go() -> None:
-        plugin = await _build_plugin()
-        facade = plugin._v3_shadow
-        facade.enabled = True
-        await facade.initialize(root=tmp_path / "v3")
-
+        plugin = await _build_legacy_plugin(fixture_root=tmp_path / "plugin")
         release = asyncio.Event()
+        real_runtime: Any = None
+        real_runtime_terminated = False
+        try:
+            facade = plugin._v3_shadow
+            facade.enabled = True
+            await facade.initialize(root=tmp_path / "v3-container" / "repository")
 
-        class _SlowRuntime:
-            async def terminate(self) -> None:
-                await release.wait()
+            class _SlowRuntime:
+                async def terminate(self) -> None:
+                    await release.wait()
 
-        real_runtime = facade.runtime
-        facade.runtime = _SlowRuntime()
-        shutdown = asyncio.create_task(facade.terminate())
-        await asyncio.sleep(0.05)
-        assert not shutdown.done(), "runtime 仍存活时 facade 不得假装 terminate 完成"
-        release.set()
-        await asyncio.wait_for(shutdown, timeout=2.0)
-        assert facade.runtime is None
-        await real_runtime.terminate()
+            real_runtime = facade.runtime
+            facade.runtime = _SlowRuntime()
+            shutdown = asyncio.create_task(facade.terminate())
+            await asyncio.sleep(0.05)
+            assert not shutdown.done(), "runtime 仍存活时 facade 不得假装 terminate 完成"
+            release.set()
+            await asyncio.wait_for(shutdown, timeout=2.0)
+            assert facade.runtime is None
+            await real_runtime.terminate()
+            real_runtime_terminated = True
+        finally:
+            release.set()
+            await plugin.terminate()
+            if real_runtime is not None and not real_runtime_terminated:
+                await real_runtime.terminate()
 
     _run(go())
 
@@ -1425,34 +1789,39 @@ def test_context_class_is_frozen_per_turn_kind(tmp_path: Path) -> None:
     from sylanne_alpha.v3core.contracts import TurnContextClass
 
     async def go() -> None:
-        plugin = await _build_plugin()
-        facade = plugin._v3_shadow
-        facade.enabled = True
-        await facade.initialize(root=tmp_path / "v3")
+        plugin = await _build_legacy_plugin(fixture_root=tmp_path / "plugin")
+        try:
+            facade = plugin._v3_shadow
+            facade.enabled = True
+            await facade.initialize(root=tmp_path / "v3-container" / "repository")
 
-        cases = [
-            ({"addressed": True, "proactive": False}, TurnContextClass.ADDRESSED),
-            ({"addressed": False, "proactive": False}, TurnContextClass.AMBIENT),
-            ({"addressed": False, "proactive": True}, TurnContextClass.PROACTIVE),
-            # proactive 压过 addressed：主动轮就是主动轮。
-            ({"addressed": True, "proactive": True}, TurnContextClass.PROACTIVE),
-        ]
-        for index, (kwargs, expected) in enumerate(cases):
-            key = f"s-{index}"
-            facade.capture_request(
-                session_key=key,
-                platform_id="qq",
-                unified_msg_origin=f"qq:GroupMessage:{index}",
-                message_id=f"m-{index}",
-                text_length=3,
-                history_present=True,
-                gap_seconds=1.0,
-                body=None,
-                **kwargs,
-            )
-            assert facade.has_pending(key), f"case {index} 必须被捕获"
-            assert facade._pending[key].context is expected, f"case {index} 上下文类别错"
-        await facade.terminate()
+            cases = [
+                ({"addressed": True, "proactive": False}, TurnContextClass.ADDRESSED),
+                ({"addressed": False, "proactive": False}, TurnContextClass.AMBIENT),
+                ({"addressed": False, "proactive": True}, TurnContextClass.PROACTIVE),
+                # proactive 压过 addressed：主动轮就是主动轮。
+                ({"addressed": True, "proactive": True}, TurnContextClass.PROACTIVE),
+            ]
+            for index, (kwargs, expected) in enumerate(cases):
+                key = f"s-{index}"
+                facade.capture_request(
+                    session_key=key,
+                    platform_id="qq",
+                    unified_msg_origin=f"qq:GroupMessage:{index}",
+                    message_id=f"m-{index}",
+                    text_length=3,
+                    history_present=True,
+                    gap_seconds=1.0,
+                    body=None,
+                    **kwargs,
+                )
+                assert facade.has_pending(key), f"case {index} 必须被捕获"
+                assert facade._pending[key].context is expected, (
+                    f"case {index} 上下文类别错"
+                )
+            await facade.terminate()
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
@@ -1469,16 +1838,19 @@ def test_proactive_inflight_drives_proactive_context() -> None:
     assert "def is_dispatch_inflight" in bridge_src
 
 
-def test_proactive_bridge_inflight_accessor_is_read_only() -> None:
+def test_proactive_bridge_inflight_accessor_is_read_only(tmp_path: Path) -> None:
     async def go() -> None:
-        plugin = await _build_plugin()
-        bridge = plugin._proactive_bridge
-        assert bridge.is_dispatch_inflight("nobody") is False
-        bridge._inflight_dispatch.add("qq:GroupMessage:9")
-        assert bridge.is_dispatch_inflight("qq:GroupMessage:9") is True
-        # 只读：问过之后在飞集合不变。
-        assert bridge._inflight_dispatch == {"qq:GroupMessage:9"}
-        assert bridge.is_dispatch_inflight("") is False
+        plugin = await _build_scoped_plugin(fixture_root=tmp_path / "plugin")
+        try:
+            bridge = plugin._proactive_bridge
+            assert bridge.is_dispatch_inflight("nobody") is False
+            bridge._inflight_dispatch.add("qq:GroupMessage:9")
+            assert bridge.is_dispatch_inflight("qq:GroupMessage:9") is True
+            # 只读：问过之后在飞集合不变。
+            assert bridge._inflight_dispatch == {"qq:GroupMessage:9"}
+            assert bridge.is_dispatch_inflight("") is False
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
@@ -1491,33 +1863,38 @@ def test_ordinary_settle_yields_to_proactive_turn(tmp_path: Path) -> None:
     """
 
     async def go() -> None:
-        plugin = await _build_plugin()
-        facade = plugin._v3_shadow
-        facade.enabled = True
-        await facade.initialize(root=tmp_path / "v3")
-        facade.capture_request(
-            session_key=SESSION_ORIGIN,
-            platform_id="qq",
-            unified_msg_origin=SESSION_ORIGIN,
-            message_id="m-1",
-            text_length=3,
-            history_present=False,
-            gap_seconds=1.0,
-            body=None,
-            addressed=False,
-            proactive=True,
-        )
-        assert facade.pending_is_proactive(SESSION_ORIGIN) is True
+        plugin = await _build_legacy_plugin(scope_root=tmp_path / "scope")
+        try:
+            facade = plugin._v3_shadow
+            facade.enabled = True
+            await facade.initialize(root=tmp_path / "v3-container" / "repository")
+            session_key = _private_key(plugin)
+            facade.capture_request(
+                session_key=session_key,
+                platform_id="qq",
+                unified_msg_origin=SESSION_ORIGIN,
+                message_id="m-1",
+                text_length=3,
+                history_present=False,
+                gap_seconds=1.0,
+                body=None,
+                addressed=False,
+                proactive=True,
+            )
+            assert facade.pending_is_proactive(session_key) is True
 
-        # ordinary 记账必须让路，不得认领这一轮。
-        plugin._v3_settle_ordinary(FakeEvent(origin=SESSION_ORIGIN))
-        assert list(facade.settled_actions) == [], "主动轮不得被 ordinary 记账抢走"
-        assert facade.pending_count == 1
+            # ordinary 记账必须让路，不得认领这一轮。
+            with _bind_test_scope(plugin):
+                plugin._v3_settle_ordinary(FakeEvent(origin=SESSION_ORIGIN))
+            assert list(facade.settled_actions) == [], "主动轮不得被 ordinary 记账抢走"
+            assert facade.pending_count == 1
 
-        # REACH 才是这一轮的终端证据。
-        plugin._proactive_bridge._v3_settle_reach(SESSION_ORIGIN, SESSION_ORIGIN)
-        assert list(facade.settled_actions) == [ActualAction.REACH]
-        await facade.terminate()
+            # REACH 才是这一轮的终端证据。
+            plugin._proactive_bridge._v3_settle_reach(SESSION_ORIGIN, session_key)
+            assert list(facade.settled_actions) == [ActualAction.REACH]
+            await facade.terminate()
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
@@ -1526,23 +1903,34 @@ def test_ordinary_settle_yields_when_segmented_task_inflight(tmp_path: Path) -> 
     """红队 F4 回归：接管标记写失败时，在飞的分段任务是兜底判据。"""
 
     async def go() -> None:
-        plugin, facade = await _facade_with_capture(tmp_path, session_key=SESSION_ORIGIN)
-
-        async def _still_sending() -> None:
-            await asyncio.sleep(3600)
-
-        task = asyncio.get_running_loop().create_task(_still_sending())
-        plugin._store.segmented_tasks.set(SESSION_ORIGIN, task)
+        plugin, facade = await _facade_with_capture(tmp_path, origin=SESSION_ORIGIN)
+        task: asyncio.Task[Any] | None = None
         try:
-            # extra 标记刻意【不写】：模拟 set_extra 失败的降级路径。
-            event = FakeEvent(origin=SESSION_ORIGIN)
-            assert event.get_extra("_syl_realtime_takeover", None) is None
-            plugin._v3_settle_ordinary(event)
-            assert list(facade.settled_actions) == [], "有在飞分段任务时 ordinary 不得抢先结算"
-            assert facade.pending_count == 1
+            session_key = _private_key(plugin)
+
+            async def _still_sending() -> None:
+                await asyncio.sleep(3600)
+
+            task = asyncio.get_running_loop().create_task(_still_sending())
+            with _bind_test_scope(plugin):
+                plugin._store.segmented_tasks.set(session_key, task)
+                try:
+                    # extra 标记刻意【不写】：模拟 set_extra 失败的降级路径。
+                    event = FakeEvent(origin=SESSION_ORIGIN)
+                    assert event.get_extra("_syl_realtime_takeover", None) is None
+                    plugin._v3_settle_ordinary(event)
+                    assert list(facade.settled_actions) == [], (
+                        "有在飞分段任务时 ordinary 不得抢先结算"
+                    )
+                    assert facade.pending_count == 1
+                finally:
+                    task.cancel()
+            await facade.terminate()
         finally:
-            task.cancel()
-        await facade.terminate()
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await plugin.terminate()
 
     _run(go())
 
@@ -1551,33 +1939,51 @@ def test_ordinary_settle_still_fires_for_a_plain_turn(tmp_path: Path) -> None:
     """让路逻辑不能把正常 ordinary 轮也挡掉（否则上面两条是靠瘫痪换来的绿）。"""
 
     async def go() -> None:
-        plugin, facade = await _facade_with_capture(tmp_path, session_key=SESSION_ORIGIN)
-        assert facade.pending_is_proactive(SESSION_ORIGIN) is False
-        assert plugin._store.segmented_tasks.get(SESSION_ORIGIN) is None
-        plugin._v3_settle_ordinary(FakeEvent(origin=SESSION_ORIGIN))
-        assert list(facade.settled_actions) == [ActualAction.UNKNOWN]
-        await facade.terminate()
+        plugin, facade = await _facade_with_capture(tmp_path, origin=SESSION_ORIGIN)
+        try:
+            session_key = _private_key(plugin)
+            assert facade.pending_is_proactive(session_key) is False
+            with _bind_test_scope(plugin):
+                assert plugin._store.segmented_tasks.get(session_key) is None
+                plugin._v3_settle_ordinary(FakeEvent(origin=SESSION_ORIGIN))
+            assert list(facade.settled_actions) == [ActualAction.UNKNOWN]
+            await facade.terminate()
+        finally:
+            await plugin.terminate()
 
     _run(go())
 
 
 def test_segmented_dispatch_cancelled_between_segments_is_unknown(tmp_path: Path) -> None:
     async def go() -> None:
-        plugin, facade = await _facade_with_capture(tmp_path, session_key="qq:GroupMessage:1")
-        parts = [
-            {"text": "a", "delay_before_seconds": 0},
-            {"text": "b", "delay_before_seconds": 30},
-        ]
-        task = asyncio.get_running_loop().create_task(
-            plugin._llm_response_pipeline._dispatch_segmented_parts(
-                "qq:GroupMessage:1", parts, session_key="qq:GroupMessage:1"
+        plugin, facade = await _facade_with_capture(tmp_path, origin="qq:GroupMessage:1")
+        task: asyncio.Task[Any] | None = None
+        try:
+            session_key = _private_key(plugin)
+            parts = [
+                {"text": "a", "delay_before_seconds": 0},
+                {"text": "b", "delay_before_seconds": 30},
+            ]
+            with _bind_test_scope(plugin):
+                task = asyncio.get_running_loop().create_task(
+                    plugin._llm_response_pipeline._dispatch_segmented_parts(
+                        "qq:GroupMessage:1",
+                        parts,
+                        session_key=session_key,
+                    )
+                )
+                await asyncio.sleep(0.05)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            assert list(facade.settled_actions) == [ActualAction.UNKNOWN], (
+                "段间取消 → UNKNOWN"
             )
-        )
-        await asyncio.sleep(0.05)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        assert list(facade.settled_actions) == [ActualAction.UNKNOWN], "段间取消 → UNKNOWN"
-        await facade.terminate()
+            await facade.terminate()
+        finally:
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await plugin.terminate()
 
     _run(go())
