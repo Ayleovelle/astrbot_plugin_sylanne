@@ -423,6 +423,8 @@ class PersonaApiEcho:
 class TurnDeliveryLease:
     transport_session_token: str
     resolved_scope_token: str
+    bot_binding_generation: int
+    persona_lifecycle_generation: int
     session_generation: int
     scope_generation: int
     turn_generation: int
@@ -430,6 +432,8 @@ class TurnDeliveryLease:
     def __post_init__(self) -> None:
         _require_token(self.transport_session_token, "session_v1_")
         _require_token(self.resolved_scope_token, "scope_v1_")
+        _require_generation(self.bot_binding_generation, "bot_binding_generation")
+        _require_generation(self.persona_lifecycle_generation, "persona_lifecycle_generation")
         _require_generation(self.session_generation, "session_generation")
         _require_generation(self.scope_generation, "scope_generation")
         _require_generation(self.turn_generation, "turn_generation")

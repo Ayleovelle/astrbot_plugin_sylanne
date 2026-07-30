@@ -129,12 +129,65 @@ def test_scope_contracts_validate_parentage_tokens_and_generations() -> None:
         TurnDeliveryLease(
             transport_session_token="session_v1_S",
             resolved_scope_token="scope_v2_X",
+            bot_binding_generation=0,
+            persona_lifecycle_generation=0,
             session_generation=0,
             scope_generation=0,
             turn_generation=0,
         )
     with pytest.raises(ValueError, match="^generation must be a non-negative int$"):
         SessionRef(token="session_v1_S", bot_ref=bot, generation=True)  # type: ignore[arg-type]
+
+
+def test_turn_delivery_lease_binds_bot_and_persona_lifecycle_generations() -> None:
+    bot = _bot()
+    persona = _persona(bot)
+    lease = TurnDeliveryLease(
+        transport_session_token="session_v1_S",
+        resolved_scope_token="scope_v1_X",
+        bot_binding_generation=bot.generation,
+        persona_lifecycle_generation=persona.lifecycle_generation,
+        session_generation=5,
+        scope_generation=3,
+        turn_generation=9,
+    )
+
+    assert get_type_hints(TurnDeliveryLease)["bot_binding_generation"] is int
+    assert get_type_hints(TurnDeliveryLease)["persona_lifecycle_generation"] is int
+    assert lease.bot_binding_generation == bot.generation
+    assert lease.persona_lifecycle_generation == persona.lifecycle_generation
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    (
+        ("bot_binding_generation", True),
+        ("bot_binding_generation", -1),
+        ("persona_lifecycle_generation", True),
+        ("persona_lifecycle_generation", -1),
+    ),
+)
+def test_turn_delivery_lease_rejects_non_exact_identity_generations(
+    field_name: str,
+    value: object,
+) -> None:
+    bot = _bot()
+    persona = _persona(bot)
+    kwargs: dict[str, object] = {
+        "transport_session_token": "session_v1_S",
+        "resolved_scope_token": "scope_v1_X",
+        "bot_binding_generation": bot.generation,
+        "persona_lifecycle_generation": persona.lifecycle_generation,
+        "session_generation": 5,
+        "scope_generation": 3,
+        "turn_generation": 9,
+    }
+    kwargs[field_name] = value
+
+    with pytest.raises(ValueError, match=f"^{field_name} must be a non-negative int$"):
+        TurnDeliveryLease(
+            **kwargs  # type: ignore[arg-type]
+        )
 
 
 def test_api_diagnostics_and_delivery_contracts_keep_sensitive_fields_redacted() -> None:
@@ -213,6 +266,8 @@ def test_api_diagnostics_and_delivery_contracts_keep_sensitive_fields_redacted()
     lease = TurnDeliveryLease(
         transport_session_token="session_v1_S",
         resolved_scope_token="scope_v1_X",
+        bot_binding_generation=bot.generation,
+        persona_lifecycle_generation=persona.lifecycle_generation,
         session_generation=5,
         scope_generation=3,
         turn_generation=9,

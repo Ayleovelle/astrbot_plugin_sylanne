@@ -48,6 +48,7 @@ Record = astrbot_components.Record
 
 from main import EmotionalStatePlugin
 from sylanne_alpha import transient_context
+from sylanne_alpha.delivery_ledger import SegmentedDeliveryTurn
 from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline
 from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline
 from sylanne_alpha.message_dispatch import realtime_flags
@@ -239,6 +240,75 @@ class _Plugin:
         return None
 
 
+class _ReactiveContext:
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, object]] = []
+
+    async def send_message(self, origin: str, message: object) -> None:
+        self.sent.append((origin, message))
+
+
+class _RawSendEvent(_Ev):
+    def __init__(self, *, request_view: object | None = None, after_send=None) -> None:
+        super().__init__()
+        if request_view is not None:
+            self.set_extra("_sylanne_runtime_view_v1", request_view)
+        self.after_send = after_send
+        self.sent: list[tuple[str, str]] = []
+
+    def plain_result(self, text: str) -> tuple[str, str]:
+        return ("event-plain", text)
+
+    async def send(self, result: object) -> None:
+        assert isinstance(result, tuple)
+        self.sent.append(result)
+        if self.after_send is not None:
+            self.after_send()
+
+
+class _V3Recorder:
+    def __init__(self) -> None:
+        self.settled: list[dict[str, object]] = []
+
+    def pending_token(self, _session_key: str) -> int:
+        return 17
+
+    def settle(self, **kwargs: object) -> None:
+        self.settled.append(kwargs)
+
+
+class _ReactivePlugin(_Plugin):
+    def __init__(self, root: str, config: dict) -> None:
+        super().__init__(root, config)
+        self.context = _ReactiveContext()
+        self._scope_runtime_registry = ScopeRuntimeRegistry.for_test()
+        self.request_view = _issued_view(self._scope_runtime_registry)
+        scope = self.request_view.resolved.scope
+        assert scope is not None
+        self._runtime_binding = SimpleNamespace(
+            scope=scope,
+            request_runtime_view=self.request_view,
+        )
+        self._v3_shadow = _V3Recorder()
+
+    def _bound_runtime(self) -> SimpleNamespace:
+        return self._runtime_binding
+
+
+def _reactive_delivery_turn(event: _RawSendEvent) -> SegmentedDeliveryTurn:
+    return SegmentedDeliveryTurn(
+        session_key="sess:realtime-decouple",
+        input_epoch=0,
+        planned_parts=("first", "second"),
+        origin=event.unified_msg_origin,
+        dispatch_parts=(
+            {"text": "first", "delay_before_seconds": 0.0},
+            {"text": "second", "delay_before_seconds": 0.0},
+        ),
+        cleaned_text="first\nsecond",
+    )
+
+
 def _cfg(*, enabled: bool, intercept: bool) -> dict:
     return {
         "sylanne_alpha_realtime_chat_enabled": enabled,
@@ -284,6 +354,106 @@ def _stub_dispatch(pipe: LLMResponsePipeline) -> list:
 
     pipe._dispatch_segmented_parts = types.MethodType(_fake, pipe)  # type: ignore[method-assign]
     return calls
+
+
+def test_scoped_reactive_turn_sends_only_through_its_original_event() -> None:
+    async def go() -> None:
+        plugin = _ReactivePlugin(
+            tempfile.mkdtemp(prefix="rt_reactive_event_"),
+            _cfg(enabled=True, intercept=True),
+        )
+        pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
+        event = _RawSendEvent(request_view=plugin.request_view)
+        turn = _reactive_delivery_turn(event)
+        event.set_extra(pipe._DELIVERY_TURN_EXTRA, turn)
+
+        assert pipe.activate_segmented_delivery(event) is True
+        await asyncio.gather(*plugin._background_tasks)
+
+        assert event.sent == [("event-plain", "first"), ("event-plain", "second")]
+        assert plugin.context.sent == []
+        assert turn.delivered_parts == ["first", "second"]
+        assert turn.status == "completed"
+        assert plugin._v3_shadow.settled[-1]["all_segments_succeeded"] is True
+
+    asyncio.run(go())
+
+
+def test_scoped_reactive_post_send_view_loss_is_unknown_not_expressed() -> None:
+    async def go() -> None:
+        plugin = _ReactivePlugin(
+            tempfile.mkdtemp(prefix="rt_reactive_stale_"),
+            _cfg(enabled=True, intercept=True),
+        )
+        event = _RawSendEvent(
+            request_view=plugin.request_view,
+            after_send=lambda: plugin._scope_runtime_registry.release_request_view(
+                plugin.request_view
+            )
+        )
+        pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
+        turn = _reactive_delivery_turn(event)
+        event.set_extra(pipe._DELIVERY_TURN_EXTRA, turn)
+
+        assert pipe.activate_segmented_delivery(event) is True
+        await asyncio.gather(*plugin._background_tasks)
+
+        assert event.sent == [("event-plain", "first")]
+        assert plugin.context.sent == []
+        assert turn.delivered_parts == []
+        assert turn.status == "outcome_unknown"
+        assert plugin._v3_shadow.settled[-1]["all_segments_succeeded"] is False
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize(
+    "event_view",
+    [None, object()],
+    ids=("missing", "forged"),
+)
+def test_scoped_reactive_activation_rejects_missing_or_forged_view(
+    event_view: object | None,
+) -> None:
+    async def go() -> None:
+        plugin = _ReactivePlugin(
+            tempfile.mkdtemp(prefix="rt_reactive_reject_"),
+            _cfg(enabled=True, intercept=True),
+        )
+        pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
+        event = _RawSendEvent(request_view=event_view)
+        turn = _reactive_delivery_turn(event)
+        event.set_extra(pipe._DELIVERY_TURN_EXTRA, turn)
+
+        assert pipe.activate_segmented_delivery(event) is False
+        assert event.sent == []
+        assert plugin.context.sent == []
+        assert plugin._background_tasks == []
+        assert turn.task is None
+        assert turn.status == "planned"
+
+    asyncio.run(go())
+
+
+def test_scoped_reactive_dispatch_preserves_unfinished_reply_sentinel() -> None:
+    async def go() -> None:
+        plugin = _ReactivePlugin(
+            tempfile.mkdtemp(prefix="rt_reactive_history_"),
+            _cfg(enabled=True, intercept=True),
+        )
+        pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
+        event = _RawSendEvent(request_view=plugin.request_view)
+        turn = _reactive_delivery_turn(event)
+        sentinel = object()
+        plugin._store.unfinished_replies.set(turn.session_key, sentinel)
+        event.set_extra(pipe._DELIVERY_TURN_EXTRA, turn)
+
+        assert pipe.activate_segmented_delivery(event) is True
+        await asyncio.gather(*plugin._background_tasks)
+
+        assert plugin._store.unfinished_replies.get(turn.session_key) is sentinel
+
+    asyncio.run(go())
 
 
 # ===========================================================================
