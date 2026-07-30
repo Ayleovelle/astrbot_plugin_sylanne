@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import Any
 
 # 逃生舱/调查类工具：Sylanne 是对话人格不是编码 agent，这些是 thrash 温床。
@@ -134,20 +135,44 @@ def gate_tools(request: Any) -> list[str]:
     return removed
 
 
-def inject_contract(request: Any) -> bool:
-    """把交付契约追加到 system_prompt 末尾（最后说的最重）。已含则跳过。返回是否注入。"""
-    current = str(getattr(request, "system_prompt", "") or "")
-    if "[本轮提示]" in current:
+def inject_contract(
+    request: Any,
+    *,
+    add_fragment: Callable[[Any, str, str, str, int], bool] | None = None,
+) -> bool:
+    """Collect the contract as the final transient overlay channel only."""
+
+    if not callable(add_fragment):
         return False
-    request.system_prompt = (current + "\n" + _DELIVERABLE_CONTRACT).strip()
-    return True
+    try:
+        return bool(
+            add_fragment(
+                request,
+                "deliverable",
+                _DELIVERABLE_CONTRACT,
+                "deliverable",
+                0,
+            )
+        )
+    except Exception:
+        return False
 
 
-def apply(event: Any, request: Any, buffer: Any) -> dict[str, Any]:
+def apply(
+    event: Any,
+    request: Any,
+    buffer: Any,
+    *,
+    add_fragment: Callable[[Any, str, str, str, int], bool] | None = None,
+) -> dict[str, Any]:
     """事故 P0-3 总入口：宽门控摘逃生舱工具 + 窄注交付契约。返回处置摘要（可观测/测试）。"""
     sig = detect(event, buffer)
     removed = gate_tools(request) if sig["should_gate"] else []
-    injected = inject_contract(request) if sig["should_contract"] else False
+    injected = (
+        inject_contract(request, add_fragment=add_fragment)
+        if sig["should_contract"]
+        else False
+    )
     return {**sig, "gated_tools": removed, "contract_injected": injected}
 
 

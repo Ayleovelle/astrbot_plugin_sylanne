@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import importlib
 import inspect
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,18 +18,53 @@ if getattr(astrbot, "__version__", None) != "4.26.7":
         allow_module_level=True,
     )
 
-from astrbot.api.star import StarTools
-from astrbot.core.agent.message import TextPart
-from astrbot.core.persona_mgr import PersonaManager
-from astrbot.core.platform.astr_message_event import AstrMessageEvent
-from astrbot.core.star.context import Context
-
-
 def _parameter_names(callable_obj: object) -> list[str]:
     return list(inspect.signature(callable_obj).parameters)
 
 
+def _runtime_contract_api() -> tuple[object, ...]:
+    """Load the pinned runtime only when its optional provider dependencies exist."""
+    try:
+        star = importlib.import_module("astrbot.api.star")
+        message = importlib.import_module("astrbot.core.agent.message")
+        persona_mgr = importlib.import_module("astrbot.core.persona_mgr")
+        event = importlib.import_module("astrbot.core.platform.astr_message_event")
+        entities = importlib.import_module("astrbot.core.provider.entities")
+        gemini = importlib.import_module(
+            "astrbot.core.provider.sources.gemini_source"
+        )
+        context = importlib.import_module("astrbot.core.star.context")
+    except ModuleNotFoundError as exc:
+        if exc.name is None or exc.name.startswith("astrbot"):
+            raise
+        pytest.skip(f"AstrBot runtime dependency is unavailable: {exc.name}")
+
+    return (
+        event.AstrMessageEvent,
+        context.Context,
+        message.Message,
+        persona_mgr.PersonaManager,
+        gemini.ProviderGoogleGenAI,
+        entities.ProviderRequest,
+        star.StarTools,
+        message.TextPart,
+        message.dump_messages_with_checkpoints,
+    )
+
+
 def test_astrbot_v4267_scoped_runtime_contract() -> None:
+    (
+        AstrMessageEvent,
+        Context,
+        _Message,
+        PersonaManager,
+        _ProviderGoogleGenAI,
+        _ProviderRequest,
+        StarTools,
+        TextPart,
+        _dump_messages_with_checkpoints,
+    ) = _runtime_contract_api()
+
     assert callable(StarTools.get_data_dir)
     assert _parameter_names(AstrMessageEvent.get_self_id) == ["self"]
     assert _parameter_names(PersonaManager.resolve_selected_persona) == [
@@ -59,3 +96,56 @@ def test_astrbot_v4267_scoped_runtime_contract() -> None:
 
     metadata = Path(__file__).resolve().parents[2] / "metadata.yaml"
     assert 'tested_astrbot_version: "4.26.7"' in metadata.read_text(encoding="utf-8")
+
+
+def test_astrbot_v4267_temp_text_part_is_current_turn_only() -> None:
+    (
+        _AstrMessageEvent,
+        _Context,
+        Message,
+        _PersonaManager,
+        ProviderGoogleGenAI,
+        ProviderRequest,
+        _StarTools,
+        TextPart,
+        dump_messages_with_checkpoints,
+    ) = _runtime_contract_api()
+
+    system_prompt = "static persona prompt"
+    temporary_overlay = TextPart(text="[sylanne_runtime_overlay] transient").mark_as_temp()
+    request = ProviderRequest(
+        prompt="ordinary user prompt",
+        system_prompt=system_prompt,
+        extra_user_content_parts=[temporary_overlay],
+    )
+
+    assembled = asyncio.run(
+        ProviderGoogleGenAI.assemble_context(
+            SimpleNamespace(),
+            request.prompt,
+            extra_user_content_parts=request.extra_user_content_parts,
+        )
+    )
+    assert assembled == {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "ordinary user prompt"},
+            {"type": "text", "text": "[sylanne_runtime_overlay] transient"},
+        ],
+    }
+    assert request.system_prompt == system_prompt
+
+    persisted = dump_messages_with_checkpoints(
+        [
+            Message(
+                role="user",
+                content=[TextPart(text="ordinary user prompt"), temporary_overlay],
+            )
+        ]
+    )
+    assert persisted == [
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "ordinary user prompt"}],
+        }
+    ]

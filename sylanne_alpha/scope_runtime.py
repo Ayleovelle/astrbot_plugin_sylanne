@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
+from contextlib import contextmanager
+import contextvars
 from dataclasses import dataclass, field
 import inspect
 import math
@@ -29,6 +31,7 @@ from sylanne_alpha.scope_repository import (
     ScopedPersistenceGateway,
 )
 from sylanne_alpha.session_state_store import SessionStateStore
+from sylanne_alpha.transient_context import TransientContextSink
 
 
 class ScopeMismatch(RuntimeError):
@@ -37,6 +40,52 @@ class ScopeMismatch(RuntimeError):
 
 class ScopeUnavailable(ScopeMismatch):
     """Raised when an active path has no verified frozen private scope."""
+
+
+_TRANSIENT_CONTEXT_BINDING_ISSUER = object()
+_UNBOUND_TRANSIENT_CONTEXT_REQUEST = object()
+
+
+class _TransientContextBindingLease:
+    """One registry-issued, revocable request binding capability."""
+
+    __slots__ = ("_registry", "_view", "_request", "_active")
+
+    def __init__(
+        self,
+        _issuer: object | None = None,
+        *,
+        registry: object = None,
+        view: object = None,
+        request: Any = None,
+    ) -> None:
+        if _issuer is not _TRANSIENT_CONTEXT_BINDING_ISSUER:
+            raise TypeError(
+                "transient context binding leases are issued only by ScopeRuntimeRegistry"
+            )
+        self._registry = registry
+        self._view = view
+        self._request = request
+        self._active = True
+
+    def matches(
+        self, registry: object, view: object, request: Any, sink: object
+    ) -> bool:
+        return (
+            self._active is True
+            and self._registry is registry
+            and self._view is view
+            and self._request is request
+            and getattr(view, "transient_context_sink", None) is sink
+        )
+
+    def revoke(self) -> None:
+        self._active = False
+
+
+_ACTIVE_TRANSIENT_CONTEXT_SINK: contextvars.ContextVar[
+    _TransientContextBindingLease | None
+] = contextvars.ContextVar("sylanne_active_transient_context_sink", default=None)
 
 
 PersonaKey = tuple[str, str, int]
@@ -765,6 +814,11 @@ class RequestRuntimeView:
     session_runtime: ScopedSessionRuntime
     relation_runtime: RelationRuntime | None = None
     subject: AuthenticatedSubject | None = None
+    transient_context_sink: TransientContextSink | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if type(self.resolved) is not ResolvedScope or self.resolved.scope is None:
@@ -782,6 +836,8 @@ class RequestRuntimeView:
             raise ValueError("request runtime parent scope mismatch")
         if self.subject is not None and type(self.subject) is not AuthenticatedSubject:
             raise ValueError("subject must be an AuthenticatedSubject or None")
+        if self.transient_context_sink is not None:
+            raise ValueError("transient context sink is registry-issued only")
         if self.subject is None and self.relation_runtime is not None:
             raise ValueError("missing subject cannot carry a relation runtime")
         if self.subject is not None and self.relation_runtime is None:
@@ -844,6 +900,8 @@ class ScopeRuntimeRegistry:
             RequestViewKey,
             RequestRuntimeView,
         ] = OrderedDict()
+        self._transient_context_sinks: dict[RequestViewKey, TransientContextSink] = {}
+        self._transient_context_requests: dict[RequestViewKey, Any] = {}
 
     @property
     def repository(self) -> ScopeRepository | None:
@@ -866,6 +924,8 @@ class ScopeRuntimeRegistry:
             or self._highest_session_generations
             or self._highest_transport_generations
             or self._request_views
+            or self._transient_context_sinks
+            or self._transient_context_requests
         ):
             raise ScopeMismatch("repository binding must precede every runtime")
         if self._repository is repository:
@@ -944,6 +1004,9 @@ class ScopeRuntimeRegistry:
                 return existing
             raise ScopeMismatch("a request runtime view is already issued for this turn")
         self._request_views[key] = view
+        sink = TransientContextSink._issue(self, view)
+        object.__setattr__(view, "transient_context_sink", sink)
+        self._transient_context_sinks[key] = sink
         self._request_views.move_to_end(key)
         session_prefix = key[:5]
         same_session = [
@@ -952,8 +1015,16 @@ class ScopeRuntimeRegistry:
         while len(same_session) > _MAX_REQUEST_VIEWS_PER_SESSION:
             oldest = same_session.pop(0)
             self._request_views.pop(oldest, None)
+            evicted = self._transient_context_sinks.pop(oldest, None)
+            self._transient_context_requests.pop(oldest, None)
+            if evicted is not None:
+                evicted.release()
         while len(self._request_views) > _MAX_REQUEST_VIEWS_GLOBAL:
-            self._request_views.popitem(last=False)
+            oldest, _ = self._request_views.popitem(last=False)
+            evicted = self._transient_context_sinks.pop(oldest, None)
+            self._transient_context_requests.pop(oldest, None)
+            if evicted is not None:
+                evicted.release()
         self._sync_relation_rituals(view)
         return view
 
@@ -967,6 +1038,8 @@ class ScopeRuntimeRegistry:
             return False
         key = self._request_view_key(scope, candidate.resolved.turn_generation)
         if self._request_views.get(key) is not candidate:
+            return False
+        if self._transient_context_sinks.get(key) is not candidate.transient_context_sink:
             return False
         if (
             self._personas.get(_persona_key(scope)) is not candidate.persona_runtime
@@ -990,7 +1063,72 @@ class ScopeRuntimeRegistry:
         if self._request_views.get(key) is not candidate:
             return False
         self._request_views.pop(key, None)
+        sink = self._transient_context_sinks.pop(key, None)
+        self._transient_context_requests.pop(key, None)
+        if sink is not None:
+            sink.release()
         return True
+
+    @contextmanager
+    def bind_transient_context_sink(
+        self,
+        view: RequestRuntimeView,
+        request: Any,
+    ):
+        """Make one issued transient context sink usable for this exact request."""
+
+        if request is None or not self.is_issued_request_view(view):
+            raise ScopeMismatch("an exact issued request view and request are required")
+        scope = view.resolved.scope
+        if scope is None:
+            raise ScopeMismatch("request runtime view has no scope")
+        key = self._request_view_key(scope, view.resolved.turn_generation)
+        sealed_request = self._transient_context_requests.get(
+            key,
+            _UNBOUND_TRANSIENT_CONTEXT_REQUEST,
+        )
+        if sealed_request is _UNBOUND_TRANSIENT_CONTEXT_REQUEST:
+            self._transient_context_requests[key] = request
+        elif sealed_request is not request:
+            raise ScopeMismatch("request runtime view is sealed to another request")
+        sink = view.transient_context_sink
+        if type(sink) is not TransientContextSink:
+            raise ScopeMismatch("request view has no transient context sink")
+        lease = _TransientContextBindingLease(
+            _TRANSIENT_CONTEXT_BINDING_ISSUER,
+            registry=self,
+            view=view,
+            request=request,
+        )
+        token = _ACTIVE_TRANSIENT_CONTEXT_SINK.set(lease)
+        try:
+            yield sink
+        finally:
+            lease.revoke()
+            _ACTIVE_TRANSIENT_CONTEXT_SINK.reset(token)
+
+    def _is_active_transient_context_binding(
+        self,
+        view: object,
+        request: Any,
+        sink: object,
+    ) -> bool:
+        """Validate the current lease without exposing the ContextVar capability."""
+
+        active = _ACTIVE_TRANSIENT_CONTEXT_SINK.get()
+        return bool(
+            type(active) is _TransientContextBindingLease
+            and active.matches(self, view, request, sink)
+            and self.is_issued_request_view(view)
+            and view.resolved.scope is not None
+            and self._transient_context_requests.get(
+                self._request_view_key(
+                    view.resolved.scope,
+                    view.resolved.turn_generation,
+                )
+            )
+            is request
+        )
 
     @staticmethod
     def _sync_relation_rituals(view: RequestRuntimeView) -> None:
@@ -1351,6 +1489,10 @@ class ScopeRuntimeRegistry:
         self._sessions.pop(session_key, None)
         for key in [item for item in self._request_views if item[:5] == session_key]:
             self._request_views.pop(key, None)
+            sink = self._transient_context_sinks.pop(key, None)
+            self._transient_context_requests.pop(key, None)
+            if sink is not None:
+                sink.release()
         self._drop_unused_transport_generation_fence(transport_identity)
         latest_key = (persona_key, scope.storage_token)
         current_key = self._latest_sessions.get(latest_key)
@@ -1402,6 +1544,10 @@ class ScopeRuntimeRegistry:
             self._sessions.pop(session_key, None)
         for request_key in [item for item in self._request_views if item[:3] == key]:
             self._request_views.pop(request_key, None)
+            sink = self._transient_context_sinks.pop(request_key, None)
+            self._transient_context_requests.pop(request_key, None)
+            if sink is not None:
+                sink.release()
         for latest_key in [item for item in self._latest_sessions if item[0] == key]:
             self._latest_sessions.pop(latest_key, None)
         for generation_key in [item for item in self._highest_session_generations if item[0] == key]:
@@ -1498,5 +1644,6 @@ __all__ = [
     "ScopeUnavailable",
     "ScopedSessionRuntime",
     "ScopedSessionLifecycle",
+    "TransientContextSink",
     "TransportRuntimeOwner",
 ]

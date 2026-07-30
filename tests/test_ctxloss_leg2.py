@@ -31,7 +31,12 @@ from sylanne_alpha.memory_system import (
     RecallMode,
     _normalized_dedup_sig,
 )
+from sylanne_alpha import transient_context
+from sylanne_alpha.scope_contracts import ResolvedScope
+from sylanne_alpha.scope_identity import PersonaSource
+from sylanne_alpha.scope_runtime import ScopeRuntimeRegistry
 from sylanne_alpha.session_state_store import SessionStateStore
+from tests.scope_fixtures import scopes as build_scopes
 
 
 # ===========================================================================
@@ -305,54 +310,99 @@ def _assemble_stub_plugin():
     p._start_life_simulator = lambda: None
     p._start_webui_if_enabled = lambda: None
 
-    def _append_temp_text_part(request, text, source="", budget=None):
-        cur = str(getattr(request, "system_prompt", "") or "")
-        request.system_prompt = f"{cur}\n{text}".strip()
-        return True
-
-    p._append_temp_text_part = _append_temp_text_part
     return p
 
 
-def _assemble(base_len, sys_prompt, *, memory="", unfinished="", state="[感知]我此刻心情不错"):
+class _FrameworkTextPart:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self._no_save = False
+
+    def mark_as_temp(self) -> "_FrameworkTextPart":
+        self._no_save = True
+        return self
+
+
+def _issued_view(registry: ScopeRuntimeRegistry):
+    scope = build_scopes.__wrapped__().bot_a_persona_a
+    return registry.issue_request_view(
+        ResolvedScope(
+            scope=scope,
+            persona_source=PersonaSource(
+                persona_id="ctxloss-fixture",
+                prompt="static persona",
+                begin_dialogs=(),
+                tools=None,
+                skills=None,
+                resolution_source="test",
+            ),
+            identity_quality="event_self_id",
+            resolution_source="test",
+            resolved_at_ms=1,
+            private_scope_enabled=True,
+            disabled_reason=None,
+            turn_generation=1,
+        ),
+        subject=None,
+        relation_runtime=None,
+    )
+
+
+def _assemble(monkeypatch, sys_prompt, *, memory="", unfinished="", state="[感知]我此刻心情不错"):
     pipe = LLMRequestPipeline(_assemble_stub_plugin())
     req = SimpleNamespace(
         system_prompt=sys_prompt,
         contexts=[{"role": "user", "content": "在吗"}],
         prompt="在吗",
+        extra_user_content_parts=[],
     )
-    contexts_before = list(req.contexts)
-    pipe._assemble_final_prompt(
-        request=req, session_key="s", budget=SimpleNamespace(compat_mode=""),
-        gap_seconds=30.0, current_prompt=sys_prompt, time_fragment="",
-        message_text="在吗", state_fragment=state,
-        unfinished_fragment=unfinished, outreach_fragment="",
-        memory_fragment=memory, base_system_prompt_len=base_len,
-    )
+    system_prompt = req.system_prompt
+    prompt = req.prompt
+    contexts = req.contexts
+    contexts_before = [dict(item) for item in contexts]
+    monkeypatch.setattr(transient_context, "_make_text_part", _FrameworkTextPart)
+    registry = ScopeRuntimeRegistry.for_test()
+    view = _issued_view(registry)
+    sink = view.transient_context_sink
+    pipe._p._add_transient_context = sink.add
+    with registry.bind_transient_context_sink(view, req):
+        assert sink.set_budget(req, 1_200) is True
+        pipe._assemble_final_prompt(
+            request=req, session_key="s", budget=SimpleNamespace(compat_mode=""),
+            gap_seconds=30.0, current_prompt=req.prompt, time_fragment="",
+            message_text="在吗", state_fragment=state,
+            unfinished_fragment=unfinished, outreach_fragment="",
+            memory_fragment=memory,
+        )
+        assert sink.commit(req) is True
+
+    assert req.system_prompt is system_prompt
+    assert req.prompt is prompt
+    assert req.contexts is contexts
+    assert req.contexts == contexts_before
+    assert len(req.extra_user_content_parts) == 1
+    assert req.extra_user_content_parts[0]._no_save is True
     return req, contexts_before
 
 
-def test_absolute_cap_inert_when_base_len_none():
-    """base_system_prompt_len=None（单测直调）→ 不封顶，happy path 字节不变。"""
-    # 巨量 memory + 无 base_len：应按原 _compute_injection_budget 走，不被绝对封顶收紧
-    req, _ = _assemble(None, "你是苏思澜。", memory="记忆" * 400)
-    # inner_context 里应含记忆槽（未被绝对封顶抹掉；具体裁剪仍由 _allocate_and_trim 管）
-    assert "感知" in req.system_prompt  # state 一定在
+def test_absolute_cap_inert_when_base_len_none(monkeypatch):
+    """动态层不再借 system_prompt；高优 state 仍进入临时 TextPart。"""
+    req, _ = _assemble(monkeypatch, "你是苏思澜。", memory="记忆" * 400)
+    overlay = req.extra_user_content_parts[0].text
+    assert "感知" in overlay
 
 
-def test_absolute_cap_trims_low_priority_first_and_protects_state():
-    """病态超注入：绝对封顶收紧 Layer-2，先砍低优先级(memory/unfinished)，state/感知 必存活。"""
-    # 预先塞一大坨已注入内容（模拟 v2core [心象] 病态膨胀），base_len 记 pristine 长度
+def test_absolute_cap_trims_low_priority_first_and_protects_state(monkeypatch):
+    """紧预算下 state 仍优先进入唯一的临时 TextPart。"""
     pristine = "你是苏思澜。"
-    bloated = pristine + ("霸" * 4000)  # 已注入 4000 字，逼近/超过 ceiling
+    bloated = pristine + ("霸" * 4000)
     req, ctx_before = _assemble(
-        len(pristine), bloated,
+        monkeypatch, bloated,
         memory="记忆线索" * 200, unfinished="未说完" * 200,
         state="[感知]我此刻心情不错",
     )
-    # state/感知 槽必须存活（floor 保护，绝不静默清零）
-    assert "感知" in req.system_prompt, "最高优先级 state/感知 槽被绝对封顶饿死了"
-    # request.contexts 绝不被本路径改动（历史稀释墓碑纪律）
+    overlay = req.extra_user_content_parts[0].text
+    assert "感知" in overlay, "最高优先级 state/感知 槽被硬预算饿死了"
     assert req.contexts == ctx_before
 
 

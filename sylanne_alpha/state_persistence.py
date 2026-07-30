@@ -2877,7 +2877,7 @@ class StatePersistence:
         persona_mgr = getattr(context, "persona_manager", None)
         if persona_mgr is not None:
             logger.info(
-                "Sylanne: AstrBot PersonaManager detected, personality sync enabled"
+                "Sylanne: AstrBot PersonaManager detected, static persona source available"
             )
         return persona_mgr
 
@@ -2885,89 +2885,6 @@ class StatePersistence:
         """检查 AstrBot PersonaManager 是否可用。"""
         return getattr(self._p, "_persona_mgr", None) is not None
 
-    def sync_personality_to_persona_mgr(self, session_key: str) -> None:
-        """将 Sylanne 人格状态同步到 AstrBot 的 PersonaManager。
-
-        在人格漂移更新后调用，创建或更新 Sylanne persona 条目，
-        使 AstrBot 的 persona 系统感知当前人格状态。
-
-        Args:
-            session_key: 会话标识。
-        """
-        p = self._p
-        persona_mgr = getattr(p, "_persona_mgr", None)
-        if persona_mgr is None:
-            return
-        try:
-            host = p._store.hosts.get(session_key)
-            if not host:
-                return
-            personality = (
-                host.kernel._personality()
-                if hasattr(host.kernel, "_personality")
-                else {}
-            )
-            if not personality or not isinstance(personality, dict):
-                return
-
-            traits = personality.get("traits", {})
-            voice = personality.get("voice", {})
-
-            trait_lines = []
-            for k, v in traits.items():
-                if isinstance(v, (int, float)):
-                    trait_lines.append(f"{k}={v:.3f}")
-                elif isinstance(v, dict) and "value" in v:
-                    trait_lines.append(f"{k}={v['value']:.3f}")
-            trait_summary = ", ".join(trait_lines) if trait_lines else "default"
-
-            safe_sk = self._safe_session_key(session_key)
-            persona_id = f"sylanne_embodiment_{safe_sk}"
-            system_prompt = (
-                f"[Sylanne Personality State]\n"
-                f"Traits: {trait_summary}\n"
-                f"Voice: {voice if voice else 'default'}"
-            )
-
-            import asyncio
-            import inspect
-
-            async def _do_sync() -> None:
-                try:
-                    existing = persona_mgr.get_persona(persona_id)
-                    if inspect.isawaitable(existing):
-                        existing = await existing
-                    if existing:
-                        ret = persona_mgr.update_persona(persona_id, system_prompt=system_prompt)
-                        if inspect.isawaitable(ret):
-                            await ret
-                    else:
-                        ret = persona_mgr.create_persona(
-                            persona_id=persona_id,
-                            system_prompt=system_prompt,
-                            begin_dialogs=[],
-                            tools=None,
-                        )
-                        if inspect.isawaitable(ret):
-                            await ret
-                except Exception:
-                    try:
-                        ret = persona_mgr.create_persona(
-                            persona_id=persona_id,
-                            system_prompt=system_prompt,
-                        )
-                        if inspect.isawaitable(ret):
-                            await ret
-                    except Exception:
-                        pass
-
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(_do_sync())
-            except RuntimeError:
-                pass
-        except Exception as e:
-            logger.debug(f"Sylanne: PersonaManager sync failed: {e}")
 
     # ------------------------------------------------------------------
     # Provider ID 解析

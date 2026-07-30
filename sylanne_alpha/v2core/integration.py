@@ -4,7 +4,7 @@
 
   on_llm_request（main.py 钩子）
     └→ apply_v2core_request：PERCEPT（只读）
-         ├→ 心象片段 → request.system_prompt（她的认知影响她说什么——主动脉）
+         ├→ 心象片段 → request-local transient TextPart（她的认知影响她说什么——主动脉）
          ├→ 评价 assessment 暂存 → 请求管线在 host.on_request(assessment=…)
          │   合并入体（consume_pending_assessment；SDK 唯一 assessment 入口，零额外 tick）
          └→ ctx 暂存，response 阶段续用
@@ -1100,18 +1100,30 @@ def _user_text(plugin: Any, event: Any) -> str:
 # 阶段一：request 钩子（PERCEPT + 心象注入 + 评价暂存）
 # ===========================================================================
 
-async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
-    """LLM 请求前的认知阶段。只读（不 tick 不写域），任何异常吞掉不阻断请求。"""
+async def apply_v2core_request(
+    plugin: Any,
+    event: Any,
+    request: Any,
+    *,
+    defer_overlay: bool = False,
+) -> list[tuple[str, str, str, int]]:
+    """Run PERCEPT now and optionally return its low-priority overlay fragments.
+
+    PERCEPT and assessment state must stay in Step 0.  Only the eventual
+    TextPart admission is deferred so the request pipeline can admit its
+    higher-priority state slots first under one hard overlay budget.
+    """
+    overlays: list[tuple[str, str, str, int]] = []
     if request is None or _is_cron_event(event):
-        return
+        return overlays
     try:
         runtime_context = _runtime_context_for_event(plugin, event)
         if runtime_context is None:
-            return
+            return overlays
         scope, session_key, rt = runtime_context
         text = _user_text(plugin, event)
         if not text.strip():
-            return
+            return overlays
         await _ensure_loaded(plugin, scope if scope is not None else session_key, rt)
 
         ctx = rt["runner"].run_percept_stage(
@@ -1228,20 +1240,17 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
 
         _apply_winddown_window_scratch(ctx, rt)
 
-        # 心象片段 → system prompt（主动脉：认知影响言语）
+        # 心象片段 → request-local transient TextPart（主动脉：认知影响言语）
         from sylanne_alpha.v2core.fragment import build_mind_fragment
         frag = build_mind_fragment(ctx, rt["domains"])
         rt["last_fragment"] = frag   # 可观测留痕（WebUI 认知核页：LLM 看到什么，用户也看到什么）
         if frag:
-            appender = getattr(
-                getattr(plugin, "_llm_response_pipeline", None),
-                "_append_request_prompt_fragment", None,
-            )
-            if callable(appender):
-                appender(request, frag)
+            if defer_overlay:
+                overlays.append(("v2_mind", frag, "v2core", 30))
             else:
-                current = str(getattr(request, "system_prompt", "") or "")
-                request.system_prompt = f"{current}\n{frag}".strip()
+                add = getattr(plugin, "_add_transient_context", None)
+                if callable(add):
+                    add(request, "v2_mind", frag, "v2core", 30)
             logger.debug("Sylanne v2core mind fragment injected: session=%s chars=%d",
                          session_key, len(frag))
 
@@ -1270,15 +1279,12 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
                     pass
                 es_block = await es_bridge.consume_state_block(es_skey)
                 if es_block:
-                    appender = getattr(
-                        getattr(plugin, "_llm_response_pipeline", None),
-                        "_append_request_prompt_fragment", None,
-                    )
-                    if callable(appender):
-                        appender(request, es_block)
+                    if defer_overlay:
+                        overlays.append(("emotion_spirit", es_block, "v2core", 35))
                     else:
-                        current = str(getattr(request, "system_prompt", "") or "")
-                        request.system_prompt = f"{current}\n{es_block}".strip()
+                        add = getattr(plugin, "_add_transient_context", None)
+                        if callable(add):
+                            add(request, "emotion_spirit", es_block, "v2core", 35)
                     logger.debug(
                         "Sylanne emotion_spirit state injected: session=%s chars=%d",
                         es_skey, len(es_block))
@@ -1290,6 +1296,7 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
             logger.debug("Sylanne emotion_spirit consume skipped: %s", _esx)
     except Exception as exc:  # noqa: BLE001
         logger.error("Sylanne v2core request stage failed（继续请求管线）: %s", exc, exc_info=True)
+    return overlays
 
 
 def consume_pending_assessment(

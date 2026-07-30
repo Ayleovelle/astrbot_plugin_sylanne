@@ -24,7 +24,11 @@ from __future__ import annotations
 import asyncio
 import tempfile
 
+from sylanne_alpha import transient_context
 from sylanne_alpha.realtime_dispatch import DeliberateSilence
+from sylanne_alpha.scope_contracts import ResolvedScope
+from sylanne_alpha.scope_identity import PersonaSource
+from sylanne_alpha.scope_runtime import ScopeRuntimeRegistry
 from sylanne_alpha.v2core import fragment as frag_mod
 from sylanne_alpha.v2core import integration as ig
 from sylanne_alpha.v2core.behavior import _act_winddown, select_behavior
@@ -36,6 +40,7 @@ from sylanne_alpha.v2core.capabilities.ignition import (
 )
 from sylanne_alpha.v2core.contracts import BeatContext, BodySnapshot, Intent, Phase
 from sylanne_alpha.v2core.domains.emotion import EmotionLedger
+from tests.scope_fixtures import scopes as build_scopes
 
 
 def _body(**kw) -> BodySnapshot:
@@ -419,6 +424,65 @@ class _Event:
         return "u1"
 
 
+class _FrameworkTextPart:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self._no_save = False
+
+    def mark_as_temp(self) -> "_FrameworkTextPart":
+        self._no_save = True
+        return self
+
+
+def _issued_view(registry: ScopeRuntimeRegistry):
+    scope = build_scopes.__wrapped__().bot_a_persona_a
+    return registry.issue_request_view(
+        ResolvedScope(
+            scope=scope,
+            persona_source=PersonaSource(
+                persona_id="winddown-fixture",
+                prompt="static persona",
+                begin_dialogs=(),
+                tools=None,
+                skills=None,
+                resolution_source="test",
+            ),
+            identity_quality="event_self_id",
+            resolution_source="test",
+            resolved_at_ms=1,
+            private_scope_enabled=True,
+            disabled_reason=None,
+            turn_generation=1,
+        ),
+        subject=None,
+        relation_runtime=None,
+    )
+
+
+def _prepare_transient_request(monkeypatch):
+    class _Req:
+        system_prompt = "static persona"
+        prompt = "在吗"
+        contexts = [{"role": "user", "content": "在吗"}]
+        extra_user_content_parts: list[object] = []
+
+    request = _Req()
+    request.system_prompt = "static persona"
+    request.prompt = "在吗"
+    request.contexts = [{"role": "user", "content": "在吗"}]
+    request.extra_user_content_parts = []
+    snapshot = (
+        request.system_prompt,
+        request.prompt,
+        request.contexts,
+        [dict(item) for item in request.contexts],
+    )
+    monkeypatch.setattr(transient_context, "_make_text_part", _FrameworkTextPart)
+    registry = ScopeRuntimeRegistry.for_test()
+    view = _issued_view(registry)
+    return request, snapshot, registry, view, view.transient_context_sink
+
+
 class TestSoftenAndAcknowledgeEndToEnd:
     def test_softened_silence_speaks_minimal_and_records_last_silent(self) -> None:
         plugin = _make_host_plugin(config={
@@ -455,7 +519,7 @@ class TestSoftenAndAcknowledgeEndToEnd:
         assert resp.completion_text == ""
         assert rt["last_silent"]["reason"] == "digesting"
 
-    def test_last_silent_cue_surfaces_next_turn_fragment(self) -> None:
+    def test_last_silent_cue_surfaces_next_turn_fragment(self, monkeypatch) -> None:
         """③：上一轮软化沉默后，下一轮 apply_v2core_request 的 ctx 心象带认账线索。"""
         plugin = _make_host_plugin(config={
             "sylanne_enable_v2core": True,
@@ -469,17 +533,27 @@ class TestSoftenAndAcknowledgeEndToEnd:
         asyncio.run(ig.apply_v2core_response(plugin, _Event(), resp))
         assert rt["last_silent"]["reason"] == "content"
 
-        class _Req:
-            system_prompt = ""
+        req, snapshot, registry, view, sink = _prepare_transient_request(monkeypatch)
+        plugin._add_transient_context = sink.add
 
-        req = _Req()
-        asyncio.run(ig.apply_v2core_request(plugin, _Event(), req))
+        async def request_stage() -> None:
+            with registry.bind_transient_context_sink(view, req):
+                assert sink.set_budget(req, 1_200) is True
+                await ig.apply_v2core_request(plugin, _Event(), req)
+                assert sink.commit(req) is True
+
+        asyncio.run(request_stage())
         pending_ctx = rt["pending"]["ctx"]
         assert pending_ctx.scratch.get("last_silent_cue") == "content"
         # 一次性：用过就清
         assert rt["last_silent"] is None
-        # 真的渲染进心象片段（fragment 端到端）
-        assert "刚才看到消息了" in (req.system_prompt or "")
+        assert req.system_prompt is snapshot[0]
+        assert req.prompt is snapshot[1]
+        assert req.contexts is snapshot[2]
+        assert req.contexts == snapshot[3]
+        assert len(req.extra_user_content_parts) == 1
+        assert req.extra_user_content_parts[0]._no_save is True
+        assert "刚才看到消息了" in req.extra_user_content_parts[0].text
 
     def test_config_off_soften_is_pure_noop(self) -> None:
         """两开关都关：即便强制 hold，也应是原样 SILENT，rt 里不出现 last_silent。"""
@@ -757,7 +831,7 @@ class _FakeLifeSimForWinddown:
 
 
 class TestWinddownEndToEnd:
-    def test_winddown_fires_opens_window_and_biases_same_turn(self) -> None:
+    def test_winddown_fires_opens_window_and_biases_same_turn(self, monkeypatch) -> None:
         plugin = _make_host_plugin(config={
             "sylanne_enable_v2core": True,
             "sylanne_alpha_winddown_enabled": True,
@@ -765,11 +839,16 @@ class TestWinddownEndToEnd:
         plugin._life_simulator = _FakeLifeSimForWinddown()
         plugin._realtime_dispatch = _CapturingScheduler()
 
-        class _Req:
-            system_prompt = ""
+        req, snapshot, registry, view, sink = _prepare_transient_request(monkeypatch)
+        plugin._add_transient_context = sink.add
 
-        req = _Req()
-        asyncio.run(ig.apply_v2core_request(plugin, _Event(), req))
+        async def request_stage() -> None:
+            with registry.bind_transient_context_sink(view, req):
+                assert sink.set_budget(req, 1_200) is True
+                await ig.apply_v2core_request(plugin, _Event(), req)
+                assert sink.commit(req) is True
+
+        asyncio.run(request_stage())
 
         rt = ig._runtime_for(plugin, "u1")
         assert rt.get("winddown_until") is not None
@@ -777,7 +856,13 @@ class TestWinddownEndToEnd:
         pending_ctx = rt["pending"]["ctx"]
         assert pending_ctx.scratch.get("winddown_active") is True
         assert pending_ctx.scratch.get("winddown_hold_bias", 0.0) > 0.0
-        assert "先去忙" in (req.system_prompt or "") or "收个尾" in (req.system_prompt or "")
+        assert req.system_prompt is snapshot[0]
+        assert req.prompt is snapshot[1]
+        assert req.contexts is snapshot[2]
+        assert req.contexts == snapshot[3]
+        assert len(req.extra_user_content_parts) == 1
+        assert req.extra_user_content_parts[0]._no_save is True
+        assert "先去忙" in req.extra_user_content_parts[0].text or "收个尾" in req.extra_user_content_parts[0].text
 
     def test_config_off_never_touches_winddown_state(self) -> None:
         plugin = _make_host_plugin(config={"sylanne_enable_v2core": True})
@@ -793,7 +878,7 @@ class TestWinddownEndToEnd:
         assert rt.get("winddown_until") is None
         assert plugin._realtime_dispatch.scheduled == []
 
-    def test_return_cue_surfaces_after_window_expires(self) -> None:
+    def test_return_cue_surfaces_after_window_expires(self, monkeypatch) -> None:
         plugin = _make_host_plugin(config={
             "sylanne_enable_v2core": True,
             "sylanne_alpha_winddown_enabled": True,
@@ -810,15 +895,26 @@ class TestWinddownEndToEnd:
         rt["winddown_until"] = 1.0   # 远早于 time.time()
         rt["winddown_return_notified"] = False
 
-        class _Req:
-            system_prompt = ""
+        req, snapshot, registry, view, sink = _prepare_transient_request(monkeypatch)
+        plugin._add_transient_context = sink.add
 
-        req = _Req()
-        asyncio.run(ig.apply_v2core_request(plugin, _Event(), req))
+        async def request_stage() -> None:
+            with registry.bind_transient_context_sink(view, req):
+                assert sink.set_budget(req, 1_200) is True
+                await ig.apply_v2core_request(plugin, _Event(), req)
+                assert sink.commit(req) is True
+
+        asyncio.run(request_stage())
         pending_ctx = rt["pending"]["ctx"]
         assert pending_ctx.scratch.get("winddown_return_cue") is True
         assert rt["winddown_return_notified"] is True
-        assert "刚把手头那件事收了尾" in (req.system_prompt or "")
+        assert req.system_prompt is snapshot[0]
+        assert req.prompt is snapshot[1]
+        assert req.contexts is snapshot[2]
+        assert req.contexts == snapshot[3]
+        assert len(req.extra_user_content_parts) == 1
+        assert req.extra_user_content_parts[0]._no_save is True
+        assert "刚把手头那件事收了尾" in req.extra_user_content_parts[0].text
 
     def test_dispatch_modulators_get_extra_predelay_during_window(self) -> None:
         ctx = _ctx(_body(), scratch={"winddown_hold_bias": 0.30})

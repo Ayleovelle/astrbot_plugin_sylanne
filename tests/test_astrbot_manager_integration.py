@@ -12,6 +12,12 @@ import importlib
 import unittest
 from types import SimpleNamespace
 
+from sylanne_alpha import transient_context
+from sylanne_alpha.scope_contracts import ResolvedScope
+from sylanne_alpha.scope_identity import PersonaSource
+from sylanne_alpha.scope_runtime import ScopeRuntimeRegistry
+from tests.scope_fixtures import scopes as build_scopes
+
 
 class FakeConversationManager:
     """Mock AstrBot ConversationManager with the official API surface."""
@@ -48,14 +54,18 @@ class FakePersonaManager:
 
     def __init__(self):
         self.personas: dict[str, dict] = {}
+        self.create_calls = 0
+        self.update_calls = 0
 
     def get_persona(self, persona_id: str):
         return self.personas.get(persona_id)
 
     def create_persona(self, persona_id: str, system_prompt: str = "", **kwargs):
+        self.create_calls += 1
         self.personas[persona_id] = {"system_prompt": system_prompt, **kwargs}
 
     def update_persona(self, persona_id: str, system_prompt: str = "", **kwargs):
+        self.update_calls += 1
         if persona_id in self.personas:
             self.personas[persona_id]["system_prompt"] = system_prompt
 
@@ -130,94 +140,64 @@ class TestConversationManagerIntegration(unittest.TestCase):
         asyncio.run(plugin._sync_message_to_conv_mgr("session:1", "user", "hello"))
 
 
-class TestPersonaManagerIntegration(unittest.TestCase):
-    def _make_plugin(self, persona_mgr=None, config=None):
-        main = importlib.import_module("main")
-        ctx = SimpleNamespace()
-        if persona_mgr is not None:
-            ctx.persona_manager = persona_mgr
-        cfg = config or {}
-        return main.EmotionalStatePlugin(context=ctx, config=cfg)
+class _FrameworkTextPart:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self._no_save = False
 
-    def test_sync_personality_creates_persona_entry(self):
-        persona_mgr = FakePersonaManager()
-        plugin = self._make_plugin(persona_mgr=persona_mgr)
-        # Initialize a host so personality data is available
-        asyncio.run(
-            plugin.observe_request(
-                "room:persona",
-                text="test",
-                confidence=0.7,
-                flags=["safe"],
-                now=1.0,
-            )
-        )
-        # observe_request already triggers sync; check result
-        self.assertGreater(len(persona_mgr.personas), 0)
-        persona_id = list(persona_mgr.personas.keys())[0]
-        self.assertIn(
-            "Sylanne Personality State",
-            persona_mgr.personas[persona_id]["system_prompt"],
-        )
+    def mark_as_temp(self) -> "_FrameworkTextPart":
+        self._no_save = True
+        return self
 
-    def test_sync_personality_updates_existing_persona(self):
-        persona_mgr = FakePersonaManager()
-        plugin = self._make_plugin(persona_mgr=persona_mgr)
-        asyncio.run(
-            plugin.observe_request(
-                "room:p2",
-                text="test",
-                confidence=0.7,
-                flags=["safe"],
-                now=1.0,
-            )
-        )
-        count_after_first = len(persona_mgr.personas)
-        # Second observe triggers another sync (update, not create)
-        asyncio.run(
-            plugin.observe_request(
-                "room:p2",
-                text="again",
-                confidence=0.7,
-                flags=["safe"],
-                now=2.0,
-            )
-        )
-        self.assertEqual(len(persona_mgr.personas), count_after_first)
 
-    def test_sync_does_not_crash_when_persona_mgr_is_none(self):
-        plugin = self._make_plugin()
-        plugin._sync_personality_to_persona_mgr("room:x")
+def test_bound_request_never_creates_or_updates_persona_manager(monkeypatch):
+    main = importlib.import_module("main")
+    persona_mgr = FakePersonaManager()
+    plugin = main.EmotionalStatePlugin(
+        context=SimpleNamespace(persona_manager=persona_mgr), config={}
+    )
+    registry = ScopeRuntimeRegistry.for_test()
+    plugin._scope_runtime_registry = registry
+    scope = build_scopes.__wrapped__().bot_a_persona_a
+    view = registry.issue_request_view(
+        ResolvedScope(
+            scope=scope,
+            persona_source=PersonaSource(
+                persona_id="manager-test",
+                prompt="static persona",
+                begin_dialogs=(),
+                tools=None,
+                skills=None,
+                resolution_source="test",
+            ),
+            identity_quality="event_self_id",
+            resolution_source="test",
+            resolved_at_ms=1,
+            private_scope_enabled=True,
+            disabled_reason=None,
+            turn_generation=1,
+        ),
+        subject=None,
+        relation_runtime=None,
+    )
+    request = SimpleNamespace(
+        system_prompt="static persona",
+        prompt="actual user words",
+        contexts=[{"role": "user", "content": "actual user words"}],
+        extra_user_content_parts=[],
+    )
+    monkeypatch.setattr(transient_context, "_make_text_part", _FrameworkTextPart)
 
-    def test_sync_does_not_crash_when_no_host(self):
-        persona_mgr = FakePersonaManager()
-        plugin = self._make_plugin(persona_mgr=persona_mgr)
-        plugin._sync_personality_to_persona_mgr("nonexistent_session")
-        self.assertEqual(len(persona_mgr.personas), 0)
+    with plugin._bind_request_runtime_view(view, request=request):
+        assert plugin._set_transient_context_budget(request, 1_000) is True
+        assert plugin._add_transient_context(
+            request, "state", "present", "test", 20
+        ) is True
+        assert plugin._commit_transient_context(request) is True
 
-    def test_observe_response_triggers_persona_sync(self):
-        persona_mgr = FakePersonaManager()
-        plugin = self._make_plugin(persona_mgr=persona_mgr)
-        asyncio.run(
-            plugin.observe_request(
-                "room:resp",
-                text="hi",
-                confidence=0.7,
-                flags=["safe"],
-                now=1.0,
-            )
-        )
-        persona_mgr.personas.clear()
-        asyncio.run(
-            plugin.observe_response(
-                "room:resp",
-                text="hello",
-                confidence=0.8,
-                flags=["safe"],
-                now=2.0,
-            )
-        )
-        self.assertGreater(len(persona_mgr.personas), 0)
+    assert persona_mgr.personas == {}
+    assert persona_mgr.create_calls == 0
+    assert persona_mgr.update_calls == 0
 
 
 class TestIntegrationFallback(unittest.TestCase):

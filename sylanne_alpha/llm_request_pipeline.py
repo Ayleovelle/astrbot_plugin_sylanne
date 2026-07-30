@@ -318,6 +318,18 @@ def _format_inner_context(trimmed: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
+def _format_context_slot(slot_name: str, text: str) -> str:
+    """Preserve the former per-slot wording inside a separately tagged overlay."""
+
+    label = _SLOT_LABELS.get(slot_name, slot_name)
+    if slot_name == "state":
+        return (
+            f"[{label}] 这是我自己此刻的感受，融进语气自然带出，"
+            f"不是要念出来的播报：{text}"
+        )
+    return f"[{label}] {text}"
+
+
 def _ctx_role(m: Any) -> str:
     return m.get("role", "") if isinstance(m, dict) else str(getattr(m, "role", "") or "")
 
@@ -778,6 +790,43 @@ class LLMRequestPipeline:
 
         return getattr(self._p, "_scope_runtime_registry", None) is not None
 
+    def _add_transient_context(
+        self,
+        request: Any,
+        channel: str,
+        text: str,
+        source: str,
+        priority: int,
+        lifecycle: str = "turn",
+    ) -> bool:
+        """Route dynamic request text through the sealed TextPart sink only."""
+
+        add = getattr(self._p, "_add_transient_context", None)
+        if not callable(add):
+            return False
+        try:
+            return bool(add(request, channel, text, source, priority, lifecycle))
+        except Exception:
+            return False
+
+    def _commit_transient_context(self, request: Any) -> bool:
+        commit = getattr(self._p, "_commit_transient_context", None)
+        if not callable(commit):
+            return False
+        try:
+            return bool(commit(request))
+        except Exception:
+            return False
+
+    def _set_transient_context_budget(self, request: Any, max_chars: int) -> bool:
+        set_budget = getattr(self._p, "_set_transient_context_budget", None)
+        if not callable(set_budget):
+            return False
+        try:
+            return bool(set_budget(request, max_chars))
+        except Exception:
+            return False
+
     def _take_amnesia_pending(self, session_key: str) -> bool:
         """Consume only the current bound session's one-shot amnesia cue."""
 
@@ -842,9 +891,15 @@ class LLMRequestPipeline:
             logger.debug("Sylanne _most_recent_intimate_host_key failed: %s", exc)
             return ""
 
-    def _cache_system_prompt(self, request: Any, session_key: str) -> None:
-        """按 session 缓存最近一次非空 system prompt，供生命模拟器复用。"""
-        system_prompt = str(getattr(request, "system_prompt", "") or "").strip()
+    def _cache_system_prompt(self, session_key: str) -> None:
+        """Cache only the exact bound view's authoritative persona source."""
+
+        getter = getattr(self._p, "_bound_runtime", None)
+        binding = getter() if callable(getter) else None
+        view = getattr(binding, "request_runtime_view", None)
+        resolved = getattr(view, "resolved", None)
+        persona_source = getattr(resolved, "persona_source", None)
+        system_prompt = str(getattr(persona_source, "prompt", "") or "").strip()
         if system_prompt:
             self._p._cached_system_prompts[session_key] = system_prompt
 
@@ -1332,16 +1387,22 @@ class LLMRequestPipeline:
           5. Prompt 组装 → _assemble_final_prompt
         """
         p = self._p
+        if request is None:
+            return
 
-        # leg-2(c)：在任何动态注入（v2core [心象] / Layer-1 / Layer-2）之前，先抓 pristine
-        # 人格 system_prompt 长度，供 _assemble_final_prompt 计算"已注入量"做绝对封顶。
-        _pristine_sys_len = len(str(getattr(request, "system_prompt", "") or ""))
+        # Cache only the bound view's static persona before PERCEPT can read or
+        # prepare any request-local runtime state.  Dynamic overlay text never
+        # enters this session cache.
+        self._cache_system_prompt(session_key)
 
         # Step 0: v2core PERCEPT（碎片合并/SFPD 之后，文本与是否应答已确定）
+        v2_overlay_fragments: list[tuple[str, str, str, int]] = []
         try:
             from sylanne_alpha.v2core.integration import apply_v2core_request
 
-            await apply_v2core_request(p, event, request)
+            v2_overlay_fragments = await apply_v2core_request(
+                p, event, request, defer_overlay=True
+            )
         except Exception as exc:
             logger.error(
                 "Sylanne v2core request stage error: %s", exc, exc_info=True
@@ -1350,17 +1411,20 @@ class LLMRequestPipeline:
         # Step 0.5: 交付模式门控（2026-06-15 事故 P0-3）。两档独立粒度：
         #   宽——本轮无附件即摘代码执行逃生舱工具（防 thrash，纯聊天用不到）；
         #   窄——仅纠正链注交付契约（压住人设反任务取向）。
-        # 放在 v2core 注入之后：契约追加到 system_prompt 末尾，最后说的最重，盖过 _PRESENCE。
+        # 工具门控必须早于主调用；交付契约的 TextPart admission 留到 Step 2，
+        # 在硬预算建立后以 priority=0 预留，最终仍由 channel 顺序渲染在最后。
+        deliverable_contract_pending = False
         try:
             from sylanne_alpha import deliverable_mode
 
             buf = p._store.conversation_buffers.get(session_key)
             outcome = deliverable_mode.apply(event, request, buf)
-            if outcome.get("gated_tools") or outcome.get("contract_injected"):
+            deliverable_contract_pending = bool(outcome.get("should_contract"))
+            if outcome.get("gated_tools") or deliverable_contract_pending:
                 logger.info(
-                    "Sylanne deliverable mode: session=%s gated=%s contract=%s",
+                    "Sylanne deliverable mode: session=%s gated=%s contract_pending=%s",
                     session_key, outcome.get("gated_tools"),
-                    outcome.get("contract_injected"),
+                    deliverable_contract_pending,
                 )
         except Exception as exc:
             logger.error(
@@ -1375,10 +1439,33 @@ class LLMRequestPipeline:
         if request is None:
             return
 
-        # Step 2: 预算计算
+        # Step 2: the hard overlay cap is established before any deferred
+        # fragment receives admission.
         budget, gap_seconds, current_prompt, time_fragment = (
             await self._compute_token_budget(request, session_key)
         )
+        self._set_transient_context_budget(
+            request,
+            _compute_injection_budget(gap_seconds, p.config or {}),
+        )
+
+        # Priority 0 is the deliberate exception: admit the deliverable
+        # contract before ordinary producers so it cannot be displaced.  Its
+        # channel rank still makes it the final rendered overlay section.
+        if deliverable_contract_pending:
+            try:
+                from sylanne_alpha import deliverable_mode
+
+                if deliverable_mode.inject_contract(
+                    request,
+                    add_fragment=self._add_transient_context,
+                ):
+                    logger.info(
+                        "Sylanne deliverable contract admitted: session=%s",
+                        session_key,
+                    )
+            except Exception as exc:
+                logger.debug("Sylanne deliverable contract skipped: %s", exc)
 
         # leg-2(a)：历史锚深度（req.contexts 真实历史轮数）。Step 1 已洗掉泄漏注入，
         # 故此处数到的是真实历史；据以让记忆/生活事件注入在历史缺失轮压制幽灵。
@@ -1457,8 +1544,13 @@ class LLMRequestPipeline:
             unfinished_fragment=unfinished_fragment,
             outreach_fragment=outreach_fragment,
             memory_fragment=memory_fragment,
-            base_system_prompt_len=_pristine_sys_len,
         )
+
+        # PERCEPT already ran in Step 0 so its assessment is available above;
+        # only its background overlay admission waits for the core request
+        # slots, preserving small-numbered priority under a tight budget.
+        for channel, text, source, priority in v2_overlay_fragments:
+            self._add_transient_context(request, channel, text, source, priority)
 
         # Step 5.1: 同一次主回复调用内，请模型自行标注自然语义节拍。仅在实时
         # 拦截已接管且 AstrBot 明确关闭 streaming 时启用；nonce 写进 event extras
@@ -1468,7 +1560,12 @@ class LLMRequestPipeline:
             request,
             realtime_enabled=realtime_enabled,
             intercept=intercept,
+            add_fragment=self._add_transient_context,
         )
+
+        # Single commit boundary: every dynamic producer has only collected text
+        # up to here; the deliverable channel is structurally rendered last.
+        self._commit_transient_context(request)
 
         # Step 5b 已废止（fix/context-integrity，2026-07）：曾在此处对低信息
         # 消息稀释较早 history（路径 B / Wave 3），但 req.contexts 会被 AstrBot
@@ -1492,6 +1589,7 @@ class LLMRequestPipeline:
         *,
         realtime_enabled: bool,
         intercept: bool,
+        add_fragment: Any = None,
     ) -> bool:
         """Append a turn-scoped semantic-beat contract on the safe takeover path.
 
@@ -1500,7 +1598,12 @@ class LLMRequestPipeline:
         text, so the contract must not be emitted.
         """
 
-        if not realtime_enabled or not intercept or request is None:
+        if (
+            not realtime_enabled
+            or not intercept
+            or request is None
+            or not callable(add_fragment)
+        ):
             return False
 
         get_extra = getattr(event, "get_extra", None)
@@ -1516,12 +1619,18 @@ class LLMRequestPipeline:
             set_extra(SEMANTIC_BEAT_NONCE_EXTRA, nonce)
             if get_extra(SEMANTIC_BEAT_NONCE_EXTRA) != nonce:
                 return False
-
             contract = semantic_beat_system_contract(nonce)
-            system_prompt = str(getattr(request, "system_prompt", "") or "")
-            request.system_prompt = (
-                f"{system_prompt}\n{contract}" if system_prompt else contract
-            )
+            if (
+                add_fragment(
+                    request,
+                    "semantic",
+                    contract,
+                    "semantic",
+                    90,
+                )
+                is not True
+            ):
+                return False
         except Exception:
             return False
         return True
@@ -1684,9 +1793,6 @@ class LLMRequestPipeline:
 
         budget = p._state_injection_budget_for_request(session_key, request)
         p._store.last_request_budgets.set(session_key, budget)
-
-        # 缓存最近一次可复用的人格 system prompt
-        self._cache_system_prompt(request, session_key)
 
         # 注入时间上下文
         time_fragment = p._time_context_fragment(session_key)
@@ -2267,15 +2373,8 @@ class LLMRequestPipeline:
         unfinished_fragment: str,
         outreach_fragment: str,
         memory_fragment: str,
-        base_system_prompt_len: int | None = None,
     ) -> None:
-        """组装最终 prompt：系统提示注入 + 优先级预算注入 + 生命模拟器启动。
-
-        Args:
-            base_system_prompt_len: v2core/Layer-1 注入之前的 pristine 人格 system_prompt
-                长度（leg-2c）。None=未提供（单测直调）→ 跳过绝对封顶，happy path 零变化；
-                orchestrator 走真实管线时传入实测值，据以给动态注入总量兜底封顶。
-        """
+        """Collect final transient context with the existing priority budget."""
         p = self._p
 
         # === Layer 1: system_prompt（元信息） ===
@@ -2305,10 +2404,7 @@ class LLMRequestPipeline:
             if estimated_chars // 2 > int(max_context_tokens * 0.8):
                 sys_parts.append("[对话较长，可以适当总结]")
 
-        if sys_parts:
-            sys_prompt = str(getattr(request, "system_prompt", "") or "")
-            injection_sys = "\n".join(sys_parts)
-            request.system_prompt = f"{sys_prompt}\n{injection_sys}".strip()
+        injection_sys = "\n".join(sys_parts)
 
         # === Layer 2: _no_save assistant message（优先级预算注入） ===
         amnesia_fragment = ""
@@ -2324,48 +2420,39 @@ class LLMRequestPipeline:
         }
 
         total_budget = _compute_injection_budget(gap_seconds, p.config or {})
-        # leg-2(c) 绝对封顶（兜底，常态 inert）：把已注入的 v2core [心象]+Layer-1 计进去，
-        # 保证【动态注入总量】不越过 gap 感知上限。base_system_prompt_len 未提供（单测）
-        # 时不封顶，happy path 字节不变。以 _LAYER2_MIN_BUDGET 兜底：即便上游片段病态
-        # 超注入，也绝不把最高优先级 state/感知 槽饿死（leg-1 教训：不静默清零）。
-        if base_system_prompt_len is not None:
-            injected_so_far = max(
-                0,
-                len(str(getattr(request, "system_prompt", "") or ""))
-                - int(base_system_prompt_len),
-            )
-            ceiling = _compute_absolute_ceiling(gap_seconds, p.config or {})
-            total_budget = max(
-                _LAYER2_MIN_BUDGET,
-                min(total_budget, ceiling - injected_so_far),
-            )
         trimmed = _allocate_and_trim(raw_fragments, total_budget)
 
-        unfinished_final = trimmed.pop("unfinished", "")
-        inner_text = _format_inner_context(trimmed)
+        admitted_slots: list[str] = []
+        for slot_name, priority, _slot_max in _INJECTION_SLOTS:
+            slot_text = trimmed.get(slot_name, "")
+            if not slot_text:
+                continue
+            if self._add_transient_context(
+                request,
+                slot_name,
+                _format_context_slot(slot_name, slot_text),
+                "request",
+                priority + 9,
+            ):
+                admitted_slots.append(slot_name)
 
-        # Provider-neutral injection: system_prompt is transient and leaves the
-        # persisted conversation turn structure untouched.
-        inject_parts: list[str] = []
-        if inner_text:
-            inject_parts.append(inner_text)
-        if unfinished_final:
-            inject_parts.append(f"[{_SLOT_LABELS['unfinished']}] {unfinished_final}")
-
-        if inject_parts:
-            inject_text = "\n".join(inject_parts)
-            # 此处 system_prompt 已含 v2core 心象片段；只 append，勿直接赋值覆盖。
-            sys_prompt = str(getattr(request, "system_prompt", "") or "")
-            request.system_prompt = f"{sys_prompt}\n{inject_text}".strip()
-            slots_log = list(trimmed.keys())
-            if unfinished_final:
-                slots_log.append("unfinished")
-            logger.info(
-                f"[Sylanne] injection(system_prompt): budget={total_budget} "
-                f"slots=[{','.join(slots_log)}] "
-                f"chars={len(inject_text)}"
+        # Time is useful but not one of the core state/memory slots, so admit
+        # it only after their small-numbered priorities have had a chance.
+        if injection_sys:
+            self._add_transient_context(
+                request,
+                "time",
+                injection_sys,
+                "request",
+                20,
             )
-        else:
+
+        if admitted_slots:
+            logger.info(
+                f"[Sylanne] injection(transient_context): budget={total_budget} "
+                f"slots=[{','.join(admitted_slots)}]"
+            )
+        elif not injection_sys:
             logger.debug(
                 f"[Sylanne] no context injected "
                 f"(prompt={len(current_prompt)} chars)"
@@ -2450,10 +2537,6 @@ class LLMRequestPipeline:
                 event_time=p._event_time(now),
             )
             host.on_request(event, assessment=pre_assessment)
-
-            # 将人格漂移同步到 AstrBot PersonaManager
-            if p._has_persona_manager():
-                p._sync_personality_to_persona_mgr(session_key)
 
             # 捕获计算日志供 WebUI 实时展示
             try:

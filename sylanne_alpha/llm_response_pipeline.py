@@ -2201,11 +2201,21 @@ class LLMResponsePipeline:
             )
         return fragment
 
-    def _append_request_prompt_fragment(self, request: Any, fragment: str) -> None:
-        if not fragment:
-            return
-        current = str(getattr(request, "system_prompt", "") or "")
-        request.system_prompt = f"{current}\n{fragment}".strip()
+    def _add_transient_context(
+        self,
+        request: Any,
+        channel: str,
+        text: str,
+        source: str,
+        priority: int,
+    ) -> bool:
+        add = getattr(self._p, "_add_transient_context", None)
+        if not callable(add):
+            return False
+        try:
+            return bool(add(request, channel, text, source, priority))
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     # Time context

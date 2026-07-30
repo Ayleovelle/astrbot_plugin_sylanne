@@ -1312,6 +1312,7 @@ class _ScopedRuntimeBinding:
     relation_runtime: Any | None = None
     subject: Any | None = None
     turn_generation: int | None = None
+    request_runtime_view: RequestRuntimeView | None = None
 
 
 @register(
@@ -1941,12 +1942,20 @@ class EmotionalStatePlugin(Star):
             self._scope_runtime_binding.reset(token)
 
     @contextlib.contextmanager
-    def _bind_request_runtime_view(self, view: RequestRuntimeView):
+    def _bind_request_runtime_view(
+        self,
+        view: RequestRuntimeView,
+        *,
+        request: Any | None = None,
+    ):
         """Bind only the exact immutable carrier published for this request."""
 
         if type(view) is not RequestRuntimeView or view.resolved.scope is None:
             raise ScopeUnavailable("an exact request runtime view is required")
-        if not self._scope_runtime_registry.is_live_session(view.resolved.scope):
+        if (
+            not self._scope_runtime_registry.is_live_session(view.resolved.scope)
+            or not self._scope_runtime_registry.is_issued_request_view(view)
+        ):
             raise ScopeUnavailable("request runtime view is stale")
         binding = _ScopedRuntimeBinding(
             scope=view.resolved.scope,
@@ -1955,10 +1964,18 @@ class EmotionalStatePlugin(Star):
             relation_runtime=view.relation_runtime,
             subject=view.subject,
             turn_generation=view.resolved.turn_generation,
+            request_runtime_view=view,
         )
         token = self._scope_runtime_binding.set(binding)
         try:
-            yield binding
+            if request is None:
+                yield binding
+            else:
+                with self._scope_runtime_registry.bind_transient_context_sink(
+                    view,
+                    request,
+                ):
+                    yield binding
         finally:
             self._scope_runtime_binding.reset(token)
 
@@ -3403,7 +3420,11 @@ class EmotionalStatePlugin(Star):
             )
 
         if request_view is not None:
-            with EmotionalStatePlugin._bind_request_runtime_view(self, request_view):
+            with EmotionalStatePlugin._bind_request_runtime_view(
+                self,
+                request_view,
+                request=request,
+            ):
                 return await _run_bound_request()
 
         binder = getattr(self, "_bind_runtime_for_event", None)
@@ -4380,8 +4401,55 @@ class EmotionalStatePlugin(Star):
     def _memory_prompt_fragment(self, payload: dict[str, Any]) -> str:
         return self._llm_response_pipeline._memory_prompt_fragment(payload)
 
-    def _append_request_prompt_fragment(self, request: Any, fragment: str) -> None:
-        self._llm_response_pipeline._append_request_prompt_fragment(request, fragment)
+    def _add_transient_context(
+        self,
+        request: Any,
+        channel: str,
+        text: str,
+        source: str,
+        priority: int,
+        lifecycle: str = "turn",
+    ) -> bool:
+        """Collect dynamic guidance only through this request's sealed sink."""
+
+        binding = self._bound_runtime()
+        view = binding.request_runtime_view if binding is not None else None
+        sink = getattr(view, "transient_context_sink", None)
+        add = getattr(sink, "add", None)
+        if not callable(add):
+            return False
+        try:
+            return bool(add(request, channel, text, source, priority, lifecycle))
+        except Exception:
+            return False
+
+    def _commit_transient_context(self, request: Any) -> bool:
+        """Commit the sole collected runtime overlay for the current request."""
+
+        binding = self._bound_runtime()
+        view = binding.request_runtime_view if binding is not None else None
+        sink = getattr(view, "transient_context_sink", None)
+        commit = getattr(sink, "commit", None)
+        if not callable(commit):
+            return False
+        try:
+            return bool(commit(request))
+        except Exception:
+            return False
+
+    def _set_transient_context_budget(self, request: Any, max_chars: int) -> bool:
+        """Apply the current turn's total rendered-overlay budget."""
+
+        binding = self._bound_runtime()
+        view = binding.request_runtime_view if binding is not None else None
+        sink = getattr(view, "transient_context_sink", None)
+        set_budget = getattr(sink, "set_budget", None)
+        if not callable(set_budget):
+            return False
+        try:
+            return bool(set_budget(request, max_chars))
+        except Exception:
+            return False
 
     # Time context
     def _time_context_fragment(self, session_key: str) -> str:
@@ -4909,9 +4977,6 @@ class EmotionalStatePlugin(Star):
 
     def _has_persona_manager(self) -> bool:
         return self._state_persistence.has_persona_manager()
-
-    def _sync_personality_to_persona_mgr(self, session_key: str) -> None:
-        self._state_persistence.sync_personality_to_persona_mgr(session_key)
 
     async def _persist_kernel(self, session_key: str, host: SylanneAlphaHost) -> None:
         await self._state_persistence.persist_kernel(session_key, host)

@@ -11,12 +11,17 @@ from typing import Any
 
 import pytest
 
+from sylanne_alpha import transient_context
 from sylanne_alpha.llm_request_pipeline import (
     LLMRequestPipeline,
     _PROACTIVE_TEMPLATE_PLACEHOLDER,
     _PROACTIVE_TEMPLATE_SIGNATURE,
 )
 from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline
+from sylanne_alpha.scope_contracts import ResolvedScope
+from sylanne_alpha.scope_identity import PersonaSource
+from sylanne_alpha.scope_runtime import ScopeRuntimeRegistry
+from tests.scope_fixtures import scopes as build_scopes
 
 
 @dataclass
@@ -71,6 +76,41 @@ def _source_path(*parts: str) -> Path:
     return Path(__file__).parents[1].joinpath(*parts)
 
 
+class _FrameworkTextPart:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self._no_save = False
+
+    def mark_as_temp(self) -> "_FrameworkTextPart":
+        self._no_save = True
+        return self
+
+
+def _issued_view(registry: ScopeRuntimeRegistry):
+    scope = build_scopes.__wrapped__().bot_a_persona_a
+    return registry.issue_request_view(
+        ResolvedScope(
+            scope=scope,
+            persona_source=PersonaSource(
+                persona_id="context-history-fixture",
+                prompt="static persona",
+                begin_dialogs=(),
+                tools=None,
+                skills=None,
+                resolution_source="test",
+            ),
+            identity_quality="event_self_id",
+            resolution_source="test",
+            resolved_at_ms=1,
+            private_scope_enabled=True,
+            disabled_reason=None,
+            turn_generation=1,
+        ),
+        subject=None,
+        relation_runtime=None,
+    )
+
+
 def _request_context_writes(source_path: Path) -> list[int]:
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
     return sorted(
@@ -84,6 +124,33 @@ def _request_context_writes(source_path: Path) -> list[int]:
             and node.value.id == "request"
         }
     )
+
+
+def _forbidden_transient_request_writes(source_path: Path) -> list[int]:
+    """Find dynamic request sinks that bypass the sealed TextPart collector."""
+
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    findings: list[int] = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.ctx, ast.Store)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "request"
+            and node.attr in {"system_prompt", "contexts"}
+        ):
+            findings.append(node.lineno)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "append"
+            and isinstance(node.func.value, ast.Attribute)
+            and node.func.value.attr == "extra_user_content_parts"
+            and isinstance(node.func.value.value, ast.Name)
+            and node.func.value.value.id == "request"
+        ):
+            findings.append(node.lineno)
+    return sorted(findings)
 
 
 def _on_agent_done_registration_priority() -> int:
@@ -151,7 +218,7 @@ def test_request_cleanup_never_mutates_provider_request_contexts() -> None:
     assert json.dumps(request.contexts, ensure_ascii=False, sort_keys=True) == before
 
 
-def test_inner_context_injection_is_provider_neutral_and_history_read_only() -> None:
+def test_inner_context_injection_fails_closed_and_history_is_read_only() -> None:
     system_prompts: list[str] = []
     for provider_model in ("standard", "claude"):
         contexts = [{"role": "user", "content": "existing history"}]
@@ -182,11 +249,60 @@ def test_inner_context_injection_is_provider_neutral_and_history_read_only() -> 
         )
 
         system_prompts.append(request.system_prompt)
-        assert "[inner_context]" in request.system_prompt
+        assert request.system_prompt == ""
+        assert request.extra_user_content_parts == []
         assert request.contexts is contexts
         assert json.dumps(request.contexts, ensure_ascii=False, sort_keys=True) == before
 
     assert system_prompts[0] == system_prompts[1]
+
+
+def test_inner_context_injection_uses_one_bound_transient_text_part(monkeypatch) -> None:
+    request = _request(contexts=[{"role": "user", "content": "existing history"}])
+    system_prompt = request.system_prompt
+    prompt = request.prompt
+    contexts = request.contexts
+    contexts_before = [dict(item) for item in contexts]
+    plugin = SimpleNamespace(
+        config={},
+        _rhythm_learner=SimpleNamespace(
+            get_reply_length_factor=lambda _session_key: 1.0
+        ),
+        _amnesia_sessions=set(),
+        _life_simulator_started=True,
+    )
+    monkeypatch.setattr(transient_context, "_make_text_part", _FrameworkTextPart)
+    registry = ScopeRuntimeRegistry.for_test()
+    view = _issued_view(registry)
+    sink = view.transient_context_sink
+    plugin._add_transient_context = sink.add
+
+    with registry.bind_transient_context_sink(view, request):
+        assert sink.set_budget(request, 1_200) is True
+        LLMRequestPipeline(plugin)._assemble_final_prompt(
+            request=request,
+            session_key="session",
+            budget=None,
+            gap_seconds=0.0,
+            current_prompt=request.prompt,
+            time_fragment="",
+            message_text=request.prompt,
+            state_fragment="quietly attentive",
+            unfinished_fragment="",
+            outreach_fragment="",
+            memory_fragment="",
+        )
+        assert sink.commit(request) is True
+
+    assert request.system_prompt is system_prompt
+    assert request.prompt is prompt
+    assert request.contexts is contexts
+    assert request.contexts == contexts_before
+    assert len(request.extra_user_content_parts) == 1
+    part = request.extra_user_content_parts[0]
+    assert part._no_save is True
+    assert "[state source=request lifecycle=turn]" in part.text
+    assert "quietly attentive" in part.text
 
 
 def test_llm_pipelines_have_no_request_contexts_write_through() -> None:
@@ -201,6 +317,29 @@ def test_llm_pipelines_have_no_request_contexts_write_through() -> None:
     }
 
     assert writes == {}, f"request.contexts write-through assignments found: {writes}"
+
+
+def test_dynamic_request_text_sinks_exist_only_in_transient_context() -> None:
+    source_paths = (
+        _source_path("main.py"),
+        _source_path("sylanne_alpha", "llm_request_pipeline.py"),
+        _source_path("sylanne_alpha", "llm_response_pipeline.py"),
+        _source_path("sylanne_alpha", "deliverable_mode.py"),
+        _source_path("sylanne_alpha", "realtime_dispatch.py"),
+        _source_path("sylanne_alpha", "v2core", "integration.py"),
+        _source_path("sylanne_alpha", "state_persistence.py"),
+        _source_path("sylanne_alpha", "public_api.py"),
+    )
+    findings = {
+        source_path.relative_to(_source_path()).as_posix(): lines
+        for source_path in source_paths
+        if (lines := _forbidden_transient_request_writes(source_path))
+    }
+
+    assert findings == {}, (
+        "dynamic request.system_prompt/request.contexts writes or direct "
+        f"extra_user_content_parts.append calls found: {findings}"
+    )
 
 
 def test_main_agent_done_hook_has_restore_priority() -> None:
@@ -234,6 +373,7 @@ def test_astrbot_direct_delivery_marks_runner_done_before_tool_respond_hook() ->
     tool_loop_agent_runner = pytest.importorskip(
         "astrbot.core.agent.runners.tool_loop_agent_runner"
     )
+
 
     runner_source = Path(tool_loop_agent_runner.__file__).read_text(encoding="utf-8")
     direct_delivery = runner_source.index("elif resp is None:")

@@ -47,23 +47,68 @@ Plain = astrbot_components.Plain
 Record = astrbot_components.Record
 
 from main import EmotionalStatePlugin
+from sylanne_alpha import transient_context
 from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline
 from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline
 from sylanne_alpha.message_dispatch import realtime_flags
 from sylanne_alpha.rhythm_learner import RhythmLearner
-from sylanne_alpha.scope_contracts import ResolvedTransportScope
-from sylanne_alpha.scope_identity import ScopeResolver
+from sylanne_alpha.scope_contracts import ResolvedScope, ResolvedTransportScope
+from sylanne_alpha.scope_identity import PersonaSource, ScopeResolver
+from sylanne_alpha.scope_runtime import ScopeRuntimeRegistry
 from sylanne_alpha.semantic_segmentation import (
     PauseClass,
     SEMANTIC_BEAT_NONCE_EXTRA,
     build_marker,
 )
 from sylanne_alpha.session_state_store import SessionStateStore
+from tests.scope_fixtures import scopes as build_scopes
 
 
 # ===========================================================================
 # 共用桩件（沿用 tests/test_conv_mgr_sync_race.py 的最小插件桩写法）
 # ===========================================================================
+
+
+class _FrameworkTextPart:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self._no_save = False
+
+    def mark_as_temp(self) -> "_FrameworkTextPart":
+        self._no_save = True
+        return self
+
+
+def _issued_view(registry: ScopeRuntimeRegistry):
+    scope = build_scopes.__wrapped__().bot_a_persona_a
+    return registry.issue_request_view(
+        ResolvedScope(
+            scope=scope,
+            persona_source=PersonaSource(
+                persona_id="v250-semantic-fixture",
+                prompt="static persona",
+                begin_dialogs=(),
+                tools=None,
+                skills=None,
+                resolution_source="test",
+            ),
+            identity_quality="event_self_id",
+            resolution_source="test",
+            resolved_at_ms=1,
+            private_scope_enabled=True,
+            disabled_reason=None,
+            turn_generation=1,
+        ),
+        subject=None,
+        relation_runtime=None,
+    )
+
+
+def _bound_semantic_sink(monkeypatch):
+    monkeypatch.setattr(transient_context, "_make_text_part", _FrameworkTextPart)
+    registry = ScopeRuntimeRegistry.for_test()
+    view = _issued_view(registry)
+    return registry, view, view.transient_context_sink
 
 
 class _FakeEngine:
@@ -433,36 +478,66 @@ def test_semantic_beat_contract_injection_matrix(
     intercept: bool,
     streaming: bool,
     expected: bool,
+    monkeypatch,
 ) -> None:
     event = _Ev()
     event.set_extra("enable_streaming", streaming)
-    request = SimpleNamespace(system_prompt="原始人格契约")
 
-    injected = LLMRequestPipeline._inject_semantic_beat_contract(
-        event,
-        request,
-        realtime_enabled=enabled,
-        intercept=intercept,
-    )
-
-    assert injected is expected
-    nonce = event.get_extra(SEMANTIC_BEAT_NONCE_EXTRA)
     if not expected:
+        request = SimpleNamespace(system_prompt="原始人格契约")
+        injected = LLMRequestPipeline._inject_semantic_beat_contract(
+            event,
+            request,
+            realtime_enabled=enabled,
+            intercept=intercept,
+        )
+        assert injected is False
+        nonce = event.get_extra(SEMANTIC_BEAT_NONCE_EXTRA)
         assert nonce is None
         assert request.system_prompt == "原始人格契约"
         return
 
+    request = SimpleNamespace(
+        system_prompt="原始人格契约",
+        prompt="当前用户消息",
+        contexts=[{"role": "user", "content": "当前用户消息"}],
+        extra_user_content_parts=[],
+    )
+    system_prompt = request.system_prompt
+    prompt = request.prompt
+    contexts = request.contexts
+    contexts_before = [dict(item) for item in contexts]
+    registry, view, sink = _bound_semantic_sink(monkeypatch)
+    with registry.bind_transient_context_sink(view, request):
+        assert sink.set_budget(request, 1_200) is True
+        injected = LLMRequestPipeline._inject_semantic_beat_contract(
+            event,
+            request,
+            realtime_enabled=enabled,
+            intercept=intercept,
+            add_fragment=sink.add,
+        )
+        assert sink.commit(request) is True
+
+    assert injected is expected
+    nonce = event.get_extra(SEMANTIC_BEAT_NONCE_EXTRA)
     assert isinstance(nonce, str)
     assert re.fullmatch(r"[0-9A-F]{6}", nonce)
-    assert request.system_prompt.startswith("原始人格契约\n")
+    assert request.system_prompt is system_prompt
+    assert request.prompt is prompt
+    assert request.contexts is contexts
+    assert request.contexts == contexts_before
+    assert len(request.extra_user_content_parts) == 1
+    part = request.extra_user_content_parts[0]
+    assert part._no_save is True
     for pause in PauseClass:
-        assert build_marker(nonce, pause) in request.system_prompt
-    assert "0 到 5 个" in request.system_prompt
-    assert "不要改写正文" in request.system_prompt
-    assert "单独的省略号或其他纯标点" in request.system_prompt
-    assert "代码、URL、表格" in request.system_prompt
-    assert "provider_id" not in request.system_prompt
-    assert "第二次 LLM" not in request.system_prompt
+        assert build_marker(nonce, pause) in part.text
+    assert "0 到 5 个" in part.text
+    assert "不要改写正文" in part.text
+    assert "单独的省略号或其他纯标点" in part.text
+    assert "代码、URL、表格" in part.text
+    assert "provider_id" not in part.text
+    assert "第二次 LLM" not in part.text
 
 
 def test_punctuation_only_semantic_beat_preserves_meaningful_dispatch_parts() -> None:
@@ -1324,7 +1399,7 @@ def test_semantic_beat_contract_skips_when_event_extras_are_not_round_trippable(
     assert request.system_prompt == "原始人格契约"
 
 
-def test_semantic_beat_contract_uses_astrbot_one_argument_get_extra_api() -> None:
+def test_semantic_beat_contract_uses_astrbot_one_argument_get_extra_api(monkeypatch) -> None:
     class StrictAstrBotExtras:
         def __init__(self) -> None:
             self.values: dict[str, object] = {"enable_streaming": False}
@@ -1336,15 +1411,35 @@ def test_semantic_beat_contract_uses_astrbot_one_argument_get_extra_api() -> Non
             return self.values.get(key)
 
     event = StrictAstrBotExtras()
-    request = SimpleNamespace(system_prompt="原始人格契约")
-
-    assert LLMRequestPipeline._inject_semantic_beat_contract(
-        event,
-        request,
-        realtime_enabled=True,
-        intercept=True,
+    request = SimpleNamespace(
+        system_prompt="原始人格契约",
+        prompt="当前用户消息",
+        contexts=[{"role": "user", "content": "当前用户消息"}],
+        extra_user_content_parts=[],
     )
+    system_prompt = request.system_prompt
+    prompt = request.prompt
+    contexts = request.contexts
+    contexts_before = [dict(item) for item in contexts]
+    registry, view, sink = _bound_semantic_sink(monkeypatch)
+    with registry.bind_transient_context_sink(view, request):
+        assert sink.set_budget(request, 1_200) is True
+        assert LLMRequestPipeline._inject_semantic_beat_contract(
+            event,
+            request,
+            realtime_enabled=True,
+            intercept=True,
+            add_fragment=sink.add,
+        )
+        assert sink.commit(request) is True
+
     assert event.get_extra(SEMANTIC_BEAT_NONCE_EXTRA)
+    assert request.system_prompt is system_prompt
+    assert request.prompt is prompt
+    assert request.contexts is contexts
+    assert request.contexts == contexts_before
+    assert len(request.extra_user_content_parts) == 1
+    assert request.extra_user_content_parts[0]._no_save is True
 
 
 def test_stream_first_do_first_requires_all_three_gates() -> None:

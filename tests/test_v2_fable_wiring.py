@@ -15,9 +15,15 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+from types import SimpleNamespace
 
+from sylanne_alpha import transient_context
 from sylanne_alpha._engine.sylanne_core.compute.host import SylanneAlphaHost
+from sylanne_alpha.scope_contracts import ResolvedScope
+from sylanne_alpha.scope_identity import PersonaSource
+from sylanne_alpha.scope_runtime import ScopeRuntimeRegistry
 from sylanne_alpha.v2core import integration as ig
+from tests.scope_fixtures import scopes as build_scopes
 
 
 class _Resp:
@@ -27,6 +33,41 @@ class _Resp:
 
 class _Req:
     system_prompt = ""
+
+
+class _FrameworkTextPart:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self._no_save = False
+
+    def mark_as_temp(self) -> "_FrameworkTextPart":
+        self._no_save = True
+        return self
+
+
+def _issued_view(registry: ScopeRuntimeRegistry):
+    scope = build_scopes.__wrapped__().bot_a_persona_a
+    return registry.issue_request_view(
+        ResolvedScope(
+            scope=scope,
+            persona_source=PersonaSource(
+                persona_id="fable-fixture",
+                prompt="static persona",
+                begin_dialogs=(),
+                tools=None,
+                skills=None,
+                resolution_source="test",
+            ),
+            identity_quality="event_self_id",
+            resolution_source="test",
+            resolved_at_ms=1,
+            private_scope_enabled=True,
+            disabled_reason=None,
+            turn_generation=1,
+        ),
+        subject=None,
+        relation_runtime=None,
+    )
 
 
 class _Ev:
@@ -133,17 +174,39 @@ def test_exactly_one_response_tick_per_turn() -> None:
     assert run(intercept=True) == 0, "拦截开时 legacy 会观测——v2core 不得重复打"
 
 
-def test_mind_fragment_reaches_system_prompt() -> None:
-    """D6 主动脉：request 阶段心象片段进 system_prompt 且有硬上限。"""
+def test_mind_fragment_reaches_transient_text_part(monkeypatch) -> None:
+    """D6 主动脉：心象进入唯一临时 TextPart，不改写请求持久字段。"""
     p = _Plugin(tempfile.mkdtemp(prefix="fw_frag_"))
     req = _Req()
+    req.prompt = "我好想你呀❤️今天过得怎么样？"
+    req.contexts = [{"role": "user", "content": req.prompt}]
+    req.extra_user_content_parts = []
+    system_prompt = req.system_prompt
+    prompt = req.prompt
+    contexts = req.contexts
+    contexts_before = [dict(item) for item in contexts]
+    monkeypatch.setattr(transient_context, "_make_text_part", _FrameworkTextPart)
+    registry = ScopeRuntimeRegistry.for_test()
+    view = _issued_view(registry)
+    sink = view.transient_context_sink
+    p._add_transient_context = sink.add
 
     async def go() -> None:
-        await ig.apply_v2core_request(p, _Ev(), req)
+        with registry.bind_transient_context_sink(view, req):
+            assert sink.set_budget(req, 1_200) is True
+            await ig.apply_v2core_request(p, _Ev(), req)
+            assert sink.commit(req) is True
 
     asyncio.run(go())
-    assert "[心象" in req.system_prompt, "心象片段没注入——认知影响不了言语（主动脉断）"
-    frag = req.system_prompt[req.system_prompt.index("[心象"):]
+    assert req.system_prompt is system_prompt
+    assert req.prompt is prompt
+    assert req.contexts is contexts
+    assert req.contexts == contexts_before
+    assert len(req.extra_user_content_parts) == 1
+    part = req.extra_user_content_parts[0]
+    assert part._no_save is True
+    assert "[心象" in part.text, "心象片段没注入——认知影响不了言语（主动脉断）"
+    frag = part.text[part.text.index("[心象"):]
     # 上限 = header + STATE 预算(_MAX_CHARS) + PINNED 尾巴(_PRESENCE，Wave-L1/G2 新增
     # 文风纪律行后变长) + 分隔符余量；不是精确到字的快照，只钉"有硬上限"这条不变式。
     assert len(frag) <= 420, "心象片段必须有硬上限（不抢正文预算）"

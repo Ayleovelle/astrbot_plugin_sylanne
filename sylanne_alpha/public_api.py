@@ -1427,10 +1427,7 @@ class PublicAPI:
             elif gap > 300.0:
                 dt = max(0.1, min(10.0, gap / 60.0))
                 host.kernel.computation.feedback("ignored", dt=dt)
-        result = host.on_request(event)
-        if p._has_persona_manager():
-            p._sync_personality_to_persona_mgr(session_key)
-        return result
+        return host.on_request(event)
 
     async def observe_response(
         self,
@@ -1466,10 +1463,7 @@ class PublicAPI:
             event_time=p._event_time(now),
         )
         p._store.last_bot_expression_time.set(session_key, effective_now)
-        result = host.on_response(event)
-        if p._has_persona_manager():
-            p._sync_personality_to_persona_mgr(session_key)
-        return result
+        return host.on_response(event)
 
     async def observe_emotion_text(
         self,
@@ -2027,7 +2021,13 @@ class PublicAPI:
             session_key=sk, query=query_hint, limit=3
         )
         fragment = p._memory_prompt_fragment(memory_result)
-        p._append_request_prompt_fragment(request, fragment)
+        p._add_transient_context(
+            request,
+            "memory_api",
+            fragment,
+            "public_api",
+            25,
+        )
         return {"prompt": str(getattr(request, "prompt", "") or "")}
 
     # ------------------------------------------------------------------

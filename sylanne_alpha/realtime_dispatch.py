@@ -405,6 +405,21 @@ class RealtimeDispatch:
     # Context injection (append_*_if_any)
     # ------------------------------------------------------------------
 
+    def _add_transient_context(
+        self,
+        request: Any,
+        channel: str,
+        text: str,
+        priority: int,
+    ) -> bool:
+        add = getattr(self._p, "_add_transient_context", None)
+        if not callable(add):
+            return False
+        try:
+            return bool(add(request, channel, text, "realtime", priority))
+        except Exception:
+            return False
+
     def append_realtime_assistant_history_shadow_if_any(
         self,
         request: Any,
@@ -443,14 +458,16 @@ class RealtimeDispatch:
                 f"{event_time.get('event_local_time', event_time.get('local_datetime', ''))}"
                 f"\ntimezone={event_time.get('timezone', '')}"
             )
-        _sys = str(getattr(request, "system_prompt", "") or "")
-        request.system_prompt = (
-            _sys
-            + "\n[sylanne_realtime_assistant_history]"
+        injection = (
+            "[sylanne_realtime_assistant_history]"
             + event_time_line
             + "\n"
             + full_text
         )
+        if not self._add_transient_context(
+            request, "realtime_assistant_history", injection, 40
+        ):
+            return False
         last["consumed"] = True
         last["consumed_reason"] = "injected"
         self._trim_consumed(shadows)
@@ -480,14 +497,16 @@ class RealtimeDispatch:
                 f"{event_time.get('event_local_time', event_time.get('local_datetime', ''))}"
                 f"\ntimezone={event_time.get('timezone', '')}"
             )
-        _sys = str(getattr(request, "system_prompt", "") or "")
-        request.system_prompt = (
-            _sys
-            + "\n[sylanne_interrupted_reply_breakpoint]"
+        injection = (
+            "[sylanne_interrupted_reply_breakpoint]"
             + event_time_line
             + "\n"
             + full_text
         )
+        if not self._add_transient_context(
+            request, "realtime_interrupted_reply", injection, 41
+        ):
+            return False
         last["consumed"] = True
         self._trim_consumed(entries)
         return True
@@ -557,14 +576,16 @@ class RealtimeDispatch:
                 f"{event_time.get('event_local_time', event_time.get('local_datetime', ''))}"
                 f"\ntrigger_timezone={event_time.get('timezone', '')}"
             )
-        _sys = str(getattr(request, "system_prompt", "") or "")
-        request.system_prompt = (
-            _sys
-            + "\n[sylanne_realtime_chat_active_dispatch]"
+        injection = (
+            "[sylanne_realtime_chat_active_dispatch]"
             + event_time_line
             + "\n"
             + full_text
         )
+        if not self._add_transient_context(
+            request, "realtime_active_dispatch", injection, 42
+        ):
+            return False
         last["consumed"] = True
         self._trim_consumed(entries)
         return True
@@ -586,7 +607,6 @@ class RealtimeDispatch:
         if not full_text:
             return False
         if "？" in full_text or "?" in full_text:
-            _sys = str(getattr(request, "system_prompt", "") or "")
             injection = (
                 "[sylanne_realtime_pending_bot_question]\n"
                 + "上一轮 bot 刚提出了一个未闭合问题："
@@ -595,8 +615,9 @@ class RealtimeDispatch:
                 + "current_user_short_answer="
                 + current_user_text
             )
-            request.system_prompt = _sys + "\n" + injection
-            return True
+            return self._add_transient_context(
+                request, "realtime_continuity", injection, 43
+            )
         return False
 
     def append_realtime_ordinary_history_backfills_if_any(
@@ -606,7 +627,6 @@ class RealtimeDispatch:
         entries = backfills.get(session_key, [])
         if not entries:
             return False
-        current = str(getattr(request, "system_prompt", "") or "")
         parts = []
         for entry in entries:
             if isinstance(entry, dict):
@@ -614,11 +634,14 @@ class RealtimeDispatch:
             else:
                 parts.append(str(entry))
         if parts:
-            request.system_prompt = f"{current}\n[sylanne_backfill_context]\n" + "\n".join(
-                parts
-            )
-        backfills[session_key] = []
-        return True
+            injection = "[sylanne_backfill_context]\n" + "\n".join(parts)
+            if not self._add_transient_context(
+                request, "realtime_backfill", injection, 44
+            ):
+                return False
+            backfills[session_key] = []
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # Release / cleanup
