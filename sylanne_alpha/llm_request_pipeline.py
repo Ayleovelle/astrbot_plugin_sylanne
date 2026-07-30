@@ -18,6 +18,7 @@ import inspect
 import json
 import random
 import time
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from sylanne_alpha.content_sanitizer import (
@@ -827,6 +828,48 @@ class LLMRequestPipeline:
         except Exception:
             return False
 
+    def _inject_persona_genesis_overlay(self, request: Any) -> bool:
+        """Offer an activated prior through the sealed turn-only sink.
+
+        This helper deliberately neither touches request prompt/system/history
+        fields nor commits the sink; the request pipeline retains the one shared
+        commit boundary after every transient producer has run.
+        """
+
+        config = getattr(self._p, "config", None)
+        if (
+            not isinstance(config, Mapping)
+            or config.get("sylanne_alpha_persona_genesis_enabled") is not True
+            or config.get("sylanne_alpha_persona_genesis_paid_opt_in") is not True
+        ):
+            return False
+        getter = getattr(self._p, "_bound_runtime", None)
+        if not callable(getter):
+            return False
+        try:
+            binding = getter()
+            view = getattr(binding, "request_runtime_view", None)
+            resolved = getattr(view, "resolved", None)
+            turn_generation = getattr(resolved, "turn_generation", None)
+            runtime = getattr(binding, "persona_runtime", None)
+            owner = getattr(runtime, "persona_genesis", None)
+            render = getattr(owner, "render_for_turn", None)
+            if not callable(render):
+                return False
+            text = render(turn_generation)
+        except Exception:
+            return False
+        if type(text) is not str or not text:
+            return False
+        return self._add_transient_context(
+            request,
+            "genesis",
+            text,
+            "persona_genesis",
+            18,
+            "turn",
+        )
+
     def _take_amnesia_pending(self, session_key: str) -> bool:
         """Consume only the current bound session's one-shot amnesia cue."""
 
@@ -1549,6 +1592,7 @@ class LLMRequestPipeline:
         # PERCEPT already ran in Step 0 so its assessment is available above;
         # only its background overlay admission waits for the core request
         # slots, preserving small-numbered priority under a tight budget.
+        self._inject_persona_genesis_overlay(request)
         for channel, text, source, priority in v2_overlay_fragments:
             self._add_transient_context(request, channel, text, source, priority)
 

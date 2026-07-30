@@ -24,6 +24,7 @@ class ProviderFeature(str, Enum):
     RELATIONSHIP = "relationship"
     QZONE = "qzone"
     TRANSCRIPTION = "transcription"
+    GENESIS = "genesis"
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +88,9 @@ _FEATURE_PROVIDER_KEYS: Mapping[
         ),
         ProviderFeature.TRANSCRIPTION: (
             ("sylanne_alpha_transcription_provider_id", "explicit"),
+        ),
+        ProviderFeature.GENESIS: (
+            ("sylanne_alpha_persona_genesis_provider_id", "explicit"),
         ),
     }
 )

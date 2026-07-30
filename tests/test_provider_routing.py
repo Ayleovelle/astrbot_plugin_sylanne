@@ -266,6 +266,61 @@ def test_existing_manual_provider_id_is_resolved_normally() -> None:
     assert resolved.mode == "explicit"
 
 
+def test_genesis_provider_prefers_its_explicit_override() -> None:
+    context = _FakeContext(("genesis", "aux"))
+
+    resolved = _resolve_text(
+        feature=ProviderFeature.GENESIS,
+        config={
+            "sylanne_alpha_persona_genesis_provider_id": " genesis ",
+            "sylanne_alpha_aux_provider_id": "aux",
+        },
+        context=context,
+    )
+
+    assert resolved.provider is context.providers["genesis"]
+    assert resolved.provider_id == "genesis"
+    assert resolved.mode == "explicit"
+    assert resolved.reason == "config:sylanne_alpha_persona_genesis_provider_id"
+
+
+def test_genesis_provider_inherits_auxiliary_when_its_override_is_blank() -> None:
+    context = _FakeContext(("aux", "current"), current_by_umo={"qq:friend:1": "current"})
+
+    resolved = _resolve_text(
+        feature=ProviderFeature.GENESIS,
+        config={
+            "sylanne_alpha_persona_genesis_provider_id": "  ",
+            "sylanne_alpha_aux_provider_id": "aux",
+        },
+        context=context,
+    )
+
+    assert resolved.provider is context.providers["aux"]
+    assert resolved.provider_id == "aux"
+    assert resolved.mode == "auxiliary"
+
+
+def test_missing_genesis_provider_fails_closed_without_fallback() -> None:
+    context = _FakeContext(("aux",), default_id="aux")
+
+    resolved = _resolve_text(
+        feature=ProviderFeature.GENESIS,
+        config={
+            "sylanne_alpha_persona_genesis_provider_id": "deleted",
+            "sylanne_alpha_aux_provider_id": "aux",
+        },
+        context=context,
+    )
+
+    assert resolved.provider is None
+    assert resolved.provider_id == "deleted"
+    assert resolved.mode == "unavailable"
+    assert resolved.reason == "provider_missing"
+    assert resolved.explicit_invalid is True
+    assert context.lookup_calls == ["deleted"]
+
+
 def test_invalid_auxiliary_provider_fails_closed() -> None:
     context = _FakeContext(("current",), current_by_umo={"qq:friend:1": "current"})
 

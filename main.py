@@ -1370,6 +1370,7 @@ class EmotionalStatePlugin(Star):
             session_runtime_factory=self._create_session_runtime,
         )
         self._background_tasks: list[asyncio.Task] = []
+        self._persona_genesis_shutting_down = False
         # hosts/记忆系统/对话缓冲已迁入 self._store（CP8-P2 批3）
         # 计算日志环形缓冲区（供 WebUI 实时显示）
         self._computation_logs: collections.deque = collections.deque(maxlen=200)
@@ -1703,21 +1704,111 @@ class EmotionalStatePlugin(Star):
     # ------------------------------------------------------------------
     # Frozen scope runtime ownership
     # ------------------------------------------------------------------
+    def _construct_persona_services(self, runtime: PersonaRuntime) -> bool:
+        """Construct growth-capable Persona services exactly once after activation."""
+
+        # Keep construction transactional: no partially attached core/scheduler
+        # may make a later readiness probe bypass failed wiring.
+        self_core = runtime.self_core
+        if self_core is None:
+            self_core = SelfCore(self, store=runtime.store)
+        autonomy_scheduler = runtime.autonomy_scheduler
+        if autonomy_scheduler is None:
+            autonomy_scheduler = AutonomyScheduler(
+                self,
+                self_core,
+                persona_runtime=runtime,
+            )
+        self._state_persistence._wire_memory_eviction_persistence(runtime.store)
+        runtime.self_core = self_core
+        runtime.autonomy_scheduler = autonomy_scheduler
+        return True
+
     def _create_persona_runtime(self, scope: SessionScope) -> PersonaRuntime:
         """Construct mutable owners for exactly one Bot + Persona lifecycle."""
 
         runtime = PersonaRuntime(persona_ref=scope.persona_ref)
-        runtime.self_core = SelfCore(self, store=runtime.store)
-        runtime.autonomy_scheduler = AutonomyScheduler(
-            self,
-            runtime.self_core,
-            persona_runtime=runtime,
+        runtime.persona_services_factory = self._construct_persona_services
+        config = self.config if isinstance(self.config, dict) else {}
+        genesis_awaiting = (
+            config.get("sylanne_alpha_persona_genesis_enabled") is True
+            and config.get("sylanne_alpha_persona_genesis_paid_opt_in") is True
         )
-        # The persistence layer is constructed before any Persona runtime.  Attach
-        # its LRU eviction callback to this exact store here, rather than borrowing
-        # a default store during plugin construction.
-        self._state_persistence._wire_memory_eviction_persistence(runtime.store)
+        runtime.genesis_required = genesis_awaiting
+        # Existing installations keep their normal Persona service construction
+        # when Genesis is off.  With both explicit opt-ins on, construction is
+        # deferred until the durable activation record is ready.
+        if not genesis_awaiting:
+            runtime.ensure_persona_services_ready(require_genesis=False)
         return runtime
+
+    def _schedule_persona_genesis_before_view(
+        self,
+        registry: ScopeRuntimeRegistry,
+        scope: SessionScope,
+        source: Any,
+        *,
+        turn_generation: int,
+    ) -> PersonaRuntime | None:
+        """Fire-and-forget Genesis before any Session/Relation/view construction."""
+
+        try:
+            if getattr(self, "_persona_genesis_shutting_down", False):
+                return None
+            runtime = registry.for_scope(scope)
+            config = self.config if isinstance(self.config, dict) else {}
+            genesis_awaiting = (
+                config.get("sylanne_alpha_persona_genesis_enabled") is True
+                and config.get("sylanne_alpha_persona_genesis_paid_opt_in") is True
+            )
+            has_existing_persona_owners = (
+                runtime.self_core is not None
+                or runtime.autonomy_scheduler is not None
+                or bool(runtime.memory_systems)
+                or bool(runtime.relation_runtimes)
+                or bool(getattr(runtime.store, "hosts", {}))
+                or any(
+                    session_runtime.scope.persona_ref == runtime.persona_ref
+                    for session_runtime in registry.live_session_runtimes()
+                )
+            )
+            if has_existing_persona_owners:
+                runtime.genesis_baseline_latched = True
+            # A runtime that was created while Genesis was off, or that has
+            # already constructed baseline services after a gate close, never
+            # re-enters an awaiting state until a new runtime/restart exists.
+            if runtime.genesis_baseline_latched or not runtime.genesis_required:
+                return (
+                    runtime
+                    if runtime.ensure_persona_services_ready(require_genesis=False)
+                    else None
+                )
+            owner = runtime.persona_genesis
+            if not genesis_awaiting:
+                invalidate = getattr(owner, "invalidate_inflight", None)
+                if callable(invalidate):
+                    invalidate()
+                return (
+                    runtime
+                    if runtime.ensure_persona_services_ready(require_genesis=False)
+                    else None
+                )
+            schedule = getattr(owner, "schedule", None)
+            if not callable(schedule):
+                return None
+            ready = bool(
+                schedule(
+                    source,
+                    config=config,
+                    context=getattr(self, "context", None),
+                    origin_turn_generation=turn_generation,
+                )
+            )
+            if not ready or not runtime.ensure_persona_services_ready():
+                return None
+            return runtime
+        except Exception:
+            return None
 
     def _create_session_runtime(
         self,
@@ -3364,6 +3455,15 @@ class EmotionalStatePlugin(Star):
                 return
             if registry is not None:
                 try:
+                    persona_runtime = EmotionalStatePlugin._schedule_persona_genesis_before_view(
+                        self,
+                        registry,
+                        scope,
+                        resolved_scope.persona_source,
+                        turn_generation=resolved_scope.turn_generation,
+                    )
+                    if persona_runtime is None:
+                        return
                     relation_runtime = registry.relation_for(scope, proof.subject)
                     request_view = registry.issue_request_view(
                         resolved_scope,
@@ -5856,6 +5956,28 @@ class EmotionalStatePlugin(Star):
         # 不再有新的影子轮进来。同步是关键——这里不能 await，否则 drain 之前就出让了
         # 事件循环，还能被塞进新的 capture/settle。
         self._v3_shadow.begin_shutdown()
+        # Genesis has to be fenced before the first await below.  Otherwise a
+        # concurrent request can create a fresh PersonaRuntime while v2 drains
+        # and let a late paid result commit during plugin teardown.
+        self._persona_genesis_shutting_down = True
+        persona_runtimes = self._scope_runtime_registry.live_persona_runtimes()
+        persona_genesis_tasks: list[Any] = []
+        for runtime in persona_runtimes:
+            owner = runtime.persona_genesis
+            retire = getattr(owner, "retire", None)
+            if callable(retire):
+                try:
+                    retire()
+                except Exception:
+                    pass
+            for task in list(runtime.background_tasks):
+                if not task.done():
+                    task.cancel()
+                    persona_genesis_tasks.append(task)
+        if persona_genesis_tasks:
+            await asyncio.wait(persona_genesis_tasks, timeout=10)
+        for runtime in persona_runtimes:
+            runtime.background_tasks.clear()
         # v2core：先排干在途域状态落盘 + 终扫一遍（必须在 cancel 后台任务【之前】，
         # 否则最后一轮 fire-and-forget 存档会被反手 cancel——她的最近成长就丢了）
         try:

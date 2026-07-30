@@ -6,9 +6,11 @@ import json
 import math
 import os
 import re
+import secrets
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
 from typing import Iterator
@@ -31,6 +33,10 @@ _BOT_SCHEMA = "sylanne.scope.bot.v1"
 _PERSONA_SCHEMA = "sylanne.scope.persona.v1"
 _SCOPE_META_SCHEMA = "sylanne.scope.meta.v1"
 _RELATION_META_SCHEMA = "sylanne.scope.relation-meta.v1"
+_PERSONA_GENESIS_GLOBAL_SCHEMA = "sylanne.persona-genesis.global.v1"
+_PERSONA_GENESIS_CORRUPTION_SCHEMA = "sylanne.persona-genesis.corruption.v1"
+_PERSONA_GENESIS_DAILY_LIMIT = 32
+_PERSONA_GENESIS_LEASE_MS = 5 * 60 * 1000
 _COMPONENT_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 _TOKEN_PAYLOAD = re.compile(r"[A-Za-z0-9_-]+\Z", re.ASCII)
 
@@ -98,6 +104,20 @@ class Snapshot:
 
     generation: int
     payload: dict[str, object] = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class PersonaGenesisLease:
+    """One durable, fenced authority to make a paid Persona Genesis attempt."""
+
+    persona_token: str
+    lifecycle_generation: int
+    source_fingerprint: str
+    origin_turn_generation: int
+    attempt: int
+    lease_id: str
+    fence: int
+    expires_at_ms: int
 
 
 class _InterProcessLock:
@@ -205,6 +225,8 @@ class ScopeRepository:
         self.bots_directory = self.root / "bots"
         self.bot_bindings_directory = self.root / "bot-bindings"
         self._lock_path = self.root / ".scope-v1.lock"
+        self._persona_genesis_global_path = self.root / "persona-genesis-global.json"
+        self._persona_genesis_slot_path = self.root / ".persona-genesis-provider.lock"
         self._lock_timeout_seconds = timeout
         self._replace_attempts = max(1, int(replace_attempts))
         self._replace_retry_seconds = max(0.0, float(replace_retry_seconds))
@@ -229,6 +251,35 @@ class ScopeRepository:
             self._lock_path,
             timeout_seconds=self._lock_timeout_seconds,
         )
+
+    def _repository_lock_nowait(self) -> _InterProcessLock:
+        """Return the scope lock in immediate fail-closed mode for request paths."""
+
+        return _InterProcessLock(self._lock_path, timeout_seconds=0.0)
+
+    @contextmanager
+    def persona_genesis_provider_slot(self) -> Iterator[bool]:
+        """Try to own the cross-process provider slot for one full awaited call.
+
+        The caller holds this context across the provider ``await``.  The
+        durable lease remains the recovery fence; this portalocker slot merely
+        prevents two live processes from overlapping a paid call before either
+        observes the other's lease.
+        """
+
+        slot = _InterProcessLock(
+            self._persona_genesis_slot_path,
+            timeout_seconds=0.0,
+        )
+        try:
+            slot.__enter__()
+        except portalocker.exceptions.LockException:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            slot.__exit__(None, None, None)
 
     @contextmanager
     def transaction(self) -> Iterator[ScopeRepository]:
@@ -520,7 +571,12 @@ class ScopeRepository:
         self._fsync_dir(path.parent)
         self._commit_catalog_generation_locked()
 
-    def _read_snapshot_locked(self, path: Path) -> Snapshot | None:
+    def _read_snapshot_locked(
+        self,
+        path: Path,
+        *,
+        quarantine_on_error: bool = True,
+    ) -> Snapshot | None:
         try:
             loaded = self._read_json(path, error_label="scope snapshot")
             if loaded is None:
@@ -540,8 +596,10 @@ class ScopeRepository:
                 raise RepositoryCorruptionError("scope snapshot is invalid")
             return Snapshot(generation=generation, payload=payload)
         except RepositoryCorruptionError:
-            self._quarantine_locked(path)
-            return None
+            if quarantine_on_error:
+                self._quarantine_locked(path)
+                return None
+            raise
 
     def _write_snapshot_locked(
         self,
@@ -1688,6 +1746,733 @@ class ScopeRepository:
             reason=reason,
         )
 
+    # -- Persona Genesis: persona-owned control and activation record --------
+
+    def genesis_path(self, persona_ref: PersonaRevisionRef) -> Path:
+        if type(persona_ref) is not PersonaRevisionRef:
+            raise ValueError("persona_ref must be a PersonaRevisionRef")
+        return (
+            self._persona_directory(persona_ref.bot_ref.token, persona_ref.token)
+            / "genesis.json"
+        )
+
+    def _genesis_corruption_marker_path(self, persona_ref: PersonaRevisionRef) -> Path:
+        return self.genesis_path(persona_ref).parent / "quarantine" / "genesis-markers.json"
+
+    def _read_genesis_corruption_markers_locked(
+        self,
+        persona_ref: PersonaRevisionRef,
+    ) -> set[tuple[int, str]]:
+        loaded = self._read_json(
+            self._genesis_corruption_marker_path(persona_ref),
+            error_label="persona genesis corruption markers",
+        )
+        if loaded is None:
+            return set()
+        raw, document = loaded
+        entries = document.get("entries")
+        if (
+            set(document) != {"schema_version", "entries"}
+            or document["schema_version"] != _PERSONA_GENESIS_CORRUPTION_SCHEMA
+            or type(entries) is not list
+            or raw != _canonical_json_bytes(document)
+        ):
+            raise RepositoryCorruptionError("persona genesis corruption markers are invalid")
+        parsed: set[tuple[int, str]] = set()
+        for entry in entries:
+            if (
+                type(entry) is not dict
+                or set(entry) != {"lifecycle_generation", "source_fingerprint"}
+                or type(entry["lifecycle_generation"]) is not int
+                or entry["lifecycle_generation"] < 0
+                or type(entry["source_fingerprint"]) is not str
+                or len(entry["source_fingerprint"]) != 64
+            ):
+                raise RepositoryCorruptionError("persona genesis corruption marker is invalid")
+            parsed.add((entry["lifecycle_generation"], entry["source_fingerprint"]))
+        if len(parsed) != len(entries):
+            raise RepositoryCorruptionError("persona genesis corruption markers are duplicated")
+        return parsed
+
+    def _has_genesis_corruption_marker_locked(
+        self,
+        persona_ref: PersonaRevisionRef,
+    ) -> bool:
+        try:
+            markers = self._read_genesis_corruption_markers_locked(persona_ref)
+        except RepositoryCorruptionError:
+            # A damaged deny marker must never silently turn into a retry permit.
+            return True
+        return (
+            persona_ref.lifecycle_generation,
+            persona_ref.source_fingerprint,
+        ) in markers
+
+    def _mark_genesis_corruption_locked(self, persona_ref: PersonaRevisionRef) -> None:
+        path = self._genesis_corruption_marker_path(persona_ref)
+        try:
+            markers = self._read_genesis_corruption_markers_locked(persona_ref)
+        except RepositoryCorruptionError:
+            # Keep the malformed marker as an evidence-bearing fail-closed fence.
+            return
+        marker = (
+            persona_ref.lifecycle_generation,
+            persona_ref.source_fingerprint,
+        )
+        if marker in markers:
+            return
+        markers.add(marker)
+        entries = [
+            {
+                "lifecycle_generation": lifecycle_generation,
+                "source_fingerprint": source_fingerprint,
+            }
+            for lifecycle_generation, source_fingerprint in sorted(markers)
+        ]
+        self._atomic_json_replace(
+            path,
+            {
+                "schema_version": _PERSONA_GENESIS_CORRUPTION_SCHEMA,
+                "entries": entries,
+            },
+        )
+
+    def _quarantine_genesis_locked(
+        self,
+        path: Path,
+        persona_ref: PersonaRevisionRef,
+    ) -> None:
+        # Persist the exact lifecycle/source deny marker before moving evidence.
+        # A later source revision remains independently schedulable.
+        self._mark_genesis_corruption_locked(persona_ref)
+        self._quarantine_locked(path)
+
+    @staticmethod
+    def _require_genesis_source(
+        persona_ref: PersonaRevisionRef,
+        source_fingerprint: object,
+    ) -> str:
+        if (
+            type(source_fingerprint) is not str
+            or source_fingerprint != persona_ref.source_fingerprint
+        ):
+            raise StaleScopeWrite(code="persona_source_stale")
+        return source_fingerprint
+
+    @staticmethod
+    def _require_genesis_lease(lease: object) -> PersonaGenesisLease:
+        if type(lease) is not PersonaGenesisLease:
+            raise ValueError("lease must be a PersonaGenesisLease")
+        if (
+            type(lease.persona_token) is not str
+            or type(lease.lifecycle_generation) is not int
+            or lease.lifecycle_generation < 0
+            or type(lease.source_fingerprint) is not str
+            or type(lease.origin_turn_generation) is not int
+            or lease.origin_turn_generation < 0
+            or type(lease.attempt) is not int
+            or lease.attempt < 1
+            or type(lease.lease_id) is not str
+            or not lease.lease_id
+            or type(lease.fence) is not int
+            or lease.fence < 1
+            or type(lease.expires_at_ms) is not int
+            or lease.expires_at_ms < 0
+        ):
+            raise ValueError("lease is invalid")
+        return lease
+
+    @staticmethod
+    def _require_genesis_now(now_ms: int | None) -> int:
+        value = ScopeRepository._now_ms() if now_ms is None else now_ms
+        if type(value) is not int or value < 0:
+            raise ValueError("now_ms must be a non-negative exact int")
+        return value
+
+    @staticmethod
+    def _utc_day(now_ms: int) -> str:
+        return datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+
+    @staticmethod
+    def _is_canonical_utc_day(value: object) -> bool:
+        if type(value) is not str:
+            return False
+        try:
+            parsed = datetime.strptime(value, "%Y-%m-%d").date()
+        except ValueError:
+            return False
+        return parsed.isoformat() == value
+
+    def _read_persona_genesis_global_locked(
+        self,
+        *,
+        now_ms: int,
+    ) -> tuple[dict[str, object], bool]:
+        loaded = self._read_json(
+            self._persona_genesis_global_path,
+            error_label="persona genesis global control",
+        )
+        if loaded is None:
+            return {
+                "schema_version": _PERSONA_GENESIS_GLOBAL_SCHEMA,
+                "day": self._utc_day(now_ms),
+                "calls": 0,
+                "fence": 0,
+                "lease": None,
+            }, False
+        raw, document = loaded
+        if (
+            set(document) != {"schema_version", "day", "calls", "fence", "lease"}
+            or document["schema_version"] != _PERSONA_GENESIS_GLOBAL_SCHEMA
+            or not self._is_canonical_utc_day(document["day"])
+            or type(document["calls"]) is not int
+            or not 0 <= document["calls"] <= _PERSONA_GENESIS_DAILY_LIMIT
+            or type(document["fence"]) is not int
+            or document["fence"] < 0
+            or raw != _canonical_json_bytes(document)
+        ):
+            raise RepositoryCorruptionError("persona genesis global control is invalid")
+        lease = document["lease"]
+        if lease is not None and (
+            type(lease) is not dict
+            or set(lease) != {"lease_id", "fence", "expires_at_ms"}
+            or type(lease["lease_id"]) is not str
+            or not lease["lease_id"]
+            or type(lease["fence"]) is not int
+            or lease["fence"] < 1
+            or type(lease["expires_at_ms"]) is not int
+            or lease["expires_at_ms"] < 0
+        ):
+            raise RepositoryCorruptionError("persona genesis global lease is invalid")
+
+        normalized = dict(document)
+        changed = False
+        current_day = self._utc_day(now_ms)
+        # ISO UTC dates compare chronologically.  Only a strictly later wall
+        # clock day earns a reset; rollback must retain the persisted budget.
+        if current_day > normalized["day"]:
+            normalized["day"] = current_day
+            normalized["calls"] = 0
+            changed = True
+        if lease is not None and lease["expires_at_ms"] <= now_ms:
+            normalized["lease"] = None
+            changed = True
+        return normalized, changed
+
+    def _write_persona_genesis_global_locked(self, document: dict[str, object]) -> None:
+        self._atomic_json_replace(self._persona_genesis_global_path, document)
+
+    @staticmethod
+    def _validate_genesis_payload(payload: object) -> dict[str, object]:
+        if type(payload) is not dict:
+            raise RepositoryCorruptionError("persona genesis payload is invalid")
+        state = payload.get("state")
+        common = {
+            "state",
+            "persona_lifecycle_generation",
+            "source_fingerprint",
+            "attempt",
+        }
+        if state == "claimed":
+            expected = common | {
+                "lease_id",
+                "fence",
+                "lease_expires_at_ms",
+                "origin_turn_generation",
+            }
+        elif state == "backoff":
+            expected = common | {"next_attempt_at_ms"}
+        elif state == "active":
+            expected = common | {
+                "accepted_profile",
+                "initial_runtime",
+                "growth_enabled",
+                "origin_turn_generation",
+                "safe_metadata",
+            }
+        else:
+            raise RepositoryCorruptionError("persona genesis state is invalid")
+        if set(payload) != expected:
+            raise RepositoryCorruptionError("persona genesis payload has an invalid shape")
+        if (
+            type(payload["persona_lifecycle_generation"]) is not int
+            or payload["persona_lifecycle_generation"] < 0
+            or type(payload["source_fingerprint"]) is not str
+            or len(payload["source_fingerprint"]) != 64
+            or type(payload["attempt"]) is not int
+            or payload["attempt"] < 1
+        ):
+            raise RepositoryCorruptionError("persona genesis payload has invalid control fields")
+        if state == "claimed":
+            if (
+                type(payload["lease_id"]) is not str
+                or not payload["lease_id"]
+                or type(payload["fence"]) is not int
+                or payload["fence"] < 1
+                or type(payload["lease_expires_at_ms"]) is not int
+                or payload["lease_expires_at_ms"] < 0
+                or type(payload["origin_turn_generation"]) is not int
+                or payload["origin_turn_generation"] < 0
+            ):
+                raise RepositoryCorruptionError("persona genesis claim is invalid")
+        elif state == "backoff":
+            if (
+                type(payload["next_attempt_at_ms"]) is not int
+                or payload["next_attempt_at_ms"] < 0
+            ):
+                raise RepositoryCorruptionError("persona genesis backoff is invalid")
+        else:
+            from .persona_genesis import (
+                PersonaGenesisParseError,
+                canonical_persona_genesis_json,
+                parse_persona_genesis_profile,
+            )
+
+            profile = payload["accepted_profile"]
+            try:
+                canonical = canonical_persona_genesis_json(profile)
+                if parse_persona_genesis_profile(canonical.decode("utf-8")) != profile:
+                    raise PersonaGenesisParseError("profile changed during validation")
+            except (PersonaGenesisParseError, UnicodeDecodeError) as exc:
+                raise RepositoryCorruptionError("persona genesis profile is invalid") from exc
+            origin = payload["origin_turn_generation"]
+            expected_runtime = {
+                "priors": profile,
+                "growth_enabled": True,
+                "origin_turn_generation": origin,
+            }
+            if (
+                type(origin) is not int
+                or origin < 0
+                or payload["growth_enabled"] is not True
+                or payload["initial_runtime"] != expected_runtime
+                or type(payload["safe_metadata"]) is not dict
+                or set(payload["safe_metadata"]) != {"accepted_at_ms"}
+                or type(payload["safe_metadata"]["accepted_at_ms"]) is not int
+                or payload["safe_metadata"]["accepted_at_ms"] < 0
+            ):
+                raise RepositoryCorruptionError("persona genesis activation is invalid")
+        return payload
+
+    def _read_genesis_locked(self, persona_ref: PersonaRevisionRef) -> Snapshot | None:
+        if self._has_genesis_corruption_marker_locked(persona_ref):
+            return None
+        path = self.genesis_path(persona_ref)
+        try:
+            snapshot = self._read_snapshot_locked(path, quarantine_on_error=False)
+            if snapshot is None:
+                return None
+            self._validate_genesis_payload(snapshot.payload)
+        except RepositoryCorruptionError:
+            self._quarantine_genesis_locked(path, persona_ref)
+            return None
+        return snapshot
+
+    @staticmethod
+    def _payload_matches_persona(
+        payload: dict[str, object],
+        persona_ref: PersonaRevisionRef,
+    ) -> bool:
+        return (
+            payload["persona_lifecycle_generation"] == persona_ref.lifecycle_generation
+            and payload["source_fingerprint"] == persona_ref.source_fingerprint
+        )
+
+    def _read_genesis_schedule_snapshot_locked(
+        self,
+        persona_ref: PersonaRevisionRef,
+    ) -> Snapshot | None:
+        """Read Genesis control and durably quarantine malformed input."""
+
+        return self._read_genesis_locked(persona_ref)
+
+    def _persona_genesis_schedule_preflight_locked(
+        self,
+        active: PersonaRevisionRef,
+        *,
+        now_ms: int,
+    ) -> str:
+        """Return one atomic local-control decision while the repository is locked."""
+
+        if self._has_genesis_corruption_marker_locked(active):
+            return "blocked"
+        snapshot = self._read_genesis_schedule_snapshot_locked(active)
+        if snapshot is None:
+            if self._has_genesis_corruption_marker_locked(active):
+                return "blocked"
+            locally_allowed = True
+        else:
+            payload = snapshot.payload
+            if not self._payload_matches_persona(payload, active):
+                # The Genesis file is reused across lifecycle reactivation of
+                # one exact Persona token.  A structurally valid record from a
+                # prior lifecycle is historical state, not a durable deny
+                # marker for the newly active generation.  Treat it like an
+                # absent current record so preflight agrees with the claim CAS.
+                locally_allowed = True
+            else:
+                if payload["state"] == "active":
+                    return "active"
+                if payload["state"] == "claimed":
+                    locally_allowed = payload["lease_expires_at_ms"] <= now_ms
+                elif payload["state"] == "backoff":
+                    locally_allowed = payload["next_attempt_at_ms"] <= now_ms
+                else:
+                    return "blocked"
+        if not locally_allowed:
+            return "blocked"
+        global_state, _changed = self._read_persona_genesis_global_locked(now_ms=now_ms)
+        if (
+            self._utc_day(now_ms) < global_state["day"]
+            or global_state["lease"] is not None
+            or global_state["calls"] >= _PERSONA_GENESIS_DAILY_LIMIT
+        ):
+            return "blocked"
+        return "allowed"
+
+    def persona_genesis_schedule_preflight_nowait(
+        self,
+        persona_ref: PersonaRevisionRef,
+        *,
+        source_fingerprint: str,
+        now_ms: int | None = None,
+    ) -> str:
+        """Immediate request-path Genesis preflight: ``allowed``/``active``/blocked.
+
+        This uses a single timeout-zero interprocess lock.  Contention, malformed
+        records, and any lifecycle ambiguity fail closed without creating a task.
+        """
+
+        if type(persona_ref) is not PersonaRevisionRef:
+            return "blocked"
+        try:
+            now = self._require_genesis_now(now_ms)
+            with self._repository_lock_nowait():
+                active = self._require_active_persona_locked(persona_ref)
+                self._require_genesis_source(active, source_fingerprint)
+                return self._persona_genesis_schedule_preflight_locked(
+                    active,
+                    now_ms=now,
+                )
+        except (
+            portalocker.exceptions.LockException,
+            RepositoryCorruptionError,
+            StaleScopeWrite,
+            OSError,
+            ValueError,
+        ):
+            return "blocked"
+
+    def persona_genesis_schedule_allowed(
+        self,
+        persona_ref: PersonaRevisionRef,
+        *,
+        source_fingerprint: str,
+        now_ms: int | None = None,
+    ) -> bool:
+        """Fail closed before creating a Genesis task or resolving a provider."""
+
+        if type(persona_ref) is not PersonaRevisionRef:
+            return False
+        try:
+            now = self._require_genesis_now(now_ms)
+            with self._repository_lock():
+                active = self._require_active_persona_locked(persona_ref)
+                self._require_genesis_source(active, source_fingerprint)
+                return (
+                    self._persona_genesis_schedule_preflight_locked(active, now_ms=now)
+                    == "allowed"
+                )
+        except (RepositoryCorruptionError, StaleScopeWrite, OSError, ValueError):
+            return False
+
+    def persona_genesis_authorization_valid(
+        self,
+        persona_ref: PersonaRevisionRef,
+        *,
+        source_fingerprint: str,
+    ) -> bool:
+        """Read-only lifecycle/source fence for an in-flight Genesis result."""
+
+        if type(persona_ref) is not PersonaRevisionRef:
+            return False
+        try:
+            with self._repository_lock():
+                active = self._require_active_persona_locked(persona_ref)
+                self._require_genesis_source(active, source_fingerprint)
+                return not self._has_genesis_corruption_marker_locked(active)
+        except (RepositoryCorruptionError, StaleScopeWrite, OSError, ValueError):
+            return False
+
+    @staticmethod
+    def _claim_matches_lease(
+        payload: dict[str, object],
+        lease: PersonaGenesisLease,
+    ) -> bool:
+        return (
+            payload.get("state") == "claimed"
+            and payload.get("lease_id") == lease.lease_id
+            and payload.get("fence") == lease.fence
+            and payload.get("attempt") == lease.attempt
+            and payload.get("lease_expires_at_ms") == lease.expires_at_ms
+            and payload.get("origin_turn_generation") == lease.origin_turn_generation
+        )
+
+    @staticmethod
+    def _global_lease_matches(
+        document: dict[str, object],
+        lease: PersonaGenesisLease,
+    ) -> bool:
+        value = document.get("lease")
+        return (
+            type(value) is dict
+            and value.get("lease_id") == lease.lease_id
+            and value.get("fence") == lease.fence
+        )
+
+    def _release_global_lease_locked(
+        self,
+        document: dict[str, object],
+        lease: PersonaGenesisLease,
+    ) -> bool:
+        if not self._global_lease_matches(document, lease):
+            return False
+        released = dict(document)
+        released["lease"] = None
+        self._write_persona_genesis_global_locked(released)
+        return True
+
+    def claim_persona_genesis(
+        self,
+        persona_ref: PersonaRevisionRef,
+        *,
+        source_fingerprint: str,
+        origin_turn_generation: int,
+        now_ms: int | None = None,
+        lease_ms: int = _PERSONA_GENESIS_LEASE_MS,
+    ) -> PersonaGenesisLease | None:
+        """CAS-claim a single globally budgeted Genesis provider attempt.
+
+        Calls are consumed before the provider runs and are deliberately never
+        refunded.  A live global lease, a Persona-local cooldown, or a completed
+        activation all fail closed without touching provider-facing state.
+        """
+
+        if type(persona_ref) is not PersonaRevisionRef:
+            raise ValueError("persona_ref must be a PersonaRevisionRef")
+        if type(origin_turn_generation) is not int or origin_turn_generation < 0:
+            raise ValueError("origin_turn_generation must be a non-negative exact int")
+        if type(lease_ms) is not int or lease_ms < 1:
+            raise ValueError("lease_ms must be a positive exact int")
+        now = self._require_genesis_now(now_ms)
+        with self._repository_lock():
+            active = self._require_active_persona_locked(persona_ref)
+            source = self._require_genesis_source(active, source_fingerprint)
+            if self._has_genesis_corruption_marker_locked(active):
+                return None
+            snapshot = self._read_genesis_locked(active)
+            if self._has_genesis_corruption_marker_locked(active):
+                return None
+            payload = None if snapshot is None else snapshot.payload
+            is_current = payload is not None and self._payload_matches_persona(payload, active)
+            if is_current and payload["state"] == "active":
+                return None
+            if is_current and payload["state"] == "claimed" and payload["lease_expires_at_ms"] > now:
+                return None
+            if is_current and payload["state"] == "backoff" and payload["next_attempt_at_ms"] > now:
+                return None
+
+            global_state, changed = self._read_persona_genesis_global_locked(now_ms=now)
+            # A clock rollback may not reopen yesterday's quota.  Leave the
+            # persisted control untouched; a strictly later UTC day resets it.
+            if self._utc_day(now) < global_state["day"]:
+                return None
+            if global_state["lease"] is not None or global_state["calls"] >= _PERSONA_GENESIS_DAILY_LIMIT:
+                if changed:
+                    self._write_persona_genesis_global_locked(global_state)
+                return None
+            attempt = int(payload["attempt"]) + 1 if is_current else 1
+            fence = int(global_state["fence"]) + 1
+            lease = PersonaGenesisLease(
+                persona_token=active.token,
+                lifecycle_generation=active.lifecycle_generation,
+                source_fingerprint=source,
+                origin_turn_generation=origin_turn_generation,
+                attempt=attempt,
+                lease_id=secrets.token_hex(16),
+                fence=fence,
+                expires_at_ms=now + lease_ms,
+            )
+            next_global = dict(global_state)
+            next_global["calls"] = int(global_state["calls"]) + 1
+            next_global["fence"] = fence
+            next_global["lease"] = {
+                "lease_id": lease.lease_id,
+                "fence": lease.fence,
+                "expires_at_ms": lease.expires_at_ms,
+            }
+            self._write_persona_genesis_global_locked(next_global)
+            claim = {
+                "state": "claimed",
+                "persona_lifecycle_generation": active.lifecycle_generation,
+                "source_fingerprint": source,
+                "attempt": attempt,
+                "lease_id": lease.lease_id,
+                "fence": lease.fence,
+                "lease_expires_at_ms": lease.expires_at_ms,
+                "origin_turn_generation": origin_turn_generation,
+            }
+            expected_generation = 0 if snapshot is None else snapshot.generation
+            self._write_snapshot_locked(
+                self.genesis_path(active),
+                expected_generation=expected_generation,
+                payload=claim,
+            )
+            return lease
+
+    def commit_persona_genesis_activation(
+        self,
+        persona_ref: PersonaRevisionRef,
+        lease: PersonaGenesisLease,
+        *,
+        profile: dict[str, object],
+        source_fingerprint: str,
+        origin_turn_generation: int,
+        now_ms: int | None = None,
+    ) -> Snapshot:
+        """Atomically replace a matching claim with the sole active record."""
+
+        if type(persona_ref) is not PersonaRevisionRef:
+            raise ValueError("persona_ref must be a PersonaRevisionRef")
+        if type(profile) is not dict:
+            raise ValueError("profile must be an exact dict")
+        if type(origin_turn_generation) is not int or origin_turn_generation < 0:
+            raise ValueError("origin_turn_generation must be a non-negative exact int")
+        claim_lease = self._require_genesis_lease(lease)
+        now = self._require_genesis_now(now_ms)
+        with self._repository_lock():
+            active = self._require_active_persona_locked(persona_ref)
+            source = self._require_genesis_source(active, source_fingerprint)
+            if (
+                claim_lease.persona_token != active.token
+                or claim_lease.lifecycle_generation != active.lifecycle_generation
+                or claim_lease.source_fingerprint != source
+                or claim_lease.origin_turn_generation != origin_turn_generation
+                or claim_lease.expires_at_ms <= now
+            ):
+                raise StaleScopeWrite(code="persona_genesis_lease_stale")
+            snapshot = self._read_genesis_locked(active)
+            if (
+                snapshot is None
+                or not self._payload_matches_persona(snapshot.payload, active)
+                or not self._claim_matches_lease(snapshot.payload, claim_lease)
+            ):
+                raise StaleScopeWrite(code="persona_genesis_claim_stale")
+            global_state, _changed = self._read_persona_genesis_global_locked(now_ms=now)
+            if not self._global_lease_matches(global_state, claim_lease):
+                raise StaleScopeWrite(code="persona_genesis_lease_stale")
+            from .persona_genesis import canonical_persona_genesis_json, parse_persona_genesis_profile
+
+            accepted_profile = parse_persona_genesis_profile(
+                canonical_persona_genesis_json(profile).decode("utf-8")
+            )
+            activation = {
+                "state": "active",
+                "persona_lifecycle_generation": active.lifecycle_generation,
+                "source_fingerprint": source,
+                "attempt": claim_lease.attempt,
+                "accepted_profile": accepted_profile,
+                "initial_runtime": {
+                    "priors": accepted_profile,
+                    "growth_enabled": True,
+                    "origin_turn_generation": origin_turn_generation,
+                },
+                "growth_enabled": True,
+                "origin_turn_generation": origin_turn_generation,
+                "safe_metadata": {"accepted_at_ms": now},
+            }
+            generation = self._write_snapshot_locked(
+                self.genesis_path(active),
+                expected_generation=snapshot.generation,
+                payload=activation,
+            )
+            self._release_global_lease_locked(global_state, claim_lease)
+            return Snapshot(generation=generation, payload=activation)
+
+    def reject_persona_genesis_claim(
+        self,
+        persona_ref: PersonaRevisionRef,
+        lease: PersonaGenesisLease,
+        *,
+        source_fingerprint: str,
+        now_ms: int | None = None,
+        backoff_ms: int = 60_000,
+    ) -> bool:
+        """CAS a matching claim into retry backoff and conditionally free its slot."""
+
+        if type(persona_ref) is not PersonaRevisionRef:
+            raise ValueError("persona_ref must be a PersonaRevisionRef")
+        if type(backoff_ms) is not int or backoff_ms < 0:
+            raise ValueError("backoff_ms must be a non-negative exact int")
+        claim_lease = self._require_genesis_lease(lease)
+        now = self._require_genesis_now(now_ms)
+        with self._repository_lock():
+            active = self._require_active_persona_locked(persona_ref)
+            source = self._require_genesis_source(active, source_fingerprint)
+            if (
+                claim_lease.persona_token != active.token
+                or claim_lease.lifecycle_generation != active.lifecycle_generation
+                or claim_lease.source_fingerprint != source
+            ):
+                return False
+            # Backoff is only legal while this exact, still-live global lease is
+            # current.  A stale task must leave its Persona claim byte-for-byte
+            # intact and may never overwrite a replacement attempt.
+            global_state, _changed = self._read_persona_genesis_global_locked(now_ms=now)
+            if (
+                claim_lease.expires_at_ms <= now
+                or not self._global_lease_matches(global_state, claim_lease)
+            ):
+                return False
+            snapshot = self._read_genesis_locked(active)
+            if (
+                snapshot is None
+                or not self._payload_matches_persona(snapshot.payload, active)
+                or not self._claim_matches_lease(snapshot.payload, claim_lease)
+            ):
+                return False
+            backoff = {
+                "state": "backoff",
+                "persona_lifecycle_generation": active.lifecycle_generation,
+                "source_fingerprint": source,
+                "attempt": claim_lease.attempt,
+                "next_attempt_at_ms": now + backoff_ms,
+            }
+            self._write_snapshot_locked(
+                self.genesis_path(active),
+                expected_generation=snapshot.generation,
+                payload=backoff,
+            )
+            self._release_global_lease_locked(global_state, claim_lease)
+            return True
+
+    def release_persona_genesis_lease(
+        self,
+        lease: PersonaGenesisLease,
+        *,
+        now_ms: int | None = None,
+    ) -> bool:
+        """Release only the exact current global lease; stale releases are inert."""
+
+        claim_lease = self._require_genesis_lease(lease)
+        now = self._require_genesis_now(now_ms)
+        with self._repository_lock():
+            global_state, changed = self._read_persona_genesis_global_locked(now_ms=now)
+            released = self._release_global_lease_locked(global_state, claim_lease)
+            if not released and changed:
+                self._write_persona_genesis_global_locked(global_state)
+            return released
+
     def write_genesis(
         self,
         persona_ref: PersonaRevisionRef,
@@ -1696,33 +2481,34 @@ class ScopeRepository:
         payload: dict[str, object],
         expected_generation: int = 0,
     ) -> int:
+        """Legacy seam retained solely to preserve lifecycle-fence diagnostics.
+
+        Genesis records cannot be written generically: a caller must use a
+        durable claim followed by ``commit_persona_genesis_activation`` so no
+        partial or neutral activation can ever become visible.
+        """
+
         if type(persona_ref) is not PersonaRevisionRef:
             raise ValueError("persona_ref must be a PersonaRevisionRef")
-        path = (
-            self._persona_directory(persona_ref.bot_ref.token, persona_ref.token)
-            / "genesis.json"
-        )
+        _require_generation(expected_lifecycle_generation, "expected_lifecycle_generation")
+        _require_generation(expected_generation, "expected_generation")
+        _require_payload(payload)
         with self._repository_lock():
             self._require_active_persona_locked(
                 persona_ref,
                 expected_lifecycle_generation=expected_lifecycle_generation,
             )
-            return self._write_snapshot_locked(
-                path,
-                expected_generation=expected_generation,
-                payload=payload,
-            )
+        raise ValueError("generic persona genesis writes are forbidden")
 
     def read_genesis(self, persona_ref: PersonaRevisionRef) -> Snapshot | None:
         if type(persona_ref) is not PersonaRevisionRef:
             raise ValueError("persona_ref must be a PersonaRevisionRef")
-        path = (
-            self._persona_directory(persona_ref.bot_ref.token, persona_ref.token)
-            / "genesis.json"
-        )
         with self._repository_lock():
-            self._require_active_persona_locked(persona_ref)
-            return self._read_snapshot_locked(path)
+            active = self._require_active_persona_locked(persona_ref)
+            snapshot = self._read_genesis_locked(active)
+            if snapshot is None or not self._payload_matches_persona(snapshot.payload, active):
+                return None
+            return snapshot
 
     @staticmethod
     def _now_ms() -> int:
@@ -1812,6 +2598,7 @@ RelationScopedPersistence = RelationScopedPersistenceGateway
 
 
 __all__ = [
+    "PersonaGenesisLease",
     "RelationScopedPersistence",
     "RelationScopedPersistenceGateway",
     "RepositoryCorruptionError",

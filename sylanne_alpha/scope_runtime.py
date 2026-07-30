@@ -30,6 +30,7 @@ from sylanne_alpha.scope_repository import (
     ScopeRepository,
     ScopedPersistenceGateway,
 )
+from sylanne_alpha.persona_genesis import PersonaGenesisOwner
 from sylanne_alpha.session_state_store import SessionStateStore
 from sylanne_alpha.transient_context import TransientContextSink
 
@@ -573,7 +574,47 @@ class PersonaRuntime:
         )
     )
     background_tasks: set[Any] = field(default_factory=set, repr=False)
+    persona_genesis: PersonaGenesisOwner | None = field(default=None, repr=False)
+    # This is fixed when the runtime is created.  A runtime that ever proceeds
+    # through baseline construction never re-enters Genesis without replacement.
+    genesis_required: bool = False
+    genesis_baseline_latched: bool = False
+    persona_services_factory: Callable[["PersonaRuntime"], bool] | None = field(
+        default=None,
+        repr=False,
+    )
+    persona_services_ready: bool = False
     generation: int = 0
+
+    def ensure_persona_services_ready(self, *, require_genesis: bool = True) -> bool:
+        """Construct Persona services once, gated by Genesis when requested."""
+
+        if self.persona_services_ready:
+            if self.self_core is not None and self.autonomy_scheduler is not None:
+                return True
+            self.persona_services_ready = False
+        if require_genesis:
+            owner = self.persona_genesis
+            cached_ready = getattr(owner, "is_ready_cached", None)
+            if callable(cached_ready):
+                if not cached_ready():
+                    return False
+            elif owner is None or not owner.is_ready():
+                return False
+        factory = self.persona_services_factory
+        if factory is None:
+            ready = self.self_core is not None and self.autonomy_scheduler is not None
+        else:
+            try:
+                ready = bool(factory(self))
+            except Exception:
+                return False
+            ready = ready and self.self_core is not None and self.autonomy_scheduler is not None
+        if not ready:
+            return False
+        self.persona_services_ready = True
+        self.genesis_baseline_latched = True
+        return True
 
     def memory_system_for(self, scope: SessionScope) -> object:
         """Return a memory owner for this exact scope, never a fallback owner."""
@@ -1197,6 +1238,21 @@ class ScopeRuntimeRegistry:
             raise ScopeMismatch("runtime factory must return a PersonaRuntime")
         if runtime.persona_ref != scope.persona_ref:
             raise ScopeMismatch("runtime factory returned a sibling persona runtime")
+        owner = runtime.persona_genesis
+        if owner is None:
+            runtime.persona_genesis = PersonaGenesisOwner(
+                runtime.persona_ref,
+                repository=self._repository,
+                background_tasks=runtime.background_tasks,
+            )
+        elif type(owner) is not PersonaGenesisOwner:
+            raise ScopeMismatch("runtime has an invalid persona genesis owner")
+        elif not owner.matches_binding(
+            runtime.persona_ref,
+            self._repository,
+            runtime.background_tasks,
+        ):
+            raise ScopeMismatch("runtime has a mismatched persona genesis owner")
         return runtime
 
     def for_scope(self, scope: SessionScope) -> PersonaRuntime:
@@ -1560,6 +1616,10 @@ class ScopeRuntimeRegistry:
             self._drop_unused_transport_generation_fence(identity)
         self._released_sessions = {item for item in self._released_sessions if item[:3] != key}
         if runtime is not None:
+            owner = runtime.persona_genesis
+            retire = getattr(owner, "retire", None)
+            if callable(retire):
+                retire()
             self._cancel_runtime_tasks(runtime)
             runtime.memory_systems.clear()
             runtime.v2core_runtimes.clear()

@@ -178,6 +178,25 @@
     "default": false,
     "hint": "默认关闭。开启后，未单独指定模型的后台记忆与关系语义任务可跟随共享辅助模型或当前聊天模型，并可能产生额外 LLM 调用。前台即时判断始终由 v2core 本地完成。"
   },
+  "sylanne_alpha_persona_genesis_enabled": {
+    "description": "启用人格创生（实验性）",
+    "type": "bool",
+    "default": false
+  },
+  "sylanne_alpha_persona_genesis_paid_opt_in": {
+    "description": "同意人格创生使用付费 LLM 调用",
+    "type": "bool",
+    "default": false,
+    "hint": "人格创生会产生额外付费 LLM 调用；仅在你已了解费用并主动同意后开启。"
+  },
+  "sylanne_alpha_persona_genesis_provider_id": {
+    "description": "人格创生 LLM Provider",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "ui_tier": "advanced_provider",
+    "hint": "高级覆盖：留空时继承共享辅助模型；无需为人格创生单独配置。"
+  },
   "sylanne_alpha_assessor_max_tokens": {
     "description": "语义评估 LLM 最大输出 token",
     "type": "int",
