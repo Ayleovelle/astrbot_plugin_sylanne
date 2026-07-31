@@ -454,7 +454,11 @@ class ScopeResolver:
         self._repository = repository
         self._catalog = catalog
         self._identity = identity
-        self._account_proofs = account_proofs or NoAdapterAccountProofProvider()
+        self._account_proofs = (
+            NoAdapterAccountProofProvider()
+            if account_proofs is None
+            else account_proofs
+        )
         self._clock_ms = clock_ms or (lambda: time.time_ns() // 1_000_000)
         self._allow_test_synthetic_turn = allow_test_synthetic_turn
         self._prepare_authority = object()
@@ -475,12 +479,21 @@ class ScopeResolver:
 
         repository = ScopeRepository(root)
         identity = load_or_create_scope_identity_key(repository.root / "identity.key")
+        proofs = (
+            NoAdapterAccountProofProvider()
+            if account_proofs is None
+            else account_proofs
+        )
         return cls(
             context,
             repository=repository,
-            catalog=SessionCatalog(repository, identity_key=identity),
+            catalog=SessionCatalog(
+                repository,
+                identity_key=identity,
+                account_proofs=proofs,
+            ),
             identity=identity,
-            account_proofs=account_proofs,
+            account_proofs=proofs,
         )
 
     @classmethod
@@ -616,37 +629,48 @@ class ScopeResolver:
                 != transport.session_ref
             ):
                 return None
-            proof_digest = "proof-unavailable"
-            proof_generation = 0
-            proof_expires_at_ms = 0
-            if not self_id:
-                current = self._account_proofs.current(platform_id)
-                if current is None:
-                    return None
-                proven = resolve_proven_single_account(
+            now_ms = int(self._clock_ms())
+            current: CurrentAdapterAccountProof | None
+            try:
+                candidate = self._account_proofs.current(platform_id)
+            except Exception:
+                candidate = None
+            current = (
+                candidate
+                if type(candidate) is CurrentAdapterAccountProof
+                else None
+            )
+            proven = (
+                resolve_proven_single_account(
                     current.proof,
                     platform_id=platform_id,
                     current_account_set_digest=current.current_account_set_digest,
                     current_proof_generation=current.current_proof_generation,
-                    now_ms=int(self._clock_ms()),
+                    now_ms=now_ms,
                 )
-                if proven != transport.bot_ref:
-                    return None
-                proof_digest = current.current_account_set_digest
-                proof_generation = current.current_proof_generation
-                proof_expires_at_ms = current.proof.expires_at_ms
-            else:
-                current = self._account_proofs.current(platform_id)
-                if current is not None:
-                    proof_digest = current.current_account_set_digest
-                    proof_generation = current.current_proof_generation
-                    proof_expires_at_ms = current.proof.expires_at_ms
+                if current is not None
+                else None
+            )
+            live_proof = current if proven == transport.bot_ref else None
+            if not self_id and live_proof is None:
+                return None
+
+            proof_digest = "proof-unavailable"
+            proof_generation = 0
+            proof_expires_at_ms = 0
+            capability = "reactive_only"
+            if live_proof is not None:
+                proof_digest = live_proof.current_account_set_digest
+                proof_generation = live_proof.current_proof_generation
+                proof_expires_at_ms = live_proof.proof.expires_at_ms
+                if self_id and self._platform_supports_proactive(platform_id):
+                    capability = "proactive_send_v1"
             return ProtectedDeliveryBinding(
                 platform_id=platform_id,
                 self_id=self_id,
                 message_session=canonical_umo,
                 target_address=canonical_umo,
-                adapter_capability="reactive_only",
+                adapter_capability=capability,
                 account_proof_digest=proof_digest,
                 account_proof_generation=proof_generation,
                 account_proof_expires_at_ms=proof_expires_at_ms,
@@ -654,6 +678,20 @@ class ScopeResolver:
             )
         except Exception:
             return None
+
+    def _platform_supports_proactive(self, platform_id: str) -> bool:
+        """Require the live AstrBot platform to explicitly advertise proactive send."""
+
+        getter = getattr(self._context, "get_platform_inst", None)
+        if not callable(getter):
+            return False
+        try:
+            platform = getter(platform_id)
+            meta = getattr(platform, "meta", None)
+            details = meta() if callable(meta) else None
+            return getattr(details, "support_proactive_message", None) is True
+        except Exception:
+            return False
 
     @staticmethod
     def _persona_source(

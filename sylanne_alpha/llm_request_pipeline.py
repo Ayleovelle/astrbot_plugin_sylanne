@@ -40,6 +40,7 @@ from sylanne_alpha.semantic_segmentation import (
     semantic_beat_system_contract,
 )
 from sylanne_alpha.state_persistence import mark_dirty
+from sylanne_alpha.scope_contracts import SessionScope
 from sylanne_alpha.utils import safe_ensure_future
 
 if TYPE_CHECKING:
@@ -3550,7 +3551,12 @@ class LLMRequestPipeline:
             logger.debug("Sylanne qzone candidate handler failed: %s", exc)
 
     async def _life_sim_outreach(
-        self, reason: str, mood: str, intent: dict | None = None
+        self,
+        reason: str,
+        mood: str,
+        intent: dict | None = None,
+        *,
+        scope: SessionScope | None = None,
     ) -> None:
         """将生命事件存储为待注入上下文，等待下次 LLM 请求时自然表达。
 
@@ -3575,6 +3581,52 @@ class LLMRequestPipeline:
                 reason_code/expires_at/event_id 等。
         """
         p = self._p
+        # A frozen scope may only create a catalog-sealed outbox intent.  This
+        # callback must carry the exact scope captured at configure time; a
+        # delayed callback may never select a recent/raw session on its own.
+        registry = getattr(p, "_scope_runtime_registry", None)
+        if registry is not None:
+            if type(scope) is not SessionScope:
+                return
+            live = getattr(registry, "is_live_session", None)
+            binding_getter = getattr(p, "_bound_runtime", None)
+            try:
+                binding = binding_getter() if callable(binding_getter) else None
+                if (
+                    not callable(live)
+                    or live(scope) is not True
+                    or binding is None
+                    or getattr(binding, "scope", None) != scope
+                ):
+                    return
+            except Exception:
+                return
+            enqueue = getattr(p, "enqueue_scoped_proactive_intent", None)
+            if not callable(enqueue):
+                enqueue = getattr(p, "_enqueue_scoped_proactive_intent", None)
+            if not callable(enqueue):
+                return
+            now_ms = time.time_ns() // 1_000_000
+            expires_at_ms = now_ms + 300_000
+            raw_expiry = (intent or {}).get("expires_at")
+            if type(raw_expiry) in (int, float) and raw_expiry > 0:
+                expires_at_ms = int(raw_expiry * 1_000)
+            try:
+                queued = enqueue(
+                    scope,
+                    text=reason,
+                    idempotent=False,
+                    expires_at_ms=expires_at_ms,
+                )
+                if inspect.isawaitable(queued):
+                    await queued
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            return
+        if scope is not None:
+            return
         if not len(p._store.hosts):
             logger.info("Sylanne life_sim_outreach: no active hosts, skipping")
             return

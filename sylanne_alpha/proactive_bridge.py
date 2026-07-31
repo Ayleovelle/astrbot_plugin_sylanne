@@ -570,6 +570,11 @@ class ProactiveBridge:
         Returns:
             {"dispatched": bool, "reason": str} —— reason 说明成功或降级原因。
         """
+        # A frozen scope has a durable DeliveryOutbox owner.  The legacy bridge
+        # has only a raw-origin direct-send path, so it must never be an
+        # alternative delivery route for a scoped intent.
+        if self._scoped_runtime_binding(session_key) is not None:
+            return {"dispatched": False, "reason": "scoped_outbox_required"}
         plugin = self._get_proactive_plugin()
         if plugin is None:
             return {"dispatched": False, "reason": "proactive_chat_not_installed"}

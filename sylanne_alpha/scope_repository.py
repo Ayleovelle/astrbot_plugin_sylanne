@@ -7,6 +7,7 @@ import math
 import os
 import re
 import secrets
+import stat
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -18,6 +19,7 @@ from typing import Iterator
 import portalocker
 
 from . import infra
+from .infra import atomic_write_owner_only_bytes
 from .scope_contracts import (
     BotRef,
     PersonaRevisionRef,
@@ -551,6 +553,114 @@ class ScopeRepository:
 
     def transport_delivery_binding_path(self, bot_token: str, session_token: str) -> Path:
         return self.transport_session_directory(bot_token, session_token) / "delivery-binding.json"
+
+    def delivery_outbox_path(self, scope: SessionScope) -> Path:
+        """Return the owner-only proactive outbox location for one Persona scope.
+
+        The filename and all parent directories contain only opaque scope tokens.
+        Address material lives in the document itself and is never reconstructed
+        from an arbitrary session string.
+        """
+
+        if type(scope) is not SessionScope:
+            raise ValueError("scope must be a SessionScope")
+        return (
+            self._persona_directory(scope.bot_ref.token, scope.persona_ref.token)
+            / "delivery"
+            / "outbox.json"
+        )
+
+    def _read_delivery_outbox_locked(
+        self,
+        scope: SessionScope,
+    ) -> tuple[bytes, dict[str, object]] | None:
+        """Read one protected outbox document while the repository lock is held."""
+
+        return self._read_owner_json_locked(
+            self.delivery_outbox_path(scope),
+            error_label="delivery outbox",
+        )
+
+    def _read_owner_json_locked(
+        self,
+        path: Path,
+        *,
+        error_label: str,
+    ) -> tuple[bytes, dict[str, object]] | None:
+        """Read one owner-only JSON document while the repository lock is held."""
+
+        if not path.exists():
+            return None
+        try:
+            if os.name == "nt":
+                infra._validate_windows_path(path, error_label=error_label)
+            else:
+                info = infra._validate_posix_owner_only(
+                    path,
+                    directory=False,
+                    error_label=error_label,
+                )
+                if not stat.S_ISREG(info.st_mode):
+                    raise RepositoryCorruptionError(f"{error_label} is not a regular file")
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise RepositoryCorruptionError(f"{error_label} is unreadable") from exc
+        return self._read_json(path, error_label=error_label)
+
+    def _iter_delivery_outboxes_locked(
+        self,
+    ) -> Iterator[tuple[Path, bytes, dict[str, object]]]:
+        """Yield only opaque-token owner-only delivery outbox documents."""
+
+        if not self.bots_directory.is_dir():
+            return
+        try:
+            bot_directories = tuple(self.bots_directory.iterdir())
+        except OSError as exc:
+            raise RepositoryCorruptionError("delivery outbox root is unreadable") from exc
+        for bot_directory in bot_directories:
+            if not bot_directory.is_dir() or not bot_directory.name.startswith("bot_v1_"):
+                continue
+            _require_token(bot_directory.name, "bot_v1_")
+            personas = bot_directory / "personas"
+            if not personas.is_dir():
+                continue
+            try:
+                persona_directories = tuple(personas.iterdir())
+            except OSError as exc:
+                raise RepositoryCorruptionError("delivery persona root is unreadable") from exc
+            for persona_directory in persona_directories:
+                if (
+                    not persona_directory.is_dir()
+                    or not persona_directory.name.startswith("persona_v1_")
+                ):
+                    continue
+                _require_token(persona_directory.name, "persona_v1_")
+                path = persona_directory / "delivery" / "outbox.json"
+                loaded = self._read_owner_json_locked(
+                    path,
+                    error_label="delivery outbox",
+                )
+                if loaded is not None:
+                    raw, document = loaded
+                    yield path, raw, document
+
+    def _write_delivery_outbox_locked(
+        self,
+        scope: SessionScope,
+        document: dict[str, object],
+    ) -> None:
+        """Atomically replace one owner-only outbox document under the lock."""
+
+        if type(document) is not dict:
+            raise ValueError("delivery outbox document must be an exact dict")
+        atomic_write_owner_only_bytes(
+            self.delivery_outbox_path(scope),
+            _canonical_json_bytes(document),
+            error_label="delivery outbox",
+        )
+        self._commit_catalog_generation_locked()
 
     def bot_binding_manifest_path(self, binding_token: str) -> Path:
         return (

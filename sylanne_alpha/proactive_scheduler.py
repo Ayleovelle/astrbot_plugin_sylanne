@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import inspect
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -429,8 +430,117 @@ class ProactiveScheduler:
             pass
         return decision
 
+    async def _request_scoped_dispatch(
+        self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Enqueue through this scheduler's immutable scoped gateway only."""
+
+        persistence = self.persistence
+        if persistence is None:
+            return {"dispatched": False, "reason": "scoped_outbox_required"}
+        scope = persistence.scope
+        event_or_session = args[0] if args else kwargs.get("event_or_session")
+        dry_run = bool(kwargs.get("dry_run", False))
+        sk = str(
+            kwargs.get("session_key", "")
+            or (
+                getattr(event_or_session, "unified_msg_origin", "")
+                if event_or_session is not None
+                else ""
+            )
+            or ""
+        ).strip()
+        if sk and sk != scope.storage_token:
+            return {
+                "dispatched": False,
+                "reason": "scope_mismatch",
+                "session_key": sk,
+                "dry_run": dry_run,
+            }
+        session_key = scope.storage_token
+        text = kwargs.get("text")
+        if type(text) is not str or not text:
+            for key in ("message_text", "motivation_text", "candidate_context"):
+                candidate = kwargs.get(key)
+                if type(candidate) is str and candidate:
+                    text = candidate
+                    break
+        if type(text) is not str or not text:
+            return {
+                "dispatched": False,
+                "reason": "scoped_message_required",
+                "session_key": session_key,
+                "dry_run": dry_run,
+            }
+        idempotent = kwargs.get("idempotent", False)
+        if type(idempotent) is not bool:
+            return {
+                "dispatched": False,
+                "reason": "invalid_idempotency",
+                "session_key": session_key,
+                "dry_run": dry_run,
+            }
+        expires_at_ms = kwargs.get("expires_at_ms")
+        if expires_at_ms is not None and (
+            type(expires_at_ms) is not int or expires_at_ms < 0
+        ):
+            return {
+                "dispatched": False,
+                "reason": "invalid_expiry",
+                "session_key": session_key,
+                "dry_run": dry_run,
+            }
+        if dry_run:
+            return {
+                "dispatched": False,
+                "would_dispatch": True,
+                "queued": False,
+                "session_key": session_key,
+                "dry_run": True,
+            }
+        enqueue = getattr(self._p, "enqueue_scoped_proactive_intent", None)
+        if not callable(enqueue):
+            enqueue = getattr(self._p, "_enqueue_scoped_proactive_intent", None)
+        if not callable(enqueue):
+            return {
+                "dispatched": False,
+                "reason": "scoped_outbox_required",
+                "session_key": session_key,
+            }
+        try:
+            result = enqueue(
+                scope,
+                text=text,
+                idempotent=idempotent,
+                expires_at_ms=expires_at_ms,
+            )
+            if inspect.isawaitable(result):
+                result = await result
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            result = None
+        if result is None:
+            return {
+                "dispatched": False,
+                "reason": "scoped_enqueue_rejected",
+                "session_key": session_key,
+            }
+        return {
+            "dispatched": True,
+            "queued": True,
+            "delivery_id": getattr(result, "delivery_id", None),
+            "session_key": session_key,
+            "dry_run": False,
+        }
+
     async def request_dispatch(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """主动发言 dispatch：决策 → 桥接发送（或 dry_run 只返回决策）。"""
+
+        if self._scoped_components is not None:
+            return await self._request_scoped_dispatch(*args, **kwargs)
         self._require_legacy_session_api()
         from sylanne_alpha.engine_adapter import derive_should_send
 
@@ -448,6 +558,16 @@ class ProactiveScheduler:
         ).strip()
         if not sk:
             return {"dispatched": False, "reason": "no_session_key", "dry_run": dry_run}
+
+        # A live scoped runtime owns an opaque SessionScope, not a reusable raw
+        # session address.  Its proactive work must be issued as a sealed
+        # DeliveryOutbox intent by the scoped delivery owner.
+        if self._bound_session_runtime(sk) is not None:
+            return {
+                "dispatched": False,
+                "reason": "scoped_outbox_required",
+                "session_key": sk,
+            }
 
         dispatch_req = self.build_dispatch_request(session_key=sk)
         block = self.dispatch_blocked_reason(

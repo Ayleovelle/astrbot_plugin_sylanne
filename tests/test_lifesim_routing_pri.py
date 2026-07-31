@@ -196,6 +196,27 @@ def test_life_sim_outreach_no_event_id_does_not_crash():
         t.cancel()
 
 
+def test_scoped_life_outreach_never_selects_a_recent_legacy_session():
+    """A scoped runtime has no raw-address fallback path for life outreach."""
+    import asyncio
+
+    p = _Plugin({"priv:owner-1": _Host(100.0)})
+    p._scope_runtime_registry = object()
+    p._store.relationship_register_state.set("priv:owner-1", _romantic())
+    p._store.pending_outreach_context = _PendingCtx()
+    p._background_tasks = []
+    pipe = _pipe(p)
+
+    def _legacy_selection_forbidden():
+        raise AssertionError("scoped outreach must not choose a recent raw session")
+
+    pipe._most_recent_intimate_host_key = _legacy_selection_forbidden
+    asyncio.run(pipe._life_sim_outreach("event", "calm", None))
+
+    assert p._store.pending_outreach_context.data == {}
+    assert p._background_tasks == []
+
+
 # ---- T2-05 MAJOR-1：第二条可达 dispatch 路径（5min fallback 直发分支）也要
 # 在真正发出后消费掉产生 user_followup 标签的那条待跟进线索 ----
 

@@ -7,6 +7,7 @@ import hmac
 import json
 import os
 import re
+import secrets
 import stat
 import time
 from dataclasses import dataclass, field, replace
@@ -15,11 +16,21 @@ from typing import Callable
 
 from . import infra
 from .infra import atomic_write_owner_only_bytes
-from .scope_contracts import ResolvedTransportScope, SessionScope
+from .scope_contracts import (
+    BotDeliveryRef,
+    ProactiveDeliveryLease,
+    ProactiveIntentDraft,
+    ResolvedTransportScope,
+    SessionScope,
+)
 from .scope_identity import (
+    AdapterAccountProofProvider,
     BotBinding,
+    CurrentAdapterAccountProof,
+    NoAdapterAccountProofProvider,
     ScopeIdentityKey,
     load_or_create_scope_identity_key,
+    resolve_proven_single_account,
 )
 from .scope_repository import (
     RepositoryCorruptionError,
@@ -33,7 +44,18 @@ _DELIVERY_BINDING_SCHEMA = "sylanne.delivery.binding.v1"
 _BOT_BINDING_SCHEMA = "sylanne.bot.binding.v1"
 _BINDING_DIGEST_DOMAIN = b"sylanne.scope.delivery-binding.v1\x00"
 _BOT_BINDING_TOKEN_DOMAIN = b"sylanne.scope.bot-binding-token.v1\x00"
+_PROACTIVE_INTENT_DOMAIN = b"sylanne.scope.proactive-intent.v1\x00"
 _TOKEN_PAYLOAD = re.compile(r"[A-Za-z0-9_-]+\Z", re.ASCII)
+_PROACTIVE_CAPABILITIES = frozenset(
+    {
+        "proactive",
+        "proactive_v1",
+        "proactive_send",
+        "proactive_send_v1",
+        "proactive_idempotent",
+        "proactive_idempotent_v1",
+    }
+)
 
 
 def _require_token(value: object, prefix: str) -> str:
@@ -164,6 +186,8 @@ class SessionCatalog:
         repository: ScopeRepository,
         *,
         identity_key: ScopeIdentityKey | None = None,
+        account_proofs: AdapterAccountProofProvider | None = None,
+        clock_ms: Callable[[], int] | None = None,
     ) -> None:
         if type(repository) is not ScopeRepository:
             raise ValueError("repository must be a ScopeRepository")
@@ -173,6 +197,12 @@ class SessionCatalog:
         self._identity_key = identity_key or load_or_create_scope_identity_key(
             repository.root / "identity.key"
         )
+        self._account_proofs = (
+            NoAdapterAccountProofProvider()
+            if account_proofs is None
+            else account_proofs
+        )
+        self._clock_ms = clock_ms or self._now_ms
 
     def _binding_digest(self, document: dict[str, object]) -> str:
         digest = hmac.new(
@@ -852,6 +882,355 @@ class SessionCatalog:
                     "transport session ownership is ambiguous"
                 )
             return matches[0]
+
+    @staticmethod
+    def _proactive_intent_payload(draft: ProactiveIntentDraft) -> dict[str, object]:
+        """Return the complete HMAC-covered draft without exposing it publicly."""
+
+        ref = draft.delivery_ref
+        lease = draft.lease
+        return {
+            "delivery_ref": {
+                "token": ref.token,
+                "delivery_id": ref.delivery_id,
+                "bot_ref": {
+                    "token": ref.bot_ref.token,
+                    "generation": ref.bot_ref.generation,
+                },
+                "persona_ref": {
+                    "token": ref.persona_ref.token,
+                    "bot_ref": {
+                        "token": ref.persona_ref.bot_ref.token,
+                        "generation": ref.persona_ref.bot_ref.generation,
+                    },
+                    "persona_id_digest": ref.persona_ref.persona_id_digest,
+                    "source_fingerprint": ref.persona_ref.source_fingerprint,
+                    "lifecycle_generation": ref.persona_ref.lifecycle_generation,
+                },
+                "session_ref": {
+                    "token": ref.session_ref.token,
+                    "bot_ref": {
+                        "token": ref.session_ref.bot_ref.token,
+                        "generation": ref.session_ref.bot_ref.generation,
+                    },
+                    "generation": ref.session_ref.generation,
+                },
+                "platform_id": ref.platform_id,
+                "self_id": ref.self_id,
+                "target_address": ref.target_address,
+                "adapter_capability": ref.adapter_capability,
+            },
+            "lease": {
+                "transport_session_token": lease.transport_session_token,
+                "resolved_scope_token": lease.resolved_scope_token,
+                "expected_persona_token": lease.expected_persona_token,
+                "persona_lifecycle_generation": lease.persona_lifecycle_generation,
+                "session_generation": lease.session_generation,
+                "scope_generation": lease.scope_generation,
+                "expected_turn_generation": lease.expected_turn_generation,
+                "expires_at_ms": lease.expires_at_ms,
+            },
+            "text": draft.text,
+            "idempotent": draft.idempotent,
+        }
+
+    def _proactive_intent_mac(self, draft: ProactiveIntentDraft) -> str:
+        return hmac.new(
+            self._identity_key.secret,
+            _PROACTIVE_INTENT_DOMAIN
+            + _canonical_json_bytes(self._proactive_intent_payload(draft)),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def _current_account_proof_locked(
+        self,
+        platform_id: str,
+        supplied: CurrentAdapterAccountProof | None,
+    ) -> CurrentAdapterAccountProof | None:
+        if supplied is not None:
+            return supplied if type(supplied) is CurrentAdapterAccountProof else None
+        try:
+            current = self._account_proofs.current(platform_id)
+        except Exception:
+            return None
+        return current if type(current) is CurrentAdapterAccountProof else None
+
+    def _scope_matches_frozen_turn_locked(
+        self,
+        turn: TransportTurn,
+        scope: SessionScope,
+    ) -> bool:
+        if turn.turn_state != "frozen" or turn.active_scope_token is None:
+            return False
+        try:
+            active = self.repository._resolve_scope_locked(turn.active_scope_token)
+        except (RepositoryCorruptionError, StaleScopeWrite, ValueError):
+            return False
+        return (
+            active == scope
+            and turn.bot_ref == scope.bot_ref.token
+            and turn.session_ref == scope.session_ref.token
+            and turn.session_generation == scope.session_ref.generation
+            and turn.active_persona_ref == scope.persona_ref.token
+            and turn.persona_lifecycle_generation
+            == scope.persona_ref.lifecycle_generation
+            and turn.active_scope_token == scope.storage_token
+            and turn.scope_generation == scope.scope_generation
+        )
+
+    def _proof_matches_delivery_binding_locked(
+        self,
+        binding: ProtectedDeliveryBinding,
+        scope: SessionScope,
+        turn: TransportTurn,
+        current: CurrentAdapterAccountProof | None,
+        *,
+        now_ms: int,
+    ) -> bool:
+        if (
+            type(current) is not CurrentAdapterAccountProof
+            or not binding.self_id
+            or binding.adapter_capability not in _PROACTIVE_CAPABILITIES
+            or now_ms >= binding.account_proof_expires_at_ms
+        ):
+            return False
+        proof = current.proof
+        proven = resolve_proven_single_account(
+            proof,
+            platform_id=binding.platform_id,
+            current_account_set_digest=current.current_account_set_digest,
+            current_proof_generation=current.current_proof_generation,
+            now_ms=now_ms,
+        )
+        if (
+            proven != scope.bot_ref
+            or now_ms >= proof.expires_at_ms
+            or not hmac.compare_digest(
+                binding.account_proof_digest,
+                current.current_account_set_digest,
+            )
+            or binding.account_proof_generation != current.current_proof_generation
+        ):
+            return False
+        try:
+            binding_token = self._bot_binding_token(
+                binding.platform_id,
+                binding.self_id,
+            )
+            authority = self._load_bot_binding_locked(binding_token)
+            if authority is None:
+                return False
+            binding_generation, stored_bot_token = authority
+            expected_bot = self._identity_key.bot_ref(
+                BotBinding(
+                    platform_id=binding.platform_id,
+                    self_id=binding.self_id,
+                ),
+                binding_generation,
+            )
+        except (RepositoryCorruptionError, ValueError):
+            return False
+        return (
+            binding.binding_generation == binding_generation
+            and expected_bot == scope.bot_ref
+            and hmac.compare_digest(stored_bot_token, turn.bot_ref)
+        )
+
+    def _validate_proactive_lease_locked(
+        self,
+        draft: ProactiveIntentDraft,
+        *,
+        current_account_proof: CurrentAdapterAccountProof | None = None,
+        now_ms: int,
+    ) -> bool:
+        if type(draft) is not ProactiveIntentDraft or type(now_ms) is not int or now_ms < 0:
+            return False
+        ref = draft.delivery_ref
+        lease = draft.lease
+        if now_ms >= lease.expires_at_ms:
+            return False
+        try:
+            scope = SessionScope(
+                bot_ref=ref.bot_ref,
+                persona_ref=ref.persona_ref,
+                session_ref=ref.session_ref,
+                storage_token=lease.resolved_scope_token,
+                scope_generation=lease.scope_generation,
+            )
+            if (
+                lease.transport_session_token != ref.session_ref.token
+                or lease.expected_persona_token != ref.persona_ref.token
+                or lease.persona_lifecycle_generation
+                != ref.persona_ref.lifecycle_generation
+                or lease.session_generation != ref.session_ref.generation
+            ):
+                return False
+            turn = self._load_turn_locked(ref.bot_ref.token, ref.session_ref.token)
+            if turn is None or not self._scope_matches_frozen_turn_locked(turn, scope):
+                return False
+            if turn.turn_generation != lease.expected_turn_generation:
+                return False
+            binding = self._load_binding_locked(turn)
+            if (
+                binding is None
+                or binding.platform_id != ref.platform_id
+                or binding.self_id != ref.self_id
+                or binding.target_address != ref.target_address
+                or binding.adapter_capability != ref.adapter_capability
+            ):
+                return False
+            current = self._current_account_proof_locked(
+                binding.platform_id,
+                current_account_proof,
+            )
+            return self._proof_matches_delivery_binding_locked(
+                binding,
+                scope,
+                turn,
+                current,
+                now_ms=now_ms,
+            )
+        except (RepositoryCorruptionError, StaleScopeWrite, ValueError):
+            return False
+
+    def _verify_proactive_intent_locked(
+        self,
+        draft: object,
+        *,
+        current_account_proof: CurrentAdapterAccountProof | None = None,
+        now_ms: int,
+    ) -> bool:
+        if type(draft) is not ProactiveIntentDraft:
+            return False
+        try:
+            expected_mac = self._proactive_intent_mac(draft)
+        except (TypeError, ValueError):
+            return False
+        if not hmac.compare_digest(draft.issuer_mac, expected_mac):
+            return False
+        return self._validate_proactive_lease_locked(
+            draft,
+            current_account_proof=current_account_proof,
+            now_ms=now_ms,
+        )
+
+    def validate_proactive_lease(
+        self,
+        draft: object,
+        *,
+        current_account_proof: CurrentAdapterAccountProof | None = None,
+        now_ms: int | None = None,
+    ) -> bool:
+        """Revalidate an issued proactive draft without retaining account state."""
+
+        value = self._clock_ms() if now_ms is None else now_ms
+        if type(value) is not int or value < 0:
+            return False
+        with self.repository.transaction():
+            return self._validate_proactive_lease_locked(
+                draft,  # type: ignore[arg-type]
+                current_account_proof=current_account_proof,
+                now_ms=value,
+            )
+
+    def verify_proactive_intent(
+        self,
+        draft: object,
+        *,
+        current_account_proof: CurrentAdapterAccountProof | None = None,
+        now_ms: int | None = None,
+    ) -> bool:
+        """Verify issuer HMAC and every live authority parent for one draft."""
+
+        value = self._clock_ms() if now_ms is None else now_ms
+        if type(value) is not int or value < 0:
+            return False
+        with self.repository.transaction():
+            return self._verify_proactive_intent_locked(
+                draft,
+                current_account_proof=current_account_proof,
+                now_ms=value,
+            )
+
+    def issue_proactive_intent(
+        self,
+        scope: SessionScope,
+        *,
+        text: str,
+        idempotent: bool,
+        expires_at_ms: int,
+        current_account_proof: CurrentAdapterAccountProof | None = None,
+    ) -> ProactiveIntentDraft:
+        """Issue the only HMAC-sealed input accepted by the proactive outbox."""
+
+        if (
+            type(scope) is not SessionScope
+            or type(text) is not str
+            or not text
+            or type(idempotent) is not bool
+            or type(expires_at_ms) is not int
+            or expires_at_ms < 0
+        ):
+            raise ValueError("proactive intent inputs are invalid")
+        now_ms = self._clock_ms()
+        if type(now_ms) is not int or now_ms < 0 or expires_at_ms <= now_ms:
+            raise ValueError("proactive intent is expired")
+        with self.repository.transaction():
+            turn = self._load_turn_locked(
+                scope.bot_ref.token,
+                scope.session_ref.token,
+            )
+            if turn is None or not self._scope_matches_frozen_turn_locked(turn, scope):
+                raise ValueError("proactive intent scope is stale")
+            binding = self._load_binding_locked(turn)
+            if binding is None:
+                raise ValueError("proactive delivery binding is unavailable")
+            current = self._current_account_proof_locked(
+                binding.platform_id,
+                current_account_proof,
+            )
+            delivery_token = f"delivery_v1_{secrets.token_urlsafe(24)}"
+            draft = ProactiveIntentDraft(
+                delivery_ref=BotDeliveryRef(
+                    token=delivery_token,
+                    delivery_id=delivery_token,
+                    bot_ref=scope.bot_ref,
+                    persona_ref=scope.persona_ref,
+                    session_ref=scope.session_ref,
+                    platform_id=binding.platform_id,
+                    self_id=binding.self_id,
+                    target_address=binding.target_address,
+                    adapter_capability=binding.adapter_capability,
+                ),
+                lease=ProactiveDeliveryLease(
+                    transport_session_token=scope.session_ref.token,
+                    resolved_scope_token=scope.storage_token,
+                    expected_persona_token=scope.persona_ref.token,
+                    persona_lifecycle_generation=(
+                        scope.persona_ref.lifecycle_generation
+                    ),
+                    session_generation=scope.session_ref.generation,
+                    scope_generation=scope.scope_generation,
+                    expected_turn_generation=turn.turn_generation,
+                    expires_at_ms=expires_at_ms,
+                ),
+                text=text,
+                idempotent=idempotent,
+                issuer_mac="issuing",
+            )
+            if not self._validate_proactive_lease_locked(
+                draft,
+                current_account_proof=current,
+                now_ms=now_ms,
+            ):
+                raise ValueError("proactive intent is not issuable")
+            return ProactiveIntentDraft(
+                delivery_ref=draft.delivery_ref,
+                lease=draft.lease,
+                text=draft.text,
+                idempotent=draft.idempotent,
+                issuer_mac=self._proactive_intent_mac(draft),
+            )
 
     def can_issue_proactive(
         self,

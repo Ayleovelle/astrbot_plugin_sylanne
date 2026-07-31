@@ -232,8 +232,15 @@ from sylanne_alpha.scope_contracts import (  # noqa: E402
     VerifiedSubjectInput,
 )
 from sylanne_alpha.scope_identity import (  # noqa: E402
+    NoAdapterAccountProofProvider,
     PreparedPersonaScope,
     ScopeResolver,
+)
+from sylanne_alpha.scope_delivery import (  # noqa: E402
+    AstrBotAccountAwareTransport,
+    DeliveryOutbox,
+    DeliveryOutboxWorker,
+    ScopedDeliveryGateway,
 )
 from sylanne_alpha.scope_runtime import (  # noqa: E402
     PersonaRuntime,
@@ -1433,7 +1440,13 @@ class EmotionalStatePlugin(Star):
         self._v3_shadow = _V3ShadowFacade(self)
         # Scope-v1 is opened lazily at the first real AstrBot adapter event.  Tests
         # with a deliberately absent Context retain the pre-scope compatibility path.
+        self._scope_account_proof_provider = NoAdapterAccountProofProvider()
         self._scope_resolver_v1: ScopeResolver | None = None
+        self._scope_delivery_outbox: DeliveryOutbox | None = None
+        self._scope_delivery_worker: DeliveryOutboxWorker | None = None
+        # The outbox remains durable during teardown, but no new intents may
+        # enter once termination has started.
+        self._scope_delivery_accepting = True
         self._register_web_apis(context)
 
         # AstrBot ConversationManager / PersonaManager 集成
@@ -2754,6 +2767,117 @@ class EmotionalStatePlugin(Star):
             session_key,
         )
 
+    def register_adapter_account_proof_provider(self, provider: Any) -> None:
+        """Install the sole live account-proof source used by scope delivery."""
+
+        if not callable(getattr(provider, "current", None)):
+            raise ValueError("account proof provider must expose current(platform_id)")
+        self._scope_account_proof_provider = provider
+        resolver = getattr(self, "_scope_resolver_v1", None)
+        if resolver is not None:
+            resolver._account_proofs = provider
+            resolver.catalog._account_proofs = provider
+
+    def set_adapter_account_proof_provider(self, provider: Any) -> None:
+        self.register_adapter_account_proof_provider(provider)
+
+    def register_scope_account_proof_provider(self, provider: Any) -> None:
+        self.register_adapter_account_proof_provider(provider)
+
+    def _configure_scope_delivery(self, resolver: ScopeResolver) -> None:
+        outbox = getattr(self, "_scope_delivery_outbox", None)
+        if (
+            type(outbox) is not DeliveryOutbox
+            or outbox.repository is not resolver._repository
+            or outbox.catalog is not resolver.catalog
+        ):
+            outbox = DeliveryOutbox(resolver._repository, resolver.catalog)
+            self._scope_delivery_outbox = outbox
+            self._scope_delivery_worker = None
+        worker = getattr(self, "_scope_delivery_worker", None)
+        if type(worker) is DeliveryOutboxWorker:
+            return
+        context = getattr(self, "context", None)
+        self._scope_delivery_worker = DeliveryOutboxWorker(
+            outbox,
+            lambda: AstrBotAccountAwareTransport(
+                context,
+                self._scope_account_proof_provider,
+            ),
+            worker_id="scope-delivery-worker",
+        )
+
+    def _start_scope_delivery_worker(self) -> None:
+        outbox = getattr(self, "_scope_delivery_outbox", None)
+        worker = getattr(self, "_scope_delivery_worker", None)
+        if type(outbox) is not DeliveryOutbox or type(worker) is not DeliveryOutboxWorker:
+            return
+        if worker.running:
+            return
+        # The recovery ordering is intentional: classify a prior dispatch,
+        # expire stale queued work, then permit new adapter calls.
+        outbox.recover_after_restart()
+        outbox.expire()
+        worker.start()
+
+    def enqueue_scoped_proactive_intent(
+        self,
+        scope: SessionScope,
+        *,
+        text: str,
+        idempotent: bool,
+        expires_at_ms: int | None = None,
+    ) -> Any | None:
+        """Queue one proactive intent for an already-live exact scope only."""
+
+        if getattr(self, "_scope_delivery_accepting", True) is not True:
+            return None
+        if type(scope) is not SessionScope:
+            return None
+        resolver = self._scope_resolver_instance()
+        registry = getattr(self, "_scope_runtime_registry", None)
+        outbox = getattr(self, "_scope_delivery_outbox", None)
+        worker = getattr(self, "_scope_delivery_worker", None)
+        if (
+            resolver is None
+            or registry is None
+            or type(outbox) is not DeliveryOutbox
+            or type(worker) is not DeliveryOutboxWorker
+        ):
+            return None
+        try:
+            self._start_scope_delivery_worker()
+        except RuntimeError:
+            # A pre-initialize caller may enqueue, but cannot create an asyncio
+            # worker without the host loop.  The durable item remains pending.
+            pass
+        gateway = ScopedDeliveryGateway(
+            scope,
+            registry,
+            outbox,
+            wake=worker.wake,
+        )
+        return gateway.enqueue(
+            text=text,
+            idempotent=idempotent,
+            expires_at_ms=expires_at_ms,
+        )
+
+    def _enqueue_scoped_proactive_intent(
+        self,
+        scope: SessionScope,
+        *,
+        text: str,
+        idempotent: bool,
+        expires_at_ms: int | None = None,
+    ) -> Any | None:
+        return self.enqueue_scoped_proactive_intent(
+            scope,
+            text=text,
+            idempotent=idempotent,
+            expires_at_ms=expires_at_ms,
+        )
+
     def _scope_resolver_instance(self) -> ScopeResolver | None:
         resolver = getattr(self, "_scope_resolver_v1", None)
         if resolver is not None:
@@ -2764,6 +2888,11 @@ class EmotionalStatePlugin(Star):
                     registry.bind_repository(repository)
                 elif registry.repository is not repository:
                     registry.bind_repository(repository)
+            try:
+                self._configure_scope_delivery(resolver)
+            except Exception:
+                self._scope_delivery_outbox = None
+                self._scope_delivery_worker = None
             return resolver
         context = getattr(self, "context", None)
         if (
@@ -2773,8 +2902,21 @@ class EmotionalStatePlugin(Star):
         ):
             return None
         root = _sylanne_infra.resolve_scope_v1_root()
-        resolver = ScopeResolver.for_context(context, root)
+        provider = getattr(self, "_scope_account_proof_provider", None)
+        if not callable(getattr(provider, "current", None)):
+            provider = NoAdapterAccountProofProvider()
+            self._scope_account_proof_provider = provider
+        resolver = ScopeResolver.for_context(
+            context,
+            root,
+            account_proofs=provider,
+        )
         self._scope_resolver_v1 = resolver
+        try:
+            self._configure_scope_delivery(resolver)
+        except Exception:
+            self._scope_delivery_outbox = None
+            self._scope_delivery_worker = None
         registry = getattr(self, "_scope_runtime_registry", None)
         if registry is not None:
             if registry.repository is None:
@@ -3696,8 +3838,20 @@ class EmotionalStatePlugin(Star):
     async def _life_sim_llm_call(self, prompt: str) -> str:
         return await self._llm_request_pipeline._life_sim_llm_call(prompt)
 
-    async def _life_sim_outreach(self, reason: str, mood: str) -> None:
-        return await self._llm_request_pipeline._life_sim_outreach(reason, mood)
+    async def _life_sim_outreach(
+        self,
+        reason: str,
+        mood: str,
+        intent: dict | None = None,
+        *,
+        scope: SessionScope | None = None,
+    ) -> None:
+        return await self._llm_request_pipeline._life_sim_outreach(
+            reason,
+            mood,
+            intent,
+            scope=scope,
+        )
 
     async def _generate_outreach_message(self, reason: str, mood: str) -> str:
         return await self._llm_request_pipeline._generate_outreach_message(reason, mood)
@@ -5659,9 +5813,23 @@ class EmotionalStatePlugin(Star):
                 "（生活状态冻结、主动消息可能复读）。请在插件配置里为它选一个 LLM Provider。"
             )
         pipe = self._llm_request_pipeline
+        scope = binding.scope
+
+        async def scoped_outreach(
+            reason: str,
+            mood: str,
+            intent: dict | None = None,
+        ) -> None:
+            await pipe._life_sim_outreach(
+                reason,
+                mood,
+                intent,
+                scope=scope,
+            )
+
         life_sim.configure(
             llm_caller=pipe._life_sim_llm_call,
-            outreach_callback=pipe._life_sim_outreach,
+            outreach_callback=scoped_outreach,
             emotion_getter=pipe._life_sim_emotion,
             body_delta_callback=pipe._life_sim_body_delta,
             persona_getter=pipe._life_sim_persona_getter,
@@ -5689,6 +5857,7 @@ class EmotionalStatePlugin(Star):
 
     async def initialize(self) -> None:
         """AstrBot 插件生命周期钩子：加载后调用（有 running loop，不依赖用户消息）。"""
+        self._scope_delivery_accepting = True
         # MEM-03 PR-1：把记忆写入咽喉权威绑定到本 running loop——此后 off-loop（stdlib
         # WebUI 工作线程）提交经 call_soon_threadsafe 转入本 loop 串行执行，不再静默丢弃。
         try:
@@ -5708,6 +5877,14 @@ class EmotionalStatePlugin(Star):
             _sylanne_webui_server.set_main_loop(asyncio.get_running_loop())
         except Exception as e:
             logger.debug(f"Sylanne WebUI main loop bind skipped: {e}")
+        # The outbox is process-durable but transport authorization remains
+        # live.  Recover before starting its bounded worker; an unavailable
+        # proof provider leaves the worker idle and fail-closed.
+        try:
+            if self._scope_resolver_instance() is not None:
+                self._start_scope_delivery_worker()
+        except Exception as e:
+            logger.debug(f"Sylanne scope delivery worker init skipped: {e}")
         # MEM-03 PR-4：启动扫描跨重启 pending-delete 索引——完成/驳回上一次进程运行
         # 遗留的删除意图残留（primary 已空则补完；primary 非空绝不重放，交管理员），
         # 并把未决 entry 载入进程内镜像供本次运行期间 hydrate/load-admit 消费
@@ -5952,6 +6129,15 @@ class EmotionalStatePlugin(Star):
 
     async def terminate(self) -> None:
         """插件卸载/更新前的清理：停止所有后台任务、关闭 WebUI、持久化状态。"""
+        # Close the producer boundary before cancelling the worker.  Durable
+        # DISPATCHING records remain for restart classification.
+        self._scope_delivery_accepting = False
+        worker = getattr(self, "_scope_delivery_worker", None)
+        if type(worker) is DeliveryOutboxWorker:
+            try:
+                await worker.stop()
+            except Exception as e:
+                logger.debug(f"Sylanne scope delivery worker stop skipped: {e}")
         # v3 shadow（plan Task 13）：先【同步】关闸，让接下来的 v2 收尾 save 排干期间
         # 不再有新的影子轮进来。同步是关键——这里不能 await，否则 drain 之前就出让了
         # 事件循环，还能被塞进新的 capture/settle。
