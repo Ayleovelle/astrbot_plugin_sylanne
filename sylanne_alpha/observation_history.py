@@ -15,13 +15,15 @@ import os
 import re
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator, Mapping
 
 logger = logging.getLogger("astrbot_plugin_sylanne")
 
 SAMPLE_SCHEMA_VERSION = "sylanne.observation.sample.v1"
 MANIFEST_SCHEMA_VERSION = "sylanne.observation.manifest.v1"
+SCOPED_MANIFEST_SCHEMA_VERSION = "sylanne.observation.history.v2"
 HISTORY_SCHEMA_VERSION = "sylanne.observation.history.v1"
 DEFAULT_MAX_BYTES = 128 * 1024 * 1024
 DEFAULT_SEGMENT_BYTES = 1024 * 1024
@@ -72,6 +74,53 @@ _COUNT_KEYS = {
 _HEX_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _SEGMENT_NAME_RE = re.compile(r"segment-(\d{8})\.jsonl")
 _SHORT_ENUM_RE = re.compile(r"[A-Za-z0-9_.-]{1,32}")
+_SCOPE_TOKEN_RE = re.compile(r"scope_v1_[A-Za-z0-9_-]+\Z")
+
+
+@dataclass(frozen=True, slots=True)
+class CleanupResult:
+    """One scoped cleanup decision.
+
+    ``bool(result)`` remains useful to callers that only need to know whether a
+    segment was removed, while the explicit fields expose the durable outcome
+    for diagnostics and restart tests.
+    """
+
+    deleted_scope: str | None = None
+    deleted_segment: str | None = None
+    budget_unsatisfiable: bool = False
+    cleanup_active: bool = False
+    manifest_generation: int = 0
+
+    def __bool__(self) -> bool:
+        return self.deleted_segment is not None
+
+
+class _ManifestView(Mapping[str, Any]):
+    """Read-only mapping that also supports the plan's attribute notation."""
+
+    __slots__ = ("_payload",)
+
+    def __init__(self, payload: Mapping[str, Any]) -> None:
+        self._payload = json.loads(json.dumps(payload, ensure_ascii=False))
+
+    def __getitem__(self, key: str) -> Any:
+        return self._payload[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._payload)
+
+    def __len__(self) -> int:
+        return len(self._payload)
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self._payload[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+    def to_dict(self) -> dict[str, Any]:
+        return json.loads(json.dumps(self._payload, ensure_ascii=False))
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -231,7 +280,13 @@ def project_observation(
 
 
 class ObservationHistoryStore:
-    """Append-only segmented JSONL store with one global storage budget."""
+    """Append-only segmented JSONL store with legacy and scoped backends.
+
+    The original constructor remains the ``legacy-unscoped`` compatibility
+    path.  Scoped production callers use :meth:`from_scope_repository`, which
+    keeps one repository-owned manifest and partitions bytes by opaque
+    ``SessionScope.storage_token``.
+    """
 
     def __init__(
         self,
@@ -239,21 +294,840 @@ class ObservationHistoryStore:
         max_bytes_provider: Callable[[], int],
         *,
         segment_bytes: int = DEFAULT_SEGMENT_BYTES,
+        target_ratio: float = 0.9,
     ) -> None:
         if int(segment_bytes) <= 0:
             raise ValueError("segment_bytes must be positive")
+        if isinstance(target_ratio, bool) or not isinstance(target_ratio, (int, float)):
+            raise TypeError("target_ratio must be a finite number")
+        resolved_target_ratio = float(target_ratio)
+        if not math.isfinite(resolved_target_ratio) or not 0.0 < resolved_target_ratio <= 1.0:
+            raise ValueError("target_ratio must be in (0, 1]")
         self._root = Path(root)
         self._max_bytes_provider = max_bytes_provider
         self._segment_bytes = int(segment_bytes)
+        self._target_ratio = resolved_target_ratio
         self._lock = threading.RLock()
+        self._scope_repository: Any | None = None
+        self._scoped = False
         self._manifest_path = self._root / "manifest.json"
         with self._lock:
             self._root.mkdir(parents=True, exist_ok=True)
             self._manifest = self._load_or_rebuild_manifest()
 
+    @classmethod
+    def from_scope_repository(
+        cls,
+        repository: Any,
+        max_bytes_provider: Callable[[], int] | None = None,
+        *,
+        limit_bytes: int | None = None,
+        segment_bytes: int = DEFAULT_SEGMENT_BYTES,
+        target_ratio: float = 0.9,
+    ) -> "ObservationHistoryStore":
+        """Construct the single scoped store owned by ``ScopeRepository``.
+
+        ``limit_bytes`` is a small test/configuration convenience; production
+        callers should pass a provider so changing the setting takes effect on
+        the next append or maintenance cycle.
+        """
+
+        if repository is None:
+            raise ValueError("repository is required for scoped history")
+        if max_bytes_provider is not None and limit_bytes is not None:
+            raise ValueError("provide max_bytes_provider or limit_bytes, not both")
+        if max_bytes_provider is None:
+            fixed = DEFAULT_MAX_BYTES if limit_bytes is None else int(limit_bytes)
+            max_bytes_provider = lambda fixed=fixed: fixed
+        if isinstance(target_ratio, bool) or not isinstance(target_ratio, (int, float)):
+            raise TypeError("target_ratio must be a finite number")
+        resolved_target_ratio = float(target_ratio)
+        if not math.isfinite(resolved_target_ratio) or not 0.0 < resolved_target_ratio <= 1.0:
+            raise ValueError("target_ratio must be in (0, 1]")
+        root = Path(repository.observation_root)
+        instance = cls.__new__(cls)
+        if int(segment_bytes) <= 0:
+            raise ValueError("segment_bytes must be positive")
+        instance._root = root
+        instance._max_bytes_provider = max_bytes_provider
+        instance._segment_bytes = int(segment_bytes)
+        instance._target_ratio = resolved_target_ratio
+        instance._lock = threading.RLock()
+        instance._scope_repository = repository
+        instance._scoped = True
+        instance._manifest_path = Path(repository.observation_manifest_path)
+        with instance._lock, repository.transaction():
+            root.mkdir(parents=True, exist_ok=True)
+            instance._manifest = instance._load_scoped_manifest()
+        return instance
+
     @property
     def root(self) -> Path:
         return self._root
+
+    @property
+    def scoped(self) -> bool:
+        return self._scoped
+
+    @property
+    def manifest(self) -> _ManifestView:
+        """Return a snapshot of the current manifest for diagnostics/tests."""
+
+        if self._scoped:
+            with self._lock, self._scope_repository.transaction():
+                self._refresh_scoped_manifest_locked()
+                return _ManifestView(self._manifest)
+        with self._lock:
+            if self._scoped:
+                self._refresh_scoped_manifest_locked()
+            return _ManifestView(self._manifest)
+
+    # ------------------------------------------------------------------
+    # Scoped v2 API
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _require_scope(scope: Any) -> Any:
+        # Import lazily to keep the legacy store importable in lightweight
+        # environments where scope-v1 dependencies are not installed.
+        from .scope_contracts import SessionScope
+
+        if type(scope) is not SessionScope:
+            raise ValueError("a frozen SessionScope is required")
+        token = scope.storage_token
+        if _SCOPE_TOKEN_RE.fullmatch(token) is None:
+            raise ValueError("scope storage_token is invalid")
+        return scope
+
+    def append(
+        self,
+        scope: Any,
+        snapshot: dict[str, Any],
+        *,
+        captured_at_ms: int | None = None,
+    ) -> bool:
+        """Append one projected sample for exactly one frozen ``SessionScope``."""
+
+        if not self._scoped:
+            raise RuntimeError("append(scope, ...) requires a scoped history store")
+        scope = self._require_scope(scope)
+        if not isinstance(snapshot, dict):
+            raise ValueError("snapshot must be a dict")
+        repository = self._scope_repository
+        with self._lock, repository.transaction():
+            repository._validate_session_scope_locked(scope)
+            self._refresh_scoped_manifest_locked()
+            row = self._scoped_row(scope, snapshot, captured_at_ms)
+            scope_token = scope.storage_token
+            scope_meta = self._manifest["scopes"].setdefault(
+                scope_token,
+                self._new_scoped_scope_meta(),
+            )
+            if scope_meta.get("last_digest") == row["digest"]:
+                self._scoped_cleanup_once_locked(trigger="duplicate")
+                return False
+            line = self._row_bytes(row)
+            active = self._scoped_active_segment(scope_meta)
+            if active is not None and active["size"] > 0 and active["size"] + len(line) > self._segment_bytes:
+                active["closed"] = True
+                scope_meta["active_segment"] = None
+                scope_meta["latest_closed_segment"] = active["path"]
+                active = None
+            if active is None:
+                active = self._create_scoped_segment(scope_token, scope_meta)
+            path = self._scoped_segment_path(scope_token, active["path"])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("ab") as stream:
+                stream.write(line)
+                stream.flush()
+                os.fsync(stream.fileno())
+            active["size"] = path.stat().st_size
+            active["sample_count"] += 1
+            captured = int(row["captured_at_ms"])
+            active["oldest_ms"] = self._earliest(active.get("oldest_ms"), captured)
+            active["newest_ms"] = self._latest(active.get("newest_ms"), captured)
+            scope_meta["used_bytes"] = sum(
+                int(segment.get("size", 0))
+                for segment in scope_meta.get("segments", [])
+            )
+            scope_meta["last_digest"] = row["digest"]
+            self._scoped_cleanup_once_locked(trigger="append")
+            self._write_scoped_manifest_locked()
+            return True
+
+    def read(self, scope: Any) -> list[dict[str, Any]]:
+        """Read all valid rows for one scope, preserving chronological order."""
+
+        if not self._scoped:
+            raise RuntimeError("read(scope) requires a scoped history store")
+        scope = self._require_scope(scope)
+        repository = self._scope_repository
+        with self._lock, repository.transaction():
+            repository._validate_session_scope_locked(scope)
+            self._refresh_scoped_manifest_locked()
+            metadata = self._manifest["scopes"].get(scope.storage_token)
+            if not isinstance(metadata, dict):
+                return []
+            rows: list[dict[str, Any]] = []
+            for segment in metadata.get("segments", []):
+                path = self._scoped_segment_path(scope.storage_token, segment["path"])
+                if not path.is_file():
+                    continue
+                segment_rows, _ = self._read_segment(path, expected_session=scope.storage_token)
+                rows.extend(segment_rows)
+            rows.sort(key=lambda row: row["captured_at_ms"])
+            return rows
+
+    def cleanup_once(self) -> CleanupResult | bool:
+        """Delete at most one segment in a scoped store (legacy returns bool)."""
+
+        if not self._scoped:
+            with self._lock:
+                before = bool(self._manifest.get("cleanup_active"))
+                deleted = self._cleanup_once()
+                after = bool(self._manifest.get("cleanup_active"))
+                if deleted or before != after:
+                    self._write_manifest()
+                return deleted
+        repository = self._scope_repository
+        from .scope_repository import StaleScopeWrite
+
+        # A repository lock normally makes the first attempt sufficient.  The
+        # bounded retry is still important for injected/direct writers: reload
+        # the manifest and recompute the candidate rather than deleting from a
+        # stale byte ledger.
+        for attempt in range(2):
+            try:
+                with self._lock, repository.transaction():
+                    self._refresh_scoped_manifest_locked()
+                    return self._scoped_cleanup_once_locked(trigger="maintenance")
+            except StaleScopeWrite:
+                if attempt:
+                    raise
+        raise AssertionError("unreachable cleanup retry")
+
+    # These bounded seed/corruption hooks are intentionally small diagnostics
+    # helpers used by restart/retention tests.  They never accept a filesystem
+    # path and can only touch the repository-owned opaque scope directory.
+    def _seed_closed(
+        self,
+        scope: Any,
+        sizes: list[int] | tuple[int, ...],
+        *,
+        mark_latest: bool = False,
+    ) -> None:
+        """Seed closed segment byte counts for deterministic cleanup tests."""
+
+        if not self._scoped:
+            raise RuntimeError("seed_closed requires a scoped history store")
+        scope = self._require_scope(scope)
+        if type(mark_latest) is not bool:
+            raise ValueError("mark_latest must be an exact bool")
+        if not isinstance(sizes, (list, tuple)):
+            raise ValueError("sizes must be a list or tuple")
+        resolved_sizes: list[int] = []
+        for size in sizes:
+            if type(size) is not int or size < 0:
+                raise ValueError("segment sizes must be non-negative ints")
+            resolved_sizes.append(size)
+        repository = self._scope_repository
+        with self._lock, repository.transaction():
+            repository._validate_session_scope_locked(scope)
+            self._refresh_scoped_manifest_locked()
+            metadata = self._manifest["scopes"].setdefault(
+                scope.storage_token,
+                self._new_scoped_scope_meta(),
+            )
+            created: list[str] = []
+            for size in resolved_sizes:
+                number = int(metadata["next_segment"])
+                path_name = f"segment-{number:08d}.jsonl"
+                metadata["next_segment"] = number + 1
+                path = self._scoped_segment_path(scope.storage_token, path_name)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"x" * size)
+                metadata["segments"].append(
+                    {
+                        "path": path_name,
+                        "closed": True,
+                        "size": size,
+                        "sample_count": 0,
+                        "oldest_ms": None,
+                        "newest_ms": None,
+                        "partial": size > 0,
+                    }
+                )
+                created.append(path_name)
+            metadata["used_bytes"] = sum(
+                int(segment.get("size", 0))
+                for segment in metadata["segments"]
+            )
+            if mark_latest and created:
+                metadata["latest_closed_segment"] = created[-1]
+            self._write_scoped_manifest_locked()
+
+    def _seed_active(self, scope: Any, *, size: int = 0) -> None:
+        """Seed one active segment byte count for protected-budget tests."""
+
+        if not self._scoped:
+            raise RuntimeError("seed_active requires a scoped history store")
+        scope = self._require_scope(scope)
+        if type(size) is not int or size < 0:
+            raise ValueError("size must be a non-negative int")
+        repository = self._scope_repository
+        with self._lock, repository.transaction():
+            repository._validate_session_scope_locked(scope)
+            self._refresh_scoped_manifest_locked()
+            metadata = self._manifest["scopes"].setdefault(
+                scope.storage_token,
+                self._new_scoped_scope_meta(),
+            )
+            old_active = self._scoped_active_segment(metadata)
+            if old_active is not None:
+                old_active["closed"] = True
+                metadata["active_segment"] = None
+                metadata["latest_closed_segment"] = old_active["path"]
+            number = int(metadata["next_segment"])
+            path_name = f"segment-{number:08d}.jsonl"
+            metadata["next_segment"] = number + 1
+            path = self._scoped_segment_path(scope.storage_token, path_name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"x" * size)
+            metadata["segments"].append(
+                {
+                    "path": path_name,
+                    "closed": False,
+                    "size": size,
+                    "sample_count": 0,
+                    "oldest_ms": None,
+                    "newest_ms": None,
+                    "partial": size > 0,
+                }
+            )
+            metadata["active_segment"] = path_name
+            metadata["used_bytes"] = sum(
+                int(segment.get("size", 0))
+                for segment in metadata["segments"]
+            )
+            self._write_scoped_manifest_locked()
+
+    def _seed_orphaned_bytes(self, *, size: int) -> None:
+        """Create opaque-unreferenced bytes for corrupt-manifest recovery tests."""
+
+        if not self._scoped:
+            raise RuntimeError("seed_orphaned_bytes requires a scoped history store")
+        if type(size) is not int or size < 0:
+            raise ValueError("size must be a non-negative int")
+        repository = self._scope_repository
+        with self._lock, repository.transaction():
+            self._refresh_scoped_manifest_locked()
+            orphan_dir = self._root / "scopes" / "orphaned"
+            orphan_dir.mkdir(parents=True, exist_ok=True)
+            path = orphan_dir / f"orphan-{os.urandom(8).hex()}.bin"
+            path.write_bytes(b"x" * size)
+            self._write_scoped_manifest_locked()
+
+    def _corrupt_manifest(self) -> None:
+        """Replace the scoped manifest with invalid JSON for recovery tests."""
+
+        if not self._scoped:
+            raise RuntimeError("corrupt_manifest requires a scoped history store")
+        repository = self._scope_repository
+        with self._lock, repository.transaction():
+            self._manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            self._manifest_path.write_text("{broken", encoding="utf-8")
+
+    @staticmethod
+    def _row_bytes(row: dict[str, Any]) -> bytes:
+        return (
+            json.dumps(
+                row,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            + b"\n"
+        )
+
+    def _scoped_row(
+        self,
+        scope: Any,
+        snapshot: dict[str, Any],
+        captured_at_ms: int | None,
+    ) -> dict[str, Any]:
+        # Kernel snapshots retain the established privacy-safe projection.  A
+        # tiny numeric shorthand is accepted for migration/tests without ever
+        # persisting arbitrary text or nested payloads.
+        if "computation" in snapshot or "_last_computation_result" in snapshot:
+            row = project_observation(scope.storage_token, snapshot, captured_at_ms)
+        else:
+            captured = _captured_at_ms(captured_at_ms)
+            values: dict[str, int | float] = {}
+            for key, value in snapshot.items():
+                if not isinstance(key, str) or _SHORT_ENUM_RE.fullmatch(key) is None:
+                    continue
+                number = _finite_number(value)
+                if number is not None:
+                    values[key] = number
+            row = {
+                "schema_version": SAMPLE_SCHEMA_VERSION,
+                "captured_at_ms": captured,
+                "session": scope.storage_token,
+                "turns": 0,
+                "tick_count": 0,
+                "groups": {"state": values},
+            }
+            row["digest"] = _digest_payload(row)
+        return row
+
+    @staticmethod
+    def _new_scoped_manifest() -> dict[str, Any]:
+        return {
+            "schema_version": SCOPED_MANIFEST_SCHEMA_VERSION,
+            "generation": 0,
+            "cleanup_active": False,
+            "cleanup_cursor": None,
+            "budget_unsatisfiable": False,
+            "orphaned_bytes": 0,
+            "scopes": {},
+        }
+
+    @staticmethod
+    def _new_scoped_scope_meta() -> dict[str, Any]:
+        return {
+            "used_bytes": 0,
+            "next_segment": 1,
+            "active_segment": None,
+            "latest_closed_segment": None,
+            "last_digest": None,
+            "segments": [],
+        }
+
+    def _load_scoped_manifest(self) -> dict[str, Any]:
+        repository = self._scope_repository
+        try:
+            loaded = repository._read_json(
+                self._manifest_path,
+                error_label="observation history manifest",
+            )
+            candidate = None if loaded is None else loaded[1]
+        except Exception:
+            candidate = None
+        if self._scoped_manifest_valid(candidate):
+            return candidate
+        rebuilt = self._rebuild_scoped_manifest()
+        rebuilt["generation"] = self._manifest_generation(candidate)
+        self._manifest = rebuilt
+        self._write_scoped_manifest_locked()
+        return rebuilt
+
+    def _refresh_scoped_manifest_locked(self) -> None:
+        if not self._scoped:
+            return
+        repository = self._scope_repository
+        try:
+            loaded = repository._read_json(
+                self._manifest_path,
+                error_label="observation history manifest",
+            )
+            candidate = None if loaded is None else loaded[1]
+        except Exception:
+            candidate = None
+        if self._scoped_manifest_valid(candidate):
+            self._manifest = candidate
+            return
+        rebuilt = self._rebuild_scoped_manifest()
+        rebuilt["generation"] = self._manifest_generation(candidate)
+        self._manifest = rebuilt
+        self._write_scoped_manifest_locked()
+
+    @staticmethod
+    def _manifest_generation(candidate: Any) -> int:
+        """Return a usable durable generation, or zero for a missing/corrupt file."""
+
+        if isinstance(candidate, dict):
+            generation = candidate.get("generation")
+            if type(generation) is int and generation >= 0:
+                return generation
+        return 0
+
+    def _scoped_manifest_valid(self, candidate: Any) -> bool:
+        if (
+            not isinstance(candidate, dict)
+            or candidate.get("schema_version") != SCOPED_MANIFEST_SCHEMA_VERSION
+            or type(candidate.get("generation")) is not int
+            or candidate["generation"] < 0
+            or not isinstance(candidate.get("cleanup_active"), bool)
+            or not (
+                candidate.get("cleanup_cursor") is None
+                or (
+                    isinstance(candidate.get("cleanup_cursor"), str)
+                    and _SCOPE_TOKEN_RE.fullmatch(candidate["cleanup_cursor"]) is not None
+                )
+            )
+            or not isinstance(candidate.get("budget_unsatisfiable"), bool)
+            or type(candidate.get("orphaned_bytes", 0)) is not int
+            or candidate.get("orphaned_bytes", 0) < 0
+            or not isinstance(candidate.get("scopes"), dict)
+        ):
+            return False
+        cursor = candidate.get("cleanup_cursor")
+        if cursor is not None and cursor not in candidate["scopes"]:
+            return False
+        referenced: set[tuple[str, str]] = set()
+        for token, metadata in candidate["scopes"].items():
+            if not isinstance(token, str) or _SCOPE_TOKEN_RE.fullmatch(token) is None:
+                return False
+            if not self._scoped_scope_meta_valid(token, metadata):
+                return False
+            for segment in metadata["segments"]:
+                path = self._scoped_segment_path(token, segment["path"])
+                if not path.is_file() or path.stat().st_size != segment["size"]:
+                    return False
+                referenced.add((token, segment["path"]))
+        actual: set[tuple[str, str]] = set()
+        scopes_root = self._root / "scopes"
+        if scopes_root.is_dir():
+            for scope_dir in scopes_root.iterdir():
+                if not scope_dir.is_dir() or _SCOPE_TOKEN_RE.fullmatch(scope_dir.name) is None:
+                    continue
+                for path in scope_dir.glob("segment-????????.jsonl"):
+                    if path.is_file():
+                        actual.add((scope_dir.name, path.name))
+        return (
+            referenced == actual
+            and candidate.get("orphaned_bytes", 0) == self._scoped_orphaned_bytes(candidate)
+        )
+
+    def _scoped_scope_meta_valid(self, token: str, metadata: Any) -> bool:
+        if not isinstance(metadata, dict) or not isinstance(metadata.get("segments"), list):
+            return False
+        for key in ("used_bytes", "next_segment"):
+            if type(metadata.get(key)) is not int or metadata[key] < 0:
+                return False
+        active = metadata.get("active_segment")
+        latest = metadata.get("latest_closed_segment")
+        if active is not None and not isinstance(active, str):
+            return False
+        if latest is not None and not isinstance(latest, str):
+            return False
+        last_digest = metadata.get("last_digest")
+        if last_digest is not None and (
+            not isinstance(last_digest, str)
+            or _HEX_DIGEST_RE.fullmatch(last_digest) is None
+        ):
+            return False
+        paths: set[str] = set()
+        active_matches = latest_matches = 0
+        used = 0
+        numbers: list[int] = []
+        for segment in metadata["segments"]:
+            if not isinstance(segment, dict):
+                return False
+            path = segment.get("path")
+            if not isinstance(path, str) or _SEGMENT_NAME_RE.fullmatch(path) is None or path in paths:
+                return False
+            paths.add(path)
+            for name in ("size", "sample_count"):
+                if type(segment.get(name)) is not int or segment[name] < 0:
+                    return False
+            if not isinstance(segment.get("closed"), bool):
+                return False
+            if not isinstance(segment.get("partial"), bool):
+                return False
+            if segment.get("oldest_ms") is not None and type(segment["oldest_ms"]) is not int:
+                return False
+            if segment.get("newest_ms") is not None and type(segment["newest_ms"]) is not int:
+                return False
+            if path == active:
+                active_matches += 1
+                if segment["closed"]:
+                    return False
+            if path == latest:
+                latest_matches += 1
+                if not segment["closed"]:
+                    return False
+            used += int(segment["size"])
+            numbers.append(int(Path(path).stem.split("-")[1]))
+        if metadata["used_bytes"] != used:
+            return False
+        if numbers and metadata["next_segment"] <= max(numbers):
+            return False
+        if active is None:
+            if active_matches != 0:
+                return False
+        elif active_matches != 1:
+            return False
+        if latest is None:
+            return latest_matches == 0
+        if latest_matches != 1:
+            return False
+        closed_paths = [
+            segment["path"]
+            for segment in metadata["segments"]
+            if segment["closed"]
+        ]
+        return bool(closed_paths) and latest == closed_paths[-1]
+
+    def _rebuild_scoped_manifest(self) -> dict[str, Any]:
+        manifest = self._new_scoped_manifest()
+        scopes_root = self._root / "scopes"
+        if not scopes_root.is_dir():
+            return manifest
+        for scope_dir in sorted(scopes_root.iterdir(), key=lambda path: path.name):
+            token = scope_dir.name
+            if not scope_dir.is_dir() or _SCOPE_TOKEN_RE.fullmatch(token) is None:
+                continue
+            paths = sorted(
+                (path for path in scope_dir.glob("segment-????????.jsonl") if path.is_file()),
+                key=self._segment_number,
+            )
+            if not paths:
+                continue
+            metadata = self._new_scoped_scope_meta()
+            last_digest: str | None = None
+            for index, path in enumerate(paths):
+                rows, partial = self._read_segment(path, expected_session=token)
+                timestamps = [int(row["captured_at_ms"]) for row in rows]
+                segment = {
+                    "path": path.name,
+                    "closed": index < len(paths) - 1 or partial,
+                    "size": path.stat().st_size,
+                    "sample_count": len(rows),
+                    "oldest_ms": min(timestamps) if timestamps else None,
+                    "newest_ms": max(timestamps) if timestamps else None,
+                    "partial": bool(partial),
+                }
+                metadata["segments"].append(segment)
+                metadata["used_bytes"] += int(segment["size"])
+                if rows:
+                    last_digest = rows[-1].get("digest")
+            metadata["next_segment"] = max(
+                int(Path(segment["path"]).stem.split("-")[1])
+                for segment in metadata["segments"]
+            ) + 1
+            active = next((segment for segment in reversed(metadata["segments"]) if not segment["closed"]), None)
+            metadata["active_segment"] = None if active is None else active["path"]
+            closed = [segment for segment in metadata["segments"] if segment["closed"]]
+            metadata["latest_closed_segment"] = None if not closed else closed[-1]["path"]
+            metadata["last_digest"] = last_digest
+            manifest["scopes"][token] = metadata
+        manifest["orphaned_bytes"] = self._scoped_orphaned_bytes(manifest)
+        return manifest
+
+    def _scoped_orphaned_bytes(self, manifest: dict[str, Any]) -> int:
+        known = {
+            self._scoped_segment_path(token, segment["path"])
+            for token, metadata in manifest.get("scopes", {}).items()
+            for segment in metadata.get("segments", [])
+        }
+        total = 0
+        scopes_root = self._root / "scopes"
+        if not scopes_root.is_dir():
+            return 0
+        for path in scopes_root.rglob("*"):
+            if not path.is_file() or path in known:
+                continue
+            try:
+                total += path.stat().st_size
+            except OSError:
+                continue
+        return total
+
+    def _scoped_segment_path(self, scope_token: str, relative: str) -> Path:
+        if _SCOPE_TOKEN_RE.fullmatch(scope_token) is None or _SEGMENT_NAME_RE.fullmatch(relative) is None:
+            raise ValueError("unsafe scoped observation history segment path")
+        return self._root / "scopes" / scope_token / relative
+
+    def _scoped_active_segment(self, metadata: dict[str, Any]) -> dict[str, Any] | None:
+        active = metadata.get("active_segment")
+        if not isinstance(active, str):
+            return None
+        return next(
+            (segment for segment in metadata.get("segments", []) if segment.get("path") == active and not segment.get("closed")),
+            None,
+        )
+
+    def _create_scoped_segment(self, token: str, metadata: dict[str, Any]) -> dict[str, Any]:
+        number = int(metadata["next_segment"])
+        path = f"segment-{number:08d}.jsonl"
+        metadata["next_segment"] = number + 1
+        metadata["active_segment"] = path
+        segment = {
+            "path": path,
+            "closed": False,
+            "size": 0,
+            "sample_count": 0,
+            "oldest_ms": None,
+            "newest_ms": None,
+            "partial": False,
+        }
+        metadata["segments"].append(segment)
+        return segment
+
+    def _write_scoped_manifest_locked(self) -> None:
+        repository = self._scope_repository
+        expected_generation = self._assert_scoped_generation_locked()
+        self._manifest["generation"] = expected_generation + 1
+        self._manifest["orphaned_bytes"] = self._scoped_orphaned_bytes(self._manifest)
+        repository._atomic_json_replace(self._manifest_path, self._manifest)
+
+    def _assert_scoped_generation_locked(self) -> int:
+        """Check the durable generation before any scoped destructive write."""
+
+        repository = self._scope_repository
+        expected_generation = int(self._manifest.get("generation", 0))
+        try:
+            loaded = repository._read_json(
+                self._manifest_path,
+                error_label="observation history manifest",
+            )
+        except Exception:
+            loaded = None
+        actual_generation = (
+            0
+            if loaded is None
+            else self._manifest_generation(loaded[1])
+        )
+        # Repository transactions serialize normal writers, but this explicit
+        # check also fences direct/stale writers and makes the durable CAS
+        # contract testable independently of the lock implementation.
+        if actual_generation != expected_generation:
+            from .scope_repository import StaleScopeWrite
+
+            raise StaleScopeWrite(
+                expected_generation,
+                actual_generation,
+                code="observation_manifest_stale",
+            )
+        return expected_generation
+
+    def _scoped_used_bytes(self) -> int:
+        return len(
+            json.dumps(
+                self._manifest,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ) + sum(
+            int(metadata.get("used_bytes", 0))
+            for metadata in self._manifest.get("scopes", {}).values()
+            if isinstance(metadata, dict)
+        )
+
+    def _scoped_deletable(self, token: str, metadata: dict[str, Any]) -> list[dict[str, Any]]:
+        active = metadata.get("active_segment")
+        latest = metadata.get("latest_closed_segment")
+        return [
+            segment
+            for segment in metadata.get("segments", [])
+            if segment.get("closed")
+            and segment.get("path") != active
+            and segment.get("path") != latest
+        ]
+
+    def _scoped_cleanup_once_locked(self, *, trigger: str) -> CleanupResult:
+        limit = self._limit_bytes()
+        generation = int(self._manifest.get("generation", 0))
+        if limit == 0:
+            changed = bool(self._manifest.get("cleanup_active")) or bool(self._manifest.get("budget_unsatisfiable"))
+            self._manifest["cleanup_active"] = False
+            self._manifest["budget_unsatisfiable"] = False
+            if changed:
+                self._write_scoped_manifest_locked()
+            return CleanupResult(cleanup_active=False, manifest_generation=int(self._manifest.get("generation", generation)))
+        used = self._scoped_used_bytes()
+        target = math.floor(limit * self._target_ratio)
+        if used <= target:
+            changed = bool(self._manifest.get("cleanup_active")) or bool(self._manifest.get("budget_unsatisfiable"))
+            self._manifest["cleanup_active"] = False
+            self._manifest["budget_unsatisfiable"] = False
+            if changed:
+                self._write_scoped_manifest_locked()
+            return CleanupResult(cleanup_active=False, manifest_generation=int(self._manifest.get("generation", generation)))
+        if used <= limit and not self._manifest.get("cleanup_active"):
+            changed = bool(self._manifest.get("budget_unsatisfiable"))
+            self._manifest["budget_unsatisfiable"] = False
+            if changed:
+                self._write_scoped_manifest_locked()
+            return CleanupResult(cleanup_active=False, manifest_generation=int(self._manifest.get("generation", generation)))
+
+        self._manifest["cleanup_active"] = True
+        scopes = {
+            token: metadata
+            for token, metadata in self._manifest.get("scopes", {}).items()
+            if isinstance(metadata, dict) and metadata.get("segments")
+        }
+        retained_count = max(1, len(scopes))
+        soft_share = limit / retained_count
+        over = [
+            token
+            for token, metadata in scopes.items()
+            if int(metadata.get("used_bytes", 0)) > soft_share and self._scoped_deletable(token, metadata)
+        ]
+        over.sort()
+        cursor = self._manifest.get("cleanup_cursor")
+        target_token: str | None = None
+        if over:
+            if isinstance(cursor, str) and cursor in over:
+                after = [token for token in over if token > cursor]
+                target_token = after[0] if after else over[0]
+            else:
+                target_token = over[0]
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        if target_token is not None:
+            candidates = [(target_token, segment) for segment in self._scoped_deletable(target_token, scopes[target_token])]
+        else:
+            for token, metadata in scopes.items():
+                candidates.extend((token, segment) for segment in self._scoped_deletable(token, metadata))
+            candidates.sort(
+                key=lambda item: (
+                    item[1].get("oldest_ms") if item[1].get("oldest_ms") is not None else math.inf,
+                    item[1].get("newest_ms") if item[1].get("newest_ms") is not None else math.inf,
+                    item[0],
+                    item[1]["path"],
+                )
+            )
+        if not candidates:
+            changed = not bool(self._manifest.get("budget_unsatisfiable"))
+            self._manifest["budget_unsatisfiable"] = True
+            if changed:
+                self._write_scoped_manifest_locked()
+            return CleanupResult(
+                budget_unsatisfiable=True,
+                cleanup_active=True,
+                manifest_generation=int(self._manifest["generation"]),
+            )
+        token, segment = min(
+            candidates,
+            key=lambda item: (
+                item[1].get("oldest_ms") if item[1].get("oldest_ms") is not None else math.inf,
+                item[1].get("newest_ms") if item[1].get("newest_ms") is not None else math.inf,
+                item[1]["path"],
+            ),
+        )
+        self._assert_scoped_generation_locked()
+        path = self._scoped_segment_path(token, segment["path"])
+        path.unlink(missing_ok=True)
+        metadata = scopes[token]
+        metadata["segments"].remove(segment)
+        metadata["used_bytes"] = sum(int(item.get("size", 0)) for item in metadata["segments"])
+        closed = [item for item in metadata["segments"] if item.get("closed")]
+        metadata["latest_closed_segment"] = None if not closed else closed[-1]["path"]
+        self._manifest["cleanup_cursor"] = token
+        self._manifest["budget_unsatisfiable"] = False
+        self._manifest["cleanup_active"] = self._scoped_used_bytes() > target
+        self._write_scoped_manifest_locked()
+        return CleanupResult(
+            deleted_scope=token,
+            deleted_segment=segment["path"],
+            budget_unsatisfiable=False,
+            cleanup_active=bool(self._manifest["cleanup_active"]),
+            manifest_generation=int(self._manifest["generation"]),
+        )
 
     def append_snapshot(
         self,
@@ -263,6 +1137,13 @@ class ObservationHistoryStore:
         captured_at_ms: int | None = None,
     ) -> bool:
         """Append one changed projected sample, returning False for a duplicate."""
+
+        if self._scoped:
+            return self.append(
+                session_key,
+                snapshot,
+                captured_at_ms=captured_at_ms,
+            )
 
         with self._lock:
             row = project_observation(session_key, snapshot, captured_at_ms)
@@ -329,6 +1210,9 @@ class ObservationHistoryStore:
     def maintenance(self) -> bool:
         """Perform at most one global cleanup deletion."""
 
+        if self._scoped:
+            return bool(self.cleanup_once())
+
         with self._lock:
             before = bool(self._manifest.get("cleanup_active"))
             deleted = self._cleanup_once()
@@ -347,6 +1231,15 @@ class ObservationHistoryStore:
         max_points: int | None = None,
     ) -> dict[str, Any]:
         """Return numeric observation buckets in chronological order."""
+
+        if self._scoped:
+            return self._query_scoped(
+                session_key,
+                group=group,
+                from_ms=from_ms,
+                to_ms=to_ms,
+                max_points=max_points,
+            )
 
         resolved_max_points = 240 if max_points is None else int(max_points)
         resolved_max_points = max(1, min(1000, resolved_max_points))
@@ -393,6 +1286,63 @@ class ObservationHistoryStore:
                 "downsampled": len(samples) > resolved_max_points,
                 "partial": partial,
                 "storage": storage,
+            }
+
+    def _query_scoped(
+        self,
+        scope: Any,
+        *,
+        group: str,
+        from_ms: int | None,
+        to_ms: int | None,
+        max_points: int | None,
+    ) -> dict[str, Any]:
+        scope = self._require_scope(scope)
+        resolved_max_points = 240 if max_points is None else int(max_points)
+        resolved_max_points = max(1, min(1000, resolved_max_points))
+        requested_group = str(group)
+        stored_group = "route" if requested_group == "routing" else requested_group
+        repository = self._scope_repository
+        with self._lock, repository.transaction():
+            repository._validate_session_scope_locked(scope)
+            self._refresh_scoped_manifest_locked()
+            metadata = self._manifest["scopes"].get(scope.storage_token)
+            samples: list[tuple[int, dict[str, int | float]]] = []
+            partial = False
+            if isinstance(metadata, dict):
+                for segment in metadata.get("segments", []):
+                    path = self._scoped_segment_path(scope.storage_token, segment["path"])
+                    if not path.is_file():
+                        partial = True
+                        continue
+                    rows, segment_partial = self._read_segment(
+                        path,
+                        expected_session=scope.storage_token,
+                    )
+                    partial = partial or segment_partial
+                    for row in rows:
+                        captured = int(row["captured_at_ms"])
+                        if from_ms is not None and captured < int(from_ms):
+                            continue
+                        if to_ms is not None and captured > int(to_ms):
+                            continue
+                        values = self._numeric_group_values(
+                            stored_group,
+                            _dict(_dict(row.get("groups")).get(stored_group)),
+                        )
+                        if values:
+                            samples.append((captured, values))
+            samples.sort(key=lambda sample: sample[0])
+            points = self._bucket_samples(samples, resolved_max_points)
+            return {
+                "schema_version": HISTORY_SCHEMA_VERSION,
+                "session": scope.storage_token,
+                "group": requested_group,
+                "points": points,
+                "sample_count": len(samples),
+                "downsampled": len(samples) > resolved_max_points,
+                "partial": partial,
+                "storage": self._scoped_storage_metadata(),
             }
 
     @staticmethod
@@ -861,12 +1811,35 @@ class ObservationHistoryStore:
             "cleanup_active": bool(self._manifest.get("cleanup_active")),
         }
 
+    def _scoped_storage_metadata(self) -> dict[str, Any]:
+        segments = [
+            segment
+            for metadata in self._manifest.get("scopes", {}).values()
+            if isinstance(metadata, dict)
+            for segment in metadata.get("segments", [])
+        ]
+        oldest_values = [
+            segment["oldest_ms"]
+            for segment in segments
+            if segment.get("oldest_ms") is not None
+        ]
+        return {
+            "used_bytes": self._scoped_used_bytes(),
+            "limit_bytes": self._limit_bytes(),
+            "oldest_ms": min(oldest_values) if oldest_values else None,
+            "segment_count": len(segments),
+            "cleanup_active": bool(self._manifest.get("cleanup_active")),
+            "budget_unsatisfiable": bool(self._manifest.get("budget_unsatisfiable")),
+        }
+
 
 __all__ = [
+    "CleanupResult",
     "DEFAULT_MAX_BYTES",
     "HISTORY_SCHEMA_VERSION",
     "MANIFEST_SCHEMA_VERSION",
     "ObservationHistoryStore",
+    "SCOPED_MANIFEST_SCHEMA_VERSION",
     "SAMPLE_SCHEMA_VERSION",
     "project_observation",
 ]

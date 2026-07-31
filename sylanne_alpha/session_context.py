@@ -312,11 +312,27 @@ class SessionContext:
         """
         self._p = plugin
         cfg = self._p.config if hasattr(self._p, "_config") else getattr(self._p, "config", {}) or {}
-        self._observation_history_store = ObservationHistoryStore(
-            Path(resolve_data_root(cfg)) / "observation-history",
-            self._observation_history_limit_bytes,
+        registry = getattr(self._p, "_scope_runtime_registry", None)
+        repository = getattr(registry, "repository", None)
+        self._observation_history_store: ObservationHistoryStore | None = None
+        self._observation_history_repository = repository
+        if registry is None:
+            # Explicit registry-free compatibility for old test hosts and
+            # legacy deployments.  Scoped production never enters this branch.
+            self._observation_history_store = ObservationHistoryStore(
+                Path(resolve_data_root(cfg)) / "observation-history",
+                self._observation_history_limit_bytes,
+            )
+        elif repository is not None:
+            self._observation_history_store = ObservationHistoryStore.from_scope_repository(
+                repository,
+                self._observation_history_limit_bytes,
+            )
+        self._observation_sink = (
+            None
+            if self._observation_history_store is None
+            else self._observation_history_store.append_snapshot
         )
-        self._observation_sink = self._observation_history_store.append_snapshot
         try:
             hosts = getattr(getattr(self._p, "_store", None), "hosts", None)
         except Exception:
@@ -328,7 +344,24 @@ class SessionContext:
 
     @property
     def observation_history_store(self) -> ObservationHistoryStore:
-        """返回插件实例共享的观测历史存储。"""
+        """Return the legacy or repository-owned observation history store."""
+
+        registry = getattr(self._p, "_scope_runtime_registry", None)
+        repository = getattr(registry, "repository", None)
+        if repository is not None:
+            if (
+                self._observation_history_store is None
+                or not self._observation_history_store.scoped
+                or self._observation_history_repository is not repository
+            ):
+                self._observation_history_store = ObservationHistoryStore.from_scope_repository(
+                    repository,
+                    self._observation_history_limit_bytes,
+                )
+                self._observation_history_repository = repository
+            return self._observation_history_store
+        if self._observation_history_store is None:
+            raise RuntimeError("scoped observation history repository is unavailable")
         return self._observation_history_store
 
     def _observation_history_limit_bytes(self) -> int:
@@ -345,9 +378,22 @@ class SessionContext:
         return megabytes * 1024 * 1024
 
     def _bind_observation_sink(self, host: Any) -> None:
-        """把共享存储绑定到 host runtime（重复绑定安全）。"""
+        """Bind a legacy or exact-scope observation sink to one host runtime."""
         setter = getattr(getattr(host, "runtime", None), "set_observation_sink", None)
-        if callable(setter):
+        if not callable(setter):
+            return
+        runtime = getattr(host, "runtime", None)
+        persistence = getattr(runtime, "persistence", None)
+        scope = getattr(persistence, "scope", None)
+        if scope is not None and getattr(scope, "storage_token", None):
+            store = self.observation_history_store
+
+            def scoped_sink(_session_key: str, snapshot: dict[str, Any], *, _scope=scope, _store=store) -> None:
+                _store.append(_scope, snapshot)
+
+            setter(scoped_sink)
+            return
+        if self._observation_sink is not None:
             setter(self._observation_sink)
 
     def _uses_scope_runtime(self) -> bool:
@@ -1071,6 +1117,7 @@ class SessionContext:
             host = runtime.host
             if not isinstance(host, SylanneAlphaHost):
                 raise ValueError("scoped session runtime has no gateway-bound host")
+            self._bind_observation_sink(host)
             return host
         if not session_key:
             if self._uses_scope_runtime():

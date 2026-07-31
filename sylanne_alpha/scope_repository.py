@@ -226,6 +226,11 @@ class ScopeRepository:
         self.catalog_path = self.root / "catalog.json"
         self.bots_directory = self.root / "bots"
         self.bot_bindings_directory = self.root / "bot-bindings"
+        # Observation history is the one intentionally global, repository-owned
+        # retention domain.  Segment bytes are partitioned by opaque Scope token
+        # below this root; its manifest is never stored inside a Session folder.
+        self.observation_root = self.root / "observation"
+        self.observation_manifest_path = self.observation_root / "manifest.json"
         self._lock_path = self.root / ".scope-v1.lock"
         self._persona_genesis_global_path = self.root / "persona-genesis-global.json"
         self._persona_genesis_slot_path = self.root / ".persona-genesis-provider.lock"
@@ -247,6 +252,21 @@ class ScopeRepository:
                 error_label="scope repository",
             )
         self.bots_directory.mkdir(parents=True, exist_ok=True)
+
+    def _observation_scope_dir_locked(self, scope: SessionScope) -> Path:
+        if type(scope) is not SessionScope:
+            raise ValueError("scope must be a SessionScope")
+        self._validate_session_scope_locked(scope)
+        return self.observation_root / "scopes" / _require_token(
+            scope.storage_token,
+            "scope_v1_",
+        )
+
+    def observation_scope_dir(self, scope: SessionScope) -> Path:
+        """Return the opaque observation directory after a full scope fence."""
+
+        with self._repository_lock():
+            return self._observation_scope_dir_locked(scope)
 
     def _repository_lock(self) -> _InterProcessLock:
         return _InterProcessLock(
