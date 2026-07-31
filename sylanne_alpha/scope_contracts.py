@@ -388,12 +388,26 @@ class ScopeApiEcho:
     scope: ScopeApiPathEcho
     scope_generation: int
     resolved_at_ms: int
+    bot_generation: int | None = None
+    persona_lifecycle_generation: int | None = None
+    session_generation: int | None = None
+    relation_generation: int | None = None
+    turn_generation: int | None = None
 
     def __post_init__(self) -> None:
         if type(self.scope) is not ScopeApiPathEcho:
             raise ValueError("scope must be a ScopeApiPathEcho")
         _require_generation(self.scope_generation, "scope_generation")
         _require_generation(self.resolved_at_ms, "resolved_at_ms")
+        for name, value in (
+            ("bot_generation", self.bot_generation),
+            ("persona_lifecycle_generation", self.persona_lifecycle_generation),
+            ("session_generation", self.session_generation),
+            ("relation_generation", self.relation_generation),
+            ("turn_generation", self.turn_generation),
+        ):
+            if value is not None:
+                _require_generation(value, name)
 
 
 @dataclass(frozen=True, slots=True)

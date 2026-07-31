@@ -883,6 +883,17 @@ class SessionCatalog:
                 )
             return matches[0]
 
+    def current_exact(self, bot_ref_token: str, session_ref_token: str) -> TransportTurn:
+        """Return one direct Bot-owned turn without searching sibling namespaces."""
+
+        bot_token = _require_token(bot_ref_token, "bot_v1_")
+        session_token = _require_token(session_ref_token, "session_v1_")
+        with self.repository.transaction():
+            turn = self._load_turn_locked(bot_token, session_token)
+            if turn is None:
+                raise KeyError("transport session not found")
+            return turn
+
     @staticmethod
     def _proactive_intent_payload(draft: ProactiveIntentDraft) -> dict[str, object]:
         """Return the complete HMAC-covered draft without exposing it publicly."""

@@ -1324,26 +1324,44 @@ class ScopeRepository:
         ):
             raise RepositoryCorruptionError("scope parent chain is invalid")
 
-    def _resolve_scope_locked(self, storage_token: str) -> SessionScope:
-        token = _require_token(storage_token, "scope_v1_")
-        catalog = self._read_catalog_locked()
-        parent = catalog["scopes"].get(token)
-        if type(parent) is not dict:
-            raise KeyError("scope not found")
-        bot_token = _require_token(parent["bot_ref"], "bot_v1_")
-        persona_token = _require_token(parent["persona_ref"], "persona_v1_")
-        session_token = _require_token(parent["session_ref"], "session_v1_")
+    def _resolve_exact_scope_locked(
+        self,
+        bot_token: str,
+        persona_token: str,
+        session_token: str,
+        *,
+        missing_is_corruption: bool,
+    ) -> SessionScope:
+        """Resolve one known Bot/Persona/Session path without catalog scanning."""
+
+        bot_token = _require_token(bot_token, "bot_v1_")
+        persona_token = _require_token(persona_token, "persona_v1_")
+        session_token = _require_token(session_token, "session_v1_")
         path = self._scope_directory(bot_token, persona_token, session_token) / "scope-meta.json"
         metadata = self._load_scope_meta_locked(path)
         if metadata is None:
-            raise RepositoryCorruptionError("scope metadata is missing")
+            if missing_is_corruption:
+                raise RepositoryCorruptionError("scope metadata is missing")
+            raise KeyError("scope not found")
         if (
-            metadata["storage_token"] != token
-            or metadata["bot_ref"] != bot_token
+            metadata["bot_ref"] != bot_token
             or metadata["persona_ref"] != persona_token
             or metadata["session_ref"] != session_token
         ):
             raise RepositoryCorruptionError("scope parent chain is invalid")
+        storage_token = _require_token(metadata["storage_token"], "scope_v1_")
+        expected_parent = {
+            "bot_ref": bot_token,
+            "persona_ref": persona_token,
+            "session_ref": session_token,
+        }
+        registered_parent = self._read_catalog_locked()["scopes"].get(storage_token)
+        if registered_parent is None:
+            # A scope-meta file is not authority.  A failed/partial write may
+            # leave one behind, but callers must never select it by its path.
+            raise KeyError("scope not found")
+        if registered_parent != expected_parent:
+            raise RepositoryCorruptionError("scope catalog parent is invalid")
         bot = BotRef(token=bot_token, generation=int(metadata["bot_generation"]))
         self._validate_bot_ref_locked(bot)
         persona_stub = PersonaRevisionRef(
@@ -1380,13 +1398,73 @@ class ScopeRepository:
                 bot_ref=bot,
                 generation=int(metadata["session_generation"]),
             ),
-            storage_token=token,
+            storage_token=storage_token,
             scope_generation=int(metadata["scope_generation"]),
         )
+
+    def _resolve_scope_locked(self, storage_token: str) -> SessionScope:
+        token = _require_token(storage_token, "scope_v1_")
+        catalog = self._read_catalog_locked()
+        parent = catalog["scopes"].get(token)
+        if type(parent) is not dict:
+            raise KeyError("scope not found")
+        resolved = self._resolve_exact_scope_locked(
+            _require_token(parent["bot_ref"], "bot_v1_"),
+            _require_token(parent["persona_ref"], "persona_v1_"),
+            _require_token(parent["session_ref"], "session_v1_"),
+            missing_is_corruption=True,
+        )
+        if resolved.storage_token != token:
+            raise RepositoryCorruptionError("scope parent chain is invalid")
+        return resolved
 
     def resolve_scope(self, storage_token: str) -> SessionScope:
         with self._repository_lock():
             return self._resolve_scope_locked(storage_token)
+
+    def resolve_exact_scope(
+        self,
+        bot_token: str,
+        persona_token: str,
+        session_token: str,
+    ) -> SessionScope:
+        """Resolve only the supplied opaque three-token path under one lock."""
+
+        with self._repository_lock():
+            return self._resolve_exact_scope_locked(
+                bot_token,
+                persona_token,
+                session_token,
+                missing_is_corruption=False,
+            )
+
+    def list_active_scopes(self) -> tuple[SessionScope, ...]:
+        """List current scopes through catalog registrations only.
+
+        The catalog is the authoritative index.  This deliberately does not
+        discover arbitrary ``scope-meta.json`` files from the filesystem.
+        """
+
+        with self._repository_lock():
+            catalog = self._read_catalog_locked()
+            active: list[SessionScope] = []
+            for storage_token, parent in sorted(catalog["scopes"].items()):
+                try:
+                    scope = self._resolve_exact_scope_locked(
+                        _require_token(parent["bot_ref"], "bot_v1_"),
+                        _require_token(parent["persona_ref"], "persona_v1_"),
+                        _require_token(parent["session_ref"], "session_v1_"),
+                        missing_is_corruption=True,
+                    )
+                except StaleScopeWrite:
+                    # Catalog registrations outlive Persona/session retirement.
+                    # They remain authoritative history, but are not active UI
+                    # choices. Corrupt or missing registrations still propagate.
+                    continue
+                if scope.storage_token != storage_token:
+                    raise RepositoryCorruptionError("scope catalog parent is invalid")
+                active.append(scope)
+            return tuple(active)
 
     def current_scope_generation(self, storage_token: str) -> int | None:
         try:

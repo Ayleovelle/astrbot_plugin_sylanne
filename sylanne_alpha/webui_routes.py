@@ -20,12 +20,23 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
+import math
 import secrets
 import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from sylanne_alpha.scoped_api import (
+    SCOPE_NONCE_HEADER,
+    ScopedApiAuthorization,
+    ScopedApiError,
+    ScopedApiRequest,
+    scoped_api_service_for_plugin,
+)
+from sylanne_alpha.scope_contracts import ScopeApiPathEcho
 
 if TYPE_CHECKING:
     from sylanne_alpha.protocols import PluginHost
@@ -348,6 +359,270 @@ def _webui_session_items(plugin: object, session_keys: list[str]) -> list[dict[s
     return items
 
 
+_SCOPED_NUMERIC_KEYS = frozenset(
+    {
+        "activation",
+        "arousal",
+        "boundary_integrity",
+        "coherence",
+        "confidence",
+        "drive",
+        "energy",
+        "entropy",
+        "integrity",
+        "internal_entropy",
+        "load",
+        "pressure",
+        "score",
+        "stability",
+        "tension",
+        "threshold",
+        "valence",
+        "value",
+        "warmth",
+    }
+)
+_SCOPED_ROUTE_KEYS = frozenset(
+    {"resonance", "skip", "fallback", "error", "direct", "defer"}
+)
+_SCOPED_HISTORY_KEYS = frozenset(
+    {"at_ms", "timestamp", "timestamp_ms", "score", "value", "confidence"}
+)
+
+
+def _scoped_number(value: object) -> int | float | None:
+    if type(value) is int:
+        return value
+    if type(value) is float and math.isfinite(value):
+        return round(value, 6)
+    return None
+
+
+def _scoped_metric_map(value: object) -> dict[str, int | float]:
+    """Project only known numeric telemetry fields from private runtime state."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    projected: dict[str, int | float] = {}
+    for key in _SCOPED_NUMERIC_KEYS:
+        number = _scoped_number(value.get(key))
+        if number is not None:
+            projected[key] = number
+    return projected
+
+
+def _scoped_route_counts(value: object) -> dict[str, int | float]:
+    if not isinstance(value, Mapping):
+        return {}
+    projected: dict[str, int | float] = {}
+    for key in _SCOPED_ROUTE_KEYS:
+        number = _scoped_number(value.get(key))
+        if number is not None:
+            projected[key] = number
+    return projected
+
+
+def _scoped_history_payload(plugin: object, authorization: ScopedApiAuthorization) -> dict[str, object]:
+    store = getattr(getattr(plugin, "_session_ctx", None), "observation_history_store", None)
+    query = getattr(store, "query", None)
+    if not callable(query):
+        return {"sample_count": 0, "points": [], "storage": {}}
+    try:
+        source = query(
+            authorization.scope.storage_token,
+            group="emotion",
+            from_ms=None,
+            to_ms=None,
+            max_points=240,
+        )
+    except Exception:  # noqa: BLE001 - no private failure details cross the API
+        return {"sample_count": 0, "points": [], "storage": {}}
+    if not isinstance(source, Mapping):
+        return {"sample_count": 0, "points": [], "storage": {}}
+    points: list[dict[str, int | float]] = []
+    raw_points = source.get("points")
+    if isinstance(raw_points, list):
+        for point in raw_points[:240]:
+            if not isinstance(point, Mapping):
+                continue
+            public_point: dict[str, int | float] = {}
+            for key in _SCOPED_HISTORY_KEYS:
+                number = _scoped_number(point.get(key))
+                if number is not None:
+                    public_point[key] = number
+            if public_point:
+                points.append(public_point)
+    storage_source = source.get("storage")
+    storage: dict[str, int | float] = {}
+    if isinstance(storage_source, Mapping):
+        for key in ("used_bytes", "limit_bytes", "oldest_ms", "segment_count"):
+            number = _scoped_number(storage_source.get(key))
+            if number is not None:
+                storage[key] = number
+    sample_count = _scoped_number(source.get("sample_count"))
+    return {
+        "sample_count": 0 if sample_count is None else sample_count,
+        "points": points,
+        "storage": storage,
+    }
+
+
+def _scoped_memory_pools(plugin: object, authorization: ScopedApiAuthorization) -> dict[str, int]:
+    memory = None
+    getter = getattr(plugin, "_memory_system_for_scope", None)
+    if callable(getter):
+        try:
+            memory = getter(authorization.scope)
+        except Exception:  # noqa: BLE001 - unavailable private owner is empty
+            memory = None
+    if memory is None:
+        return {
+            "l1_count": 0,
+            "l2_count": 0,
+            "l3_node_count": 0,
+            "l3_edge_count": 0,
+            "tick": 0,
+        }
+    return {
+        "l1_count": len(getattr(memory, "_l1", ()) or ()),
+        "l2_count": len(getattr(memory, "_l2", ()) or ()),
+        "l3_node_count": len(getattr(memory, "_l3_nodes", {}) or {}),
+        "l3_edge_count": len(getattr(memory, "_l3_edges", ()) or ()),
+        "tick": int(getattr(memory, "_tick", 0) or 0),
+    }
+
+
+async def scoped_api_payload(
+    plugin: object,
+    authorization: ScopedApiAuthorization,
+    endpoint: str,
+) -> dict[str, object]:
+    """Build the exact-scope public DTO without exporting private payloads."""
+
+    payload = authorization.public_payload()
+    scope = authorization.scope
+    if endpoint == "state":
+        host = None
+        getter = getattr(plugin, "_host_for_scope", None)
+        if callable(getter):
+            try:
+                host = getter(scope)
+            except Exception:  # noqa: BLE001 - empty projection is fail closed
+                host = None
+        computation = getattr(getattr(host, "kernel", None), "computation", None)
+        payload["state"] = {
+            "tick_count": int(getattr(computation, "_tick_count", 0) or 0),
+            "gate": _scoped_metric_map(_comp_gate_dict(computation)),
+            "boundary": _scoped_metric_map(_comp_boundary_dict(computation)),
+        }
+    elif endpoint == "observation-history":
+        payload["observation_history"] = _scoped_history_payload(plugin, authorization)
+    elif endpoint == "diagnostics":
+        host = None
+        getter = getattr(plugin, "_host_for_scope", None)
+        if callable(getter):
+            try:
+                host = getter(scope)
+            except Exception:  # noqa: BLE001 - empty projection is fail closed
+                host = None
+        computation = getattr(getattr(host, "kernel", None), "computation", None)
+        diagnostics = getattr(computation, "diagnostics", None)
+        raw = diagnostics() if callable(diagnostics) else {}
+        route_counts = raw.get("route_counts") if isinstance(raw, Mapping) else {}
+        payload["diagnostics"] = {"route_counts": _scoped_route_counts(route_counts)}
+    elif endpoint == "memory-pools":
+        payload["memory_pools"] = _scoped_memory_pools(plugin, authorization)
+    return payload
+
+
+def issue_scoped_meltdown_nonce(
+    plugin: object,
+    authorization: ScopedApiAuthorization,
+) -> str | ScopedApiError:
+    """Use the plugin's established destructive nonce map for one exact scope."""
+
+    nonces = getattr(plugin, "_meltdown_nonces", None)
+    if not isinstance(nonces, dict):
+        return ScopedApiError(503, "meltdown_unavailable")
+    nonce = secrets.token_hex(16)
+    nonces[authorization.scope.storage_token] = nonce
+    return nonce
+
+
+def consume_scoped_meltdown_nonce(
+    plugin: object,
+    authorization: ScopedApiAuthorization,
+    candidate: object,
+) -> ScopedApiError | None:
+    """Consume the existing nonce keyed by the frozen storage owner only."""
+
+    if type(candidate) is not str or not candidate:
+        return ScopedApiError(400, "invalid_meltdown_nonce")
+    nonces = getattr(plugin, "_meltdown_nonces", None)
+    if not isinstance(nonces, dict):
+        return ScopedApiError(503, "meltdown_unavailable")
+    expected = nonces.get(authorization.scope.storage_token)
+    if type(expected) is not str or not secrets.compare_digest(candidate, expected):
+        return ScopedApiError(403, "token_mismatch")
+    nonces.pop(authorization.scope.storage_token, None)
+    return None
+
+
+async def purge_scoped_memory(
+    plugin: object,
+    authorization: ScopedApiAuthorization,
+) -> dict[str, object]:
+    """Clear only the exact scope owner after an already-consumed nonce."""
+
+    scope = authorization.scope
+    memory = None
+    memory_getter = getattr(plugin, "_memory_system_for_scope", None)
+    if callable(memory_getter):
+        try:
+            memory = memory_getter(scope)
+        except Exception:  # noqa: BLE001 - no sibling fallback is permitted
+            memory = None
+    if memory is not None:
+        for name in ("_l1", "_l2", "_l3_nodes", "_l3_edges"):
+            value = getattr(memory, name, None)
+            clear = getattr(value, "clear", None)
+            if callable(clear):
+                clear()
+        if hasattr(memory, "_tick"):
+            memory._tick = 0
+        if hasattr(memory, "_hydrated"):
+            memory._hydrated = True
+    host = None
+    host_getter = getattr(plugin, "_host_for_scope", None)
+    if callable(host_getter):
+        try:
+            host = host_getter(scope)
+        except Exception:  # noqa: BLE001 - no sibling fallback is permitted
+            host = None
+    body_memory = getattr(getattr(getattr(host, "kernel", None), "body", None), "memory", None)
+    if isinstance(body_memory, dict):
+        body_memory["traces"] = []
+        body_memory.pop("_memory_system", None)
+    persistence = getattr(plugin, "_state_persistence", None)
+    purge = getattr(persistence, "purge_session_after_meltdown", None)
+    if callable(purge):
+        result = purge(scope.storage_token)
+        if inspect.isawaitable(result):
+            await result
+    amnesia = getattr(plugin, "_amnesia_sessions", None)
+    if not isinstance(amnesia, set):
+        amnesia = set()
+        try:
+            setattr(plugin, "_amnesia_sessions", amnesia)
+        except Exception:  # noqa: BLE001 - immutable test facade
+            pass
+    amnesia.add(scope.storage_token)
+    payload = authorization.public_payload()
+    payload["cleared"] = True
+    payload["status"] = "accepted"
+    return payload
+
+
 class WebUIRoutes:
     """封装所有 WebUI HTTP 路由处理器。
 
@@ -404,6 +679,137 @@ class WebUIRoutes:
     @staticmethod
     def _scope_unavailable_payload() -> dict[str, Any]:
         return {"ok": False, "error": "scope_unavailable"}
+
+    def _scoped_api_service(self):
+        """Return the already-published shared scope gate, never create one."""
+
+        return scoped_api_service_for_plugin(self._p)
+
+    @staticmethod
+    def _scoped_native_error(error: ScopedApiError) -> Any:
+        """Preserve exact statuses where the AstrBot host exposes responses."""
+
+        payload = error.public_payload()
+        try:
+            from astrbot.api.web import json_response
+        except (ImportError, AttributeError):
+            return {**payload, "status": error.status}
+        for keyword in ("status", "status_code"):
+            try:
+                return json_response(payload, **{keyword: error.status})
+            except TypeError:
+                continue
+        return {**payload, "status": error.status}
+
+    async def scoped_api_handler(self, endpoint: str = "scope") -> Any:
+        """Adapt an AstrBot request into the shared exact scoped API service."""
+
+        from astrbot.api.web import request
+
+        service = self._scoped_api_service()
+        if service is None:
+            return self._scoped_native_error(ScopedApiError(410, "scope_required"))
+        query = getattr(request, "query", {})
+        if isinstance(query, Mapping) and "session" in query:
+            return self._scoped_native_error(
+                ScopedApiError(400, "legacy_session_selector_forbidden")
+            )
+        params = getattr(request, "path_params", {})
+        headers = getattr(request, "headers", {})
+        try:
+            scoped_request = ScopedApiRequest.from_tokens(
+                bot_ref=params.get("bot_ref"),
+                persona_ref=params.get("persona_ref"),
+                session_ref=params.get("session_ref"),
+                nonce=headers.get(SCOPE_NONCE_HEADER),
+                endpoint=endpoint,
+                method=getattr(request, "method", "GET"),
+            )
+        except (AttributeError, TypeError, ValueError):
+            return self._scoped_native_error(ScopedApiError(400, "invalid_scoped_request"))
+        authorization = service.authorize(scoped_request)
+        if isinstance(authorization, ScopedApiError):
+            return self._scoped_native_error(authorization)
+        if not isinstance(authorization, ScopedApiAuthorization):
+            return self._scoped_native_error(ScopedApiError(503, "scope_repository_unavailable"))
+        if scoped_request.endpoint in {"stream", "ws"}:
+            # AstrBot Pages stays serialized/polling; no unowned stream is opened.
+            return self._scoped_native_error(ScopedApiError(410, "stream_unavailable"))
+        if scoped_request.endpoint == "memory/meltdown-nonce":
+            checked = service.revalidate(authorization)
+            if isinstance(checked, ScopedApiError):
+                return self._scoped_native_error(checked)
+            meltdown_nonce = issue_scoped_meltdown_nonce(self._p, checked)
+            if isinstance(meltdown_nonce, ScopedApiError):
+                return self._scoped_native_error(meltdown_nonce)
+            payload = checked.public_payload()
+            payload["meltdown_nonce"] = meltdown_nonce
+            return payload
+        if scoped_request.endpoint == "memory/meltdown":
+            try:
+                body = await request.json()
+            except Exception:  # noqa: BLE001 - malformed input is a client error
+                body = None
+            if type(body) is not dict or set(body) != {"meltdown_nonce"}:
+                return self._scoped_native_error(ScopedApiError(400, "invalid_meltdown_request"))
+            checked = service.revalidate(authorization)
+            if isinstance(checked, ScopedApiError):
+                return self._scoped_native_error(checked)
+            nonce_error = consume_scoped_meltdown_nonce(
+                self._p,
+                checked,
+                body.get("meltdown_nonce"),
+            )
+            if nonce_error is not None:
+                return self._scoped_native_error(nonce_error)
+            return await purge_scoped_memory(self._p, checked)
+        return await scoped_api_payload(self._p, authorization, scoped_request.endpoint)
+
+    async def scope_catalog_handler(self) -> Any:
+        """Expose the redacted catalog used to choose a private API scope."""
+
+        service = self._scoped_api_service()
+        if service is None:
+            return self._scoped_native_error(ScopedApiError(410, "scope_required"))
+        result = service.catalog_payload()
+        if isinstance(result, ScopedApiError):
+            return self._scoped_native_error(result)
+        return result
+
+    async def scope_bootstrap_handler(self) -> Any:
+        """Mint a fresh one-use nonce for one live exact catalog entry."""
+
+        from astrbot.api.web import request
+
+        service = self._scoped_api_service()
+        if service is None:
+            return self._scoped_native_error(ScopedApiError(410, "scope_required"))
+        query = getattr(request, "query", {})
+        if isinstance(query, Mapping) and "session" in query:
+            return self._scoped_native_error(
+                ScopedApiError(400, "legacy_session_selector_forbidden")
+            )
+        params = getattr(request, "path_params", {})
+        try:
+            path = ScopeApiPathEcho(
+                bot_ref=params.get("bot_ref"),
+                persona_ref=params.get("persona_ref"),
+                session_ref=params.get("session_ref"),
+            )
+        except (AttributeError, TypeError, ValueError):
+            return self._scoped_native_error(ScopedApiError(400, "invalid_scoped_request"))
+        nonce = service.bootstrap_nonce(path)
+        if isinstance(nonce, ScopedApiError):
+            return self._scoped_native_error(nonce)
+        return {
+            "ok": True,
+            "scope": {
+                "bot_ref": path.bot_ref,
+                "persona_ref": path.persona_ref,
+                "session_ref": path.session_ref,
+            },
+            "scope_nonce": nonce,
+        }
 
     # ------------------------------------------------------------------
     # Memory settings & lineage observatory

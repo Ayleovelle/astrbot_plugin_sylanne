@@ -40,7 +40,19 @@ from sylanne_alpha.webui_routes import (
     _webui_session_items,
     build_observation_history_payload,
     build_model_routing_payload,
+    consume_scoped_meltdown_nonce,
+    issue_scoped_meltdown_nonce,
+    purge_scoped_memory,
+    scoped_api_payload,
 )
+from sylanne_alpha.scoped_api import (
+    SCOPE_NONCE_HEADER,
+    ScopedApiAuthorization,
+    ScopedApiError,
+    ScopedApiRequest,
+    scoped_api_service_for_plugin,
+)
+from sylanne_alpha.scope_contracts import ScopeApiPathEcho
 
 
 def _get_plugin_version() -> str:
@@ -104,6 +116,19 @@ _plugin_access_lock = threading.Lock()
 
 # S1/S2: 敏感配置键保护（子串匹配；"cookie" 覆盖 sylanne_alpha_qzone_cookie 登录凭据）
 _SENSITIVE_KEYS = frozenset({"token", "password", "secret", "api_key", "access_token", "auth_token", "bearer", "credential", "cookie"})
+_LEGACY_SCOPED_PRIVATE_PATHS = frozenset(
+    {
+        "/api/state",
+        "/api/observation_history",
+        "/api/computation_logs",
+        "/api/memory_pools",
+        "/api/meltdown_nonce",
+        "/api/memory_sink",
+        "/api/memory_consolidate",
+        "/api/memory_meltdown",
+        "/ws/state",
+    }
+)
 
 
 def _is_sensitive_key(key: str) -> bool:
@@ -285,6 +310,11 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         # 正常运行 token 必被自动生成（setup 处 secrets.token_urlsafe），故零回归。
         if not _active_token or not auth.startswith("Bearer ") or auth[7:] != _active_token:
             return web.json_response({"error": "unauthorized"}, status=401)
+        if (
+            request.path in _LEGACY_SCOPED_PRIVATE_PATHS
+            and getattr(_plugin(plugin), "_scope_runtime_registry", None) is not None
+        ):
+            return web.json_response({"error": "scope_required"}, status=410)
         # Item 24: CSRF 防护 — POST/DELETE 需要 X-CSRF-Token header
         if request.method in ("POST", "DELETE"):
             csrf_header = request.headers.get("X-CSRF-Token", "")
@@ -305,6 +335,148 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         )
 
     app = web.Application(middlewares=[auth_middleware])
+
+    def scoped_error(error: ScopedApiError) -> web.Response:
+        return web.json_response(error.public_payload(), status=error.status)
+
+    async def handle_scope_catalog(request: web.Request) -> web.Response:
+        service = scoped_api_service_for_plugin(_plugin(plugin))
+        if service is None:
+            return scoped_error(ScopedApiError(410, "scope_required"))
+        result = service.catalog_payload()
+        if isinstance(result, ScopedApiError):
+            return scoped_error(result)
+        return web.json_response(result)
+
+    async def handle_scope_bootstrap(request: web.Request) -> web.Response:
+        service = scoped_api_service_for_plugin(_plugin(plugin))
+        if service is None:
+            return scoped_error(ScopedApiError(410, "scope_required"))
+        if "session" in request.query:
+            return scoped_error(ScopedApiError(400, "legacy_session_selector_forbidden"))
+        try:
+            path = ScopeApiPathEcho(
+                bot_ref=request.match_info.get("bot_ref"),
+                persona_ref=request.match_info.get("persona_ref"),
+                session_ref=request.match_info.get("session_ref"),
+            )
+        except (TypeError, ValueError):
+            return scoped_error(ScopedApiError(400, "invalid_scoped_request"))
+        nonce = service.bootstrap_nonce(path)
+        if isinstance(nonce, ScopedApiError):
+            return scoped_error(nonce)
+        return web.json_response(
+            {
+                "ok": True,
+                "scope": {
+                    "bot_ref": path.bot_ref,
+                    "persona_ref": path.persona_ref,
+                    "session_ref": path.session_ref,
+                },
+                "scope_nonce": nonce,
+            }
+        )
+
+    async def handle_scoped_api(request: web.Request) -> web.StreamResponse:
+        """Serve the sole private root through the host-neutral scope gate."""
+
+        service = scoped_api_service_for_plugin(_plugin(plugin))
+        if service is None:
+            return scoped_error(ScopedApiError(410, "scope_required"))
+        if "session" in request.query:
+            return scoped_error(ScopedApiError(400, "legacy_session_selector_forbidden"))
+        endpoint = str(request.match_info.get("endpoint", "") or "scope").strip("/")
+        params = request.match_info
+        try:
+            scoped_request = ScopedApiRequest.from_tokens(
+                bot_ref=params.get("bot_ref"),
+                persona_ref=params.get("persona_ref"),
+                session_ref=params.get("session_ref"),
+                nonce=request.headers.get(SCOPE_NONCE_HEADER),
+                endpoint=endpoint,
+                method=request.method,
+            )
+        except (TypeError, ValueError):
+            return scoped_error(ScopedApiError(400, "invalid_scoped_request"))
+        authorization = service.authorize(scoped_request)
+        if isinstance(authorization, ScopedApiError):
+            return scoped_error(authorization)
+        if not isinstance(authorization, ScopedApiAuthorization):
+            return scoped_error(ScopedApiError(503, "scope_repository_unavailable"))
+        if scoped_request.endpoint == "memory/meltdown-nonce":
+            checked = service.revalidate(authorization)
+            if isinstance(checked, ScopedApiError):
+                return scoped_error(checked)
+            meltdown_nonce = issue_scoped_meltdown_nonce(_plugin(plugin), checked)
+            if isinstance(meltdown_nonce, ScopedApiError):
+                return scoped_error(meltdown_nonce)
+            payload = checked.public_payload()
+            payload["meltdown_nonce"] = meltdown_nonce
+            return web.json_response(payload)
+        if scoped_request.endpoint == "memory/meltdown":
+            try:
+                body = await request.json()
+            except Exception:  # noqa: BLE001 - malformed input is a client error
+                body = None
+            if type(body) is not dict or set(body) != {"meltdown_nonce"}:
+                return scoped_error(ScopedApiError(400, "invalid_meltdown_request"))
+            checked = service.revalidate(authorization)
+            if isinstance(checked, ScopedApiError):
+                return scoped_error(checked)
+            nonce_error = consume_scoped_meltdown_nonce(
+                _plugin(plugin),
+                checked,
+                body.get("meltdown_nonce"),
+            )
+            if nonce_error is not None:
+                return scoped_error(nonce_error)
+            return web.json_response(await purge_scoped_memory(_plugin(plugin), checked))
+        if scoped_request.endpoint == "stream":
+            response = web.StreamResponse(
+                status=200,
+                headers={
+                    "Content-Type": "text/event-stream",
+                    "Cache-Control": "no-cache",
+                },
+            )
+            await response.prepare(request)
+            stale_sent = False
+            while True:
+                response_task = response.task
+                if response_task is None or response_task.done():
+                    break
+                checked = service.revalidate(authorization)
+                if isinstance(checked, ScopedApiError):
+                    if not stale_sent:
+                        marker = json.dumps(service.stream_stale_payload(), separators=(",", ":"))
+                        await response.write(f"event: scope_stale\ndata: {marker}\n\n".encode())
+                        stale_sent = True
+                    break
+                heartbeat = json.dumps(checked.public_payload(), separators=(",", ":"))
+                await response.write(f"event: scope_status\ndata: {heartbeat}\n\n".encode())
+                await asyncio.sleep(1)
+            await response.write_eof()
+            return response
+        if scoped_request.endpoint == "ws":
+            socket = web.WebSocketResponse(heartbeat=30)
+            await socket.prepare(request)
+            stale_sent = False
+            while not socket.closed:
+                checked = service.revalidate(authorization)
+                if isinstance(checked, ScopedApiError):
+                    if not stale_sent:
+                        await socket.send_json(service.stream_stale_payload())
+                        stale_sent = True
+                    await socket.close(code=4409, message=b"scope_stale")
+                    break
+                await socket.send_json(
+                    {"event": "scope_status", "data": checked.public_payload()}
+                )
+                await asyncio.sleep(1)
+            return socket
+        return web.json_response(
+            await scoped_api_payload(_plugin(plugin), authorization, scoped_request.endpoint)
+        )
 
     async def handle_page(request: web.Request) -> web.Response:
         return web.Response(
@@ -1626,6 +1798,15 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
     app.router.add_get("/twin", handle_twin_page)
     app.router.add_get("/health", handle_health)
     app.router.add_get("/metrics", handle_metrics)
+    scope_catalog_root = "/api/scopes"
+    scope_bootstrap_root = (
+        "/api/scopes/{bot_ref}/personas/{persona_ref}/sessions/{session_ref}/nonce"
+    )
+    app.router.add_get(scope_catalog_root, handle_scope_catalog)
+    app.router.add_post(scope_bootstrap_root, handle_scope_bootstrap)
+    scoped_root = "/api/v1/bots/{bot_ref}/personas/{persona_ref}/sessions/{session_ref}"
+    app.router.add_route("*", scoped_root, handle_scoped_api)
+    app.router.add_route("*", f"{scoped_root}/{{endpoint:.*}}", handle_scoped_api)
     app.router.add_get("/api/state", handle_state)
     app.router.add_get("/api/observation_history", handle_observation_history)
     app.router.add_get("/api/life/status", handle_life_status)  # PR-B6 只读观测

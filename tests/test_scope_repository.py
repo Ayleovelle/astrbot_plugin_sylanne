@@ -17,6 +17,7 @@ from sylanne_alpha.scope_contracts import (
 )
 from sylanne_alpha.scope_identity import load_or_create_scope_identity_key
 from sylanne_alpha.scope_repository import (
+    RepositoryCorruptionError,
     ScopeParentMismatch,
     ScopeRepository,
     StaleScopeWrite,
@@ -99,6 +100,24 @@ def test_scope_lifecycle_generation_is_not_component_generation(tmp_path: Path) 
             active,
             expected_scope_generation=active.scope_generation,
             reason="purge",
+        )
+
+
+def test_exact_scope_resolver_uses_the_three_opaque_path_tokens(tmp_path: Path) -> None:
+    repository = ScopeRepository(tmp_path)
+    active = repository.create_scope(_scope(), expected_absent=True)
+
+    assert repository.resolve_exact_scope(
+        active.bot_ref.token,
+        active.persona_ref.token,
+        active.session_ref.token,
+    ) == active
+
+    with pytest.raises(KeyError):
+        repository.resolve_exact_scope(
+            active.bot_ref.token,
+            active.persona_ref.token,
+            "session_v1_missing",
         )
 
 
@@ -352,3 +371,44 @@ def test_repository_path_helpers_revalidate_tokens_before_computing_paths(
         )
 
     assert not (tmp_path.parent / "outside").exists()
+
+
+def test_exact_scope_resolution_rejects_orphaned_scope_metadata(tmp_path: Path) -> None:
+    repository = ScopeRepository(tmp_path)
+    active = repository.create_scope(_scope(), expected_absent=True)
+
+    catalog = repository._read_catalog_locked()
+    repository._atomic_json_replace(
+        repository.catalog_path,
+        {
+            "schema_version": catalog["schema_version"],
+            "generation": int(catalog["generation"]) + 1,
+            "scopes": {},
+        },
+    )
+
+    with pytest.raises(KeyError, match="scope not found"):
+        repository.resolve_exact_scope(
+            active.bot_ref.token,
+            active.persona_ref.token,
+            active.session_ref.token,
+        )
+
+
+def test_list_active_scopes_reads_only_authoritative_catalog(tmp_path: Path) -> None:
+    repository = ScopeRepository(tmp_path)
+    active = repository.create_scope(_scope(), expected_absent=True)
+
+    assert repository.list_active_scopes() == (active,)
+
+
+def test_list_active_scopes_excludes_retired_persona_registrations(tmp_path: Path) -> None:
+    repository = ScopeRepository(tmp_path)
+    active = repository.create_scope(_scope(), expected_absent=True)
+    repository.retire_persona_revision(
+        active.persona_ref,
+        expected_lifecycle_generation=active.persona_ref.lifecycle_generation,
+        reason="test",
+    )
+
+    assert repository.list_active_scopes() == ()

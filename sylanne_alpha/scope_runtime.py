@@ -1512,6 +1512,41 @@ class ScopeRuntimeRegistry:
             raise ScopeMismatch("relation runtime does not match exact relation scope")
         return relation
 
+    def unique_relation_for_scope(self, scope: SessionScope) -> RelationRuntime | None:
+        """Return a relation only when this live scope has exactly one owner.
+
+        A WebUI bootstrap cannot infer a user relation from a request path.  It
+        may use this method only when the runtime already contains one unambiguous
+        authenticated relation for the exact Bot/Persona owner.
+        """
+
+        try:
+            scope = _require_scope(scope)
+        except ScopeMismatch:
+            return None
+        if not self.is_live_session(scope):
+            return None
+        key = _persona_key(scope)
+        if key in self._retired_personas:
+            return None
+        runtime = self._personas.get(key)
+        if runtime is None:
+            return None
+        matches: list[RelationRuntime] = []
+        for relation in runtime.relation_runtimes.values():
+            if (
+                type(relation) is not RelationRuntime
+                or relation.scope.bot_ref != scope.bot_ref
+                or relation.scope.persona_ref != scope.persona_ref
+            ):
+                continue
+            try:
+                if self.relation_or_none(relation.scope) is relation:
+                    matches.append(relation)
+            except ScopeMismatch:
+                return None
+        return matches[0] if len(matches) == 1 else None
+
     def release_session(self, scope: SessionScope) -> None:
         """Release only this exact session without creating or changing siblings."""
 

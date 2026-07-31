@@ -224,6 +224,11 @@ from sylanne_alpha.scoped_host_runtime import ScopedHostRuntime  # noqa: E402
 from sylanne_alpha.v2core.integration import ScopedV2DomainPersistence  # noqa: E402
 from sylanne_alpha.v3bridge.integration import ScopedV3ShadowState  # noqa: E402
 from sylanne_alpha.webui_routes import WebUIRoutes  # noqa: E402
+from sylanne_alpha.scoped_api import (  # noqa: E402
+    SCOPED_API_METHODS,
+    issue_scoped_api_nonce_for_binding,
+    scoped_api_service_for_plugin,
+)
 from sylanne_alpha.scope_contracts import (  # noqa: E402
     ResolvedScope,
     ResolvedTransportScope,
@@ -1556,6 +1561,35 @@ class EmotionalStatePlugin(Star):
                 continue
             context.register_web_api(path, handler, methods, f"Sylanne {handler_name}")
 
+        context.register_web_api(
+            f"/{P}/api/scopes",
+            wr.scope_catalog_handler,
+            ["GET"],
+            "Sylanne scoped API catalog",
+        )
+        context.register_web_api(
+            f"/{P}/api/scopes/<bot_ref>/personas/<persona_ref>/sessions/<session_ref>/nonce",
+            wr.scope_bootstrap_handler,
+            ["POST"],
+            "Sylanne scoped API nonce bootstrap",
+        )
+
+        scoped_root = (
+            f"/{P}/api/v1/bots/<bot_ref>/personas/<persona_ref>/sessions/<session_ref>"
+        )
+        for endpoint, method in SCOPED_API_METHODS.items():
+            path = scoped_root if endpoint == "scope" else f"{scoped_root}/{endpoint}"
+
+            async def scoped_handler(_endpoint: str = endpoint) -> Any:
+                return await wr.scoped_api_handler(_endpoint)
+
+            context.register_web_api(
+                path,
+                scoped_handler,
+                [method],
+                f"Sylanne scoped API {endpoint}",
+            )
+
     @property
     def config(self) -> dict[str, Any]:
         try:
@@ -2101,6 +2135,17 @@ class EmotionalStatePlugin(Star):
         if not self._scope_runtime_registry.is_live_session(binding.scope):
             return None
         return binding
+
+    def issue_scoped_api_nonce(self) -> str | None:
+        """Issue a private UI capability only for the currently frozen relation."""
+
+        binding = self._bound_runtime()
+        if binding is None:
+            return None
+        return issue_scoped_api_nonce_for_binding(
+            scoped_api_service_for_plugin(self),
+            binding,
+        )
 
     def _active_scoped_session_runtime(self) -> ScopedSessionRuntime | None:
         binding = self._bound_runtime()
