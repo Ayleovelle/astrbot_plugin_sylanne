@@ -37,6 +37,7 @@ _SCOPE_META_SCHEMA = "sylanne.scope.meta.v1"
 _RELATION_META_SCHEMA = "sylanne.scope.relation-meta.v1"
 _PERSONA_GENESIS_GLOBAL_SCHEMA = "sylanne.persona-genesis.global.v1"
 _PERSONA_GENESIS_CORRUPTION_SCHEMA = "sylanne.persona-genesis.corruption.v1"
+_LEGACY_UNSCOPED_MANIFEST_SCHEMA = "sylanne.scope.legacy-unscoped.v1"
 _PERSONA_GENESIS_DAILY_LIMIT = 32
 _PERSONA_GENESIS_LEASE_MS = 5 * 60 * 1000
 _COMPONENT_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
@@ -231,6 +232,11 @@ class ScopeRepository:
         # below this root; its manifest is never stored inside a Session folder.
         self.observation_root = self.root / "observation"
         self.observation_manifest_path = self.observation_root / "manifest.json"
+        # Legacy imports are intentionally not mixed into any live Session
+        # partition.  The claim service is the only caller allowed to inspect
+        # this owner-only, explicit-inventory root.
+        self.legacy_unscoped_root = self.root / "legacy-unscoped"
+        self.legacy_unscoped_manifest_path = self.legacy_unscoped_root / "manifest.json"
         self._lock_path = self.root / ".scope-v1.lock"
         self._persona_genesis_global_path = self.root / "persona-genesis-global.json"
         self._persona_genesis_slot_path = self.root / ".persona-genesis-provider.lock"
@@ -627,6 +633,141 @@ class ScopeRepository:
         except OSError as exc:
             raise RepositoryCorruptionError(f"{error_label} is unreadable") from exc
         return self._read_json(path, error_label=error_label)
+
+    @staticmethod
+    def _legacy_fingerprint(value: object) -> str:
+        if (
+            type(value) is not str
+            or len(value) != 64
+            or value != value.lower()
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ValueError("legacy source fingerprint is invalid")
+        return value
+
+    def legacy_unscoped_source_path(self, fingerprint: str) -> Path:
+        """Return one opaque explicit-inventory source path.
+
+        The path accepts only a digest generated from supplied inventory bytes;
+        it is never derived from a transport key, KV key, or legacy filename.
+        """
+
+        digest = self._legacy_fingerprint(fingerprint)
+        return self.legacy_unscoped_root / "sources" / f"{digest}.json"
+
+    def _read_legacy_unscoped_manifest_locked(self) -> dict[str, object]:
+        """Read the single atomic inventory/claim index under the scope lock."""
+
+        loaded = self._read_owner_json_locked(
+            self.legacy_unscoped_manifest_path,
+            error_label="legacy unscoped manifest",
+        )
+        if loaded is None:
+            return {
+                "schema_version": _LEGACY_UNSCOPED_MANIFEST_SCHEMA,
+                "generation": 0,
+                "inventory": {},
+                "claims": {},
+            }
+        raw, document = loaded
+        if (
+            set(document) != {"schema_version", "generation", "inventory", "claims"}
+            or document["schema_version"] != _LEGACY_UNSCOPED_MANIFEST_SCHEMA
+            or type(document["generation"]) is not int
+            or int(document["generation"]) < 1
+            or type(document["inventory"]) is not dict
+            or type(document["claims"]) is not dict
+            or raw != _canonical_json_bytes(document)
+        ):
+            raise RepositoryCorruptionError("legacy unscoped manifest is invalid")
+        for collection_name in ("inventory", "claims"):
+            collection = document[collection_name]
+            assert type(collection) is dict
+            for fingerprint, record in collection.items():
+                self._legacy_fingerprint(fingerprint)
+                if type(record) is not dict:
+                    raise RepositoryCorruptionError(
+                        "legacy unscoped manifest record is invalid"
+                    )
+        return document
+
+    def _write_legacy_unscoped_manifest_locked(
+        self,
+        document: dict[str, object],
+    ) -> None:
+        """Publish inventory and claim completion in one owner-only replace."""
+
+        if type(document) is not dict:
+            raise ValueError("legacy unscoped manifest must be an exact dict")
+        payload = _canonical_json_bytes(document)
+        atomic_write_owner_only_bytes(
+            self.legacy_unscoped_manifest_path,
+            payload,
+            error_label="legacy unscoped manifest",
+        )
+        self._fsync_dir(self.legacy_unscoped_root)
+
+    def _read_legacy_unscoped_source_locked(
+        self,
+        fingerprint: str,
+    ) -> tuple[bytes, dict[str, object]] | None:
+        return self._read_owner_json_locked(
+            self.legacy_unscoped_source_path(fingerprint),
+            error_label="legacy unscoped source",
+        )
+
+    def _write_legacy_unscoped_source_locked(
+        self,
+        fingerprint: str,
+        document: dict[str, object],
+    ) -> None:
+        payload = _canonical_json_bytes(document)
+        atomic_write_owner_only_bytes(
+            self.legacy_unscoped_source_path(fingerprint),
+            payload,
+            error_label="legacy unscoped source",
+        )
+
+    def _write_legacy_unscoped_stage_locked(
+        self,
+        fingerprint: str,
+        payload: bytes,
+    ) -> Path:
+        """Durably stage a copy before a legacy claim can publish it."""
+
+        digest = self._legacy_fingerprint(fingerprint)
+        if type(payload) is not bytes:
+            raise TypeError("legacy staging payload must have exact type bytes")
+        stage = (
+            self.legacy_unscoped_root
+            / "staging"
+            / f"{digest}.{secrets.token_hex(12)}.stage"
+        )
+        atomic_write_owner_only_bytes(
+            stage,
+            payload,
+            error_label="legacy unscoped staging",
+        )
+        return stage
+
+    def _write_legacy_unscoped_quarantine_locked(
+        self,
+        document: dict[str, object],
+    ) -> Path:
+        """Record a rejected import outside live scope partitions."""
+
+        payload = _canonical_json_bytes(document)
+        path = (
+            self.legacy_unscoped_root
+            / "quarantine"
+            / f"{secrets.token_hex(16)}.json"
+        )
+        atomic_write_owner_only_bytes(
+            path,
+            payload,
+            error_label="legacy unscoped quarantine",
+        )
+        return path
 
     def _iter_delivery_outboxes_locked(
         self,

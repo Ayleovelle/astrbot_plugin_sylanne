@@ -345,6 +345,8 @@ class StatePersistence:
         """驱逐/释放落盘真逻辑——只准经咽喉 op 调用。"""
         if state is None:
             return
+        if self._legacy_memory_fallback_forbidden():
+            return
         # MEM-02② (FIX E)：驱逐/释放落盘同样是一条真实 KV 写路径。若一个未补水的实例
         # 在补水任务跑完前就被 LRU 挤出（挤出后挂起的 hydrate 会因活体不在而 no-op），
         # 用它覆盖非空归档就是那条"驱逐清零"链路——这里套同一个 fail-closed 守卫拦住。
@@ -382,6 +384,17 @@ class StatePersistence:
     def has_kv_api(self) -> bool:
         """检查 AstrBot KV 存储 API 是否可用。"""
         return hasattr(self._p, "put_kv_data") and callable(self._p.put_kv_data)
+
+    def _legacy_memory_fallback_forbidden(self) -> bool:
+        """Return whether this compatibility object has lost raw-session authority.
+
+        A registry-enabled plugin has no default/current scope selector. Its
+        active paths own ``ScopedStatePersistence`` gateways instead, so this
+        legacy object must not inspect or recreate memory from KV, body state,
+        or ``.alpha.json`` compatibility sources.
+        """
+
+        return getattr(self._p, "_scope_runtime_registry", None) is not None
 
     @staticmethod
     def _scoped_runtime_for_host(session_key: str, host: Any) -> Any | None:
@@ -1212,6 +1225,8 @@ class StatePersistence:
             session_key: 会话标识。
             state: MemorySystem 实例或可序列化的状态对象。
         """
+        if self._legacy_memory_fallback_forbidden():
+            return
         if state is None:
             return
         from .memory_system import MemorySystem
@@ -1227,6 +1242,8 @@ class StatePersistence:
 
     async def _save_sylanne_memory_state_impl(self, session_key: str, state: Any) -> None:
         """save 真逻辑——只准经咽喉 op 调用（勿直接 await，会绕过串行化与栅栏）。"""
+        if self._legacy_memory_fallback_forbidden():
+            return
         from .memory_system import MemorySystem
 
         # MEM-02② (强化 fail-closed)：单点闸门——详见 _refuse_unhydrated_overwrite。
@@ -1802,6 +1819,8 @@ class StatePersistence:
             记忆状态对象，无数据时返回 None。
         """
         del now
+        if self._legacy_memory_fallback_forbidden():
+            return None
         from .memory_system import MemorySystem
 
         # MEM-03 PR-3（design §3 臂⑦）：load 准入栅栏令牌——在本方法【任何 await 之前】
@@ -1969,6 +1988,8 @@ class StatePersistence:
         覆盖归档；entry 会由 `_scan_pending_deletes`（下次重启）或管理员 purge
         解决，绝不由本方法自作主张地推进。
         """
+        if self._legacy_memory_fallback_forbidden():
+            return
         from .memory_system import MemorySystem
 
         store = getattr(self._p, "_store", None)
