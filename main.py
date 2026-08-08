@@ -94,6 +94,12 @@ except ImportError:
 
             return decorator
 
+        def on_waiting_llm_request(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
         def on_agent_begin(self, *args, **kwargs):
             def decorator(func):
                 return func
@@ -203,6 +209,14 @@ from sylanne_alpha.rhythm_learner import RhythmLearner  # noqa: E402
 from sylanne_alpha.proactive_scheduler import ProactiveScheduler  # noqa: E402
 from sylanne_alpha.proactive_bridge import ProactiveBridge  # noqa: E402
 from sylanne_alpha.emotion_spirit_bridge import EmotionSpiritBridge  # noqa: E402
+from sylanne_alpha.follow_up_epoch import (  # noqa: E402
+    active_follow_up_target,
+    advance_inbound_delivery_epoch,
+    commit_inbound_delivery_epoch,
+    event_extra,
+    register_inbound_event_once,
+    register_or_defer_inbound_delivery_epoch,
+)
 from sylanne_alpha.session_context import SessionContext, RitualRegistry  # noqa: E402
 from sylanne_alpha.session_state_store import SessionStateStore  # noqa: E402
 from sylanne_alpha.agents import (  # noqa: E402
@@ -1936,107 +1950,39 @@ class EmotionalStatePlugin(Star):
     # 消息事件监听：捕获所有消息（含未经 LLM 的），更新时间戳和节奏
     # -----------------------------------------------------------------------
 
+    def _register_inbound_event_once(self, event: Any) -> bool:
+        return register_inbound_event_once(self, event)
+
+    @staticmethod
+    def _event_extra(event: Any, key: str, default: Any = None) -> Any:
+        return event_extra(event, key, default)
+
+    def _astrbot_active_follow_up_target(self, event: Any) -> tuple[bool, str]:
+        return active_follow_up_target(event)
+
+    def _commit_inbound_delivery_epoch(
+        self,
+        event: Any,
+        session_key: str,
+        *,
+        reason: str,
+    ) -> int:
+        return commit_inbound_delivery_epoch(
+            self,
+            event,
+            session_key,
+            reason=reason,
+        )
+
     def _advance_inbound_delivery_epoch(self, event: Any, session_key: str) -> None:
-        """Register one real inbound message and interrupt an older delivery.
+        advance_inbound_delivery_epoch(self, event, session_key)
 
-        This hook runs before AstrBot enters its per-session agent lock. That is
-        the only point where a newly arrived user message can stop an older reply
-        that is still generating or sleeping between bubbles.
-        """
-
-        get_extra = getattr(event, "get_extra", None)
-        set_extra = getattr(event, "set_extra", None)
-        if callable(get_extra):
-            try:
-                if get_extra("_syl_inbound_registered", False):
-                    return
-            except Exception:
-                pass
-
-        duplicate = False
-        key = ""
-        seen: Any = None
-        registered_new = False
-        try:
-            umo = str(getattr(event, "unified_msg_origin", "") or "")
-            mid = getattr(getattr(event, "message_obj", None), "message_id", None)
-            key = (
-                umo + "\x00" + mid
-                if umo and isinstance(mid, str) and mid.strip()
-                else ""
-            )
-            seen = getattr(self, "_inbound_seen", None)
-            # Only pre-register when the event can carry ownership into
-            # on_llm_request. Otherwise the legacy gate below would mistake this
-            # first legitimate pass for a redelivery.
-            if key and seen is not None and callable(set_extra):
-                duplicate = key in seen
-                if not duplicate:
-                    seen[key] = time.time()
-                    registered_new = True
-        except Exception:
-            logger.warning(
-                "Sylanne inbound epoch registration failed open",
-                exc_info=True,
-            )
-
-        if callable(set_extra):
-            try:
-                set_extra("_syl_inbound_duplicate", duplicate)
-                # Commit marker last: _inbound_dup_gate only trusts the pair
-                # after both values have been written.
-                set_extra("_syl_inbound_registered", True)
-            except Exception:
-                registered = False
-                if callable(get_extra):
-                    try:
-                        registered = bool(
-                            get_extra("_syl_inbound_registered", False)
-                        )
-                    except Exception:
-                        pass
-                if registered_new and not registered and seen is not None:
-                    try:
-                        seen.pop(key, None)
-                    except Exception:
-                        pass
-
-        if duplicate:
-            return
-
-        epochs = getattr(self._store, "conversation_input_epoch", None)
-        input_epoch = 0
-        if epochs is not None:
-            try:
-                input_epoch = int(epochs.get(session_key, 0) or 0) + 1
-                epochs.set(session_key, input_epoch)
-            except Exception:
-                logger.warning(
-                    "Sylanne inbound epoch advance failed: session=%s",
-                    session_key,
-                    exc_info=True,
-                )
-                input_epoch = 0
-        if callable(set_extra):
-            try:
-                set_extra("_syl_input_epoch", input_epoch)
-            except Exception:
-                pass
-
-        active_turns = getattr(self._store, "segmented_delivery_turns", None)
-        if active_turns is None:
-            return
-        try:
-            turn = active_turns.get(session_key)
-            interrupt = getattr(turn, "interrupt", None)
-            if callable(interrupt):
-                interrupt()
-        except Exception:
-            logger.warning(
-                "Sylanne active delivery interrupt failed: session=%s",
-                session_key,
-                exc_info=True,
-            )
+    def _register_or_defer_inbound_delivery_epoch(
+        self,
+        event: Any,
+        session_key: str,
+    ) -> None:
+        register_or_defer_inbound_delivery_epoch(self, event, session_key)
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: Any, *args: Any, **kwargs: Any):
@@ -2068,7 +2014,7 @@ class EmotionalStatePlugin(Star):
             # Call through the class so narrow plugin-host stubs that bind only
             # on_message still exercise the real hook without needing to copy
             # every private helper onto their namespace.
-            EmotionalStatePlugin._advance_inbound_delivery_epoch(
+            EmotionalStatePlugin._register_or_defer_inbound_delivery_epoch(
                 self,
                 event,
                 session_key,
@@ -3952,8 +3898,46 @@ class EmotionalStatePlugin(Star):
     async def _recover_background_post_queue(self, session_key: str) -> bool:
         return await self._background_queue.recover_queue(session_key)
 
+    @filter.on_waiting_llm_request(priority=1000)
     async def on_waiting_llm_request(self, event: Any, **kwargs: Any) -> None:
-        await self._realtime_dispatch.on_waiting_llm_request(event, **kwargs)
+        """把 AstrBot 没有并入旧任务的补话，提交成一个真正的新轮。
+
+        调用顺序是这里的关键：AstrBot 会先等待 follow-up ticket 的裁决。
+        已被工具轮消费的消息会直接结束，不会触发本钩子；只有未消费、准备
+        自己请求 LLM 的消息才会走到这里。因此不能把这段逻辑挪回 on_message，
+        否则又会把“给当前任务补一句”误判成“取消当前任务”。
+        """
+
+        if bool(
+            EmotionalStatePlugin._event_extra(
+                event,
+                "_syl_follow_up_deferred",
+                False,
+            )
+        ):
+            session_key = self._session_ctx.session_key(event)
+            input_epoch = EmotionalStatePlugin._commit_inbound_delivery_epoch(
+                self,
+                event,
+                session_key,
+                reason="follow_up_promoted_to_new_turn",
+            )
+            logger.info(
+                "Sylanne follow-up promoted to a new turn: "
+                "session=%s epoch=%d target_run_id=%s",
+                session_key,
+                input_epoch,
+                EmotionalStatePlugin._event_extra(
+                    event,
+                    "_syl_follow_up_target_run_id",
+                    "unknown",
+                ),
+            )
+
+        realtime_dispatch = getattr(self, "_realtime_dispatch", None)
+        waiting_hook = getattr(realtime_dispatch, "on_waiting_llm_request", None)
+        if callable(waiting_hook):
+            await waiting_hook(event, **kwargs)
 
     def sylanne_alpha_switches(self) -> dict[str, Any]:
         return self._public_api.sylanne_alpha_switches()

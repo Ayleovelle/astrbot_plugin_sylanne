@@ -1811,6 +1811,7 @@ class LLMResponsePipeline:
         v3_token = self._v3_pending_token(session_key) if settle_v3 else None
         sent_count = 0
         interrupted = False
+        stop_epoch = delivery_turn.input_epoch if delivery_turn is not None else 0
         try:
             for idx, part in enumerate(parts, 1):
                 if delivery_turn is not None:
@@ -1822,6 +1823,7 @@ class LLMResponsePipeline:
                         if epochs is not None
                         else delivery_turn.input_epoch
                     )
+                    stop_epoch = current_epoch
                     if delivery_turn.should_stop(current_epoch):
                         interrupted = True
                         break
@@ -1841,6 +1843,7 @@ class LLMResponsePipeline:
                         if epochs is not None
                         else delivery_turn.input_epoch
                     )
+                    stop_epoch = current_epoch
                     if delivery_turn.should_stop(current_epoch):
                         interrupted = True
                         break
@@ -1891,10 +1894,18 @@ class LLMResponsePipeline:
                     session_key, total, succeeded=False, token=v3_token
                 )
             logger.info(
-                "Sylanne segmented dispatch interrupted: session=%s sent=%d/%d",
+                "Sylanne segmented dispatch interrupted: "
+                "session=%s sent=%d/%d turn_epoch=%d current_epoch=%d "
+                "explicit_interrupt=%s",
                 session_key,
                 sent_count,
                 total,
+                delivery_turn.input_epoch if delivery_turn is not None else 0,
+                stop_epoch,
+                bool(
+                    delivery_turn is not None
+                    and delivery_turn.interrupt_requested
+                ),
             )
             return
         # 所有段发送成功——清除未完成标记
