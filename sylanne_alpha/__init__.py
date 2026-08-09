@@ -1,26 +1,29 @@
 """sylanne_alpha 包初始化模块。
 
-导出 Sylanne-Embodiment 计算核心的公共符号：
-- AlphaBodyState: 身体状态模型（脉搏/神经/免疫/伤口/需求等子系统）
-- SylanneAlphaHost / SylanneAlphaHostEvent: 会话宿主对象及其事件
-- import_legacy_body: 旧版 3.x 数据迁移导入器
+导出 Sylanne 计算核心的公共符号。CP7 后计算实现统一为 vendored SylannEngine
+共振场（_engine/sylanne_core），本包从 SDK 重导出等价符号（同源同名），旧的
+sylanne_alpha 计算模块已删除：
+- AlphaBodyState: 身体状态模型
+- SylanneAlphaHost / SylanneAlphaHostEvent: 会话宿主（host.py 的共振场子类/重导出）
 - AlphaKernel / AlphaKernelEvent: 计算核心调度器及其事件
 - AlphaRuntime: 文件系统持久化运行时
 """
 
 from __future__ import annotations
 
-from .body import AlphaBodyState
+from sylanne_alpha._engine.sylanne_core.compute.body import AlphaBodyState
+from sylanne_alpha._engine.sylanne_core.compute.kernel import (
+    AlphaKernel,
+    AlphaKernelEvent,
+)
+from sylanne_alpha._engine.sylanne_core.compute.runtime import AlphaRuntime
+
 from .host import SylanneAlphaHost, SylanneAlphaHostEvent
-from .importer import import_legacy_body
-from .kernel import AlphaKernel, AlphaKernelEvent
-from .runtime import AlphaRuntime
 
 __all__ = [
     "AlphaBodyState",
     "SylanneAlphaHost",
     "SylanneAlphaHostEvent",
-    "import_legacy_body",
     "AlphaKernel",
     "AlphaKernelEvent",
     "AlphaRuntime",

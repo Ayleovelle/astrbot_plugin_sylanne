@@ -16,11 +16,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import hmac
 import math
 import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
+
+from .scoped_session_components import ScopedSessionComponentStore
+from .scope_repository import ScopedPersistenceGateway
 
 
 @dataclass
@@ -83,8 +89,17 @@ class SocialFieldCollector:
     - drain_shadow_buffer() 供 ConversationBuffer 注入旁观上下文
     """
 
-    def __init__(self, config: dict | None = None):
+    def __init__(
+        self,
+        config: dict | None = None,
+        *,
+        persistence: ScopedPersistenceGateway | None = None,
+    ):
+        """Create an explicit legacy collector or a frozen session collector."""
+
         self._groups: dict[str, _GroupState] = {}
+        # v2.5.0 R6 专用：见 register_group_key_alias() 文档字符串。
+        self._group_key_aliases: dict[str, str] = {}
         self._bot_names: list[str] = []
         self._continuation_tau: float = 60.0
         self._config: dict = {}
@@ -93,8 +108,13 @@ class SocialFieldCollector:
         self._post_reply_decay: float = 0.3
         self._inactive_decay: float = 0.98
         self._ema_alpha: float = 0.3
+        self._scoped_components = (
+            None if persistence is None else ScopedSessionComponentStore(persistence)
+        )
         if config:
             self.configure(config)
+        if self._scoped_components is not None:
+            self._restore_scoped_state()
 
     def configure(self, config: dict) -> None:
         """从配置字典中提取机器人名字和参数。"""
@@ -113,12 +133,28 @@ class SocialFieldCollector:
 
     def _get_group(self, group_id: str) -> _GroupState:
         """获取或创建群组状态。群组数上限 100，超出时淘汰最早的。"""
-        if group_id not in self._groups:
+        group_key = self._group_key(group_id)
+        if group_key not in self._groups:
             if len(self._groups) >= 100:
                 oldest_key = next(iter(self._groups))
                 del self._groups[oldest_key]
-            self._groups[group_id] = _GroupState()
-        return self._groups[group_id]
+            self._groups[group_key] = _GroupState()
+        return self._groups[group_key]
+
+    def _group_key(self, group_id: str) -> str:
+        """Return a non-durable raw key in legacy mode, a scoped digest otherwise."""
+
+        components = self._scoped_components
+        if components is None:
+            return group_id
+        # The raw group id remains only in this call frame.  HMAC with the
+        # frozen opaque storage token gives deterministic restart restoration
+        # while preventing a group identifier from appearing in component JSON.
+        return hmac.new(
+            components.gateway.scope.storage_token.encode("utf-8"),
+            group_id.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
 
     def collect(
         self,
@@ -199,10 +235,17 @@ class SocialFieldCollector:
             sheaf_coupling=sheaf_coupling,
         )
 
-    def notify_bot_replied(self, group_id: str, reply_text: str) -> None:
-        """机器人在群中发送回复后调用，重置相关状态。"""
+    def notify_bot_replied(
+        self, group_id: str, reply_text: str, now: float | None = None
+    ) -> None:
+        """机器人在群中发送回复后调用，重置相关状态。
+
+        now：注入时钟（默认 time.time()）。collect() 用注入 now，旧实现这里写死 time.time()，
+        回放/模拟下两者时基错配 → continuation_strength 的 delta_t 变垃圾值（核查任务
+        wzwd8i0ta #25）。统一走注入时钟；生产不传 now 时行为不变。
+        """
         gs = self._get_group(group_id)
-        gs.last_bot_reply_ts = time.time()
+        gs.last_bot_reply_ts = time.time() if now is None else now
         gs.silence_ticks = 0
         gs.social_void_pressure *= self._post_reply_decay
         gs.shadow_buffer.clear()
@@ -216,12 +259,80 @@ class SocialFieldCollector:
 
     def drain_shadow_buffer(self, group_id: str) -> list[dict]:
         """取出并清空旁观消息缓冲区，用于上下文注入。"""
-        gs = self._groups.get(group_id)
+        gs = self._groups.get(self._group_key(group_id))
         if not gs or not gs.shadow_buffer:
             return []
         entries = list(gs.shadow_buffer)
         gs.shadow_buffer.clear()
         return entries
+
+    def register_group_key_alias(self, alias_key: str, raw_group_id: str) -> None:
+        """v2.5.0 P0 slice 3（design §2.2 R6）专用：登记"读侧/货架用的群标识"
+        到 `collect()` 实际使用的内部群键之间的别名映射。
+
+        背景（红线闸 MAJOR 复核后新增）：`_groups`（以及它下面的
+        `shadow_buffer`）用 `extract_group_id(event)` 作 key——多数平台
+        （如 aiocqhttp）下这是原始数字 group_id（如 "123456"）。但货架写侧
+        （`_flush_conversation_to_l1`）与 R1 读侧算 `current_group_id` /
+        货架 `origin_id` 时，用的是 `extract_group_id_from_key(session_key)`
+        ——即 unified_msg_origin 去掉 sender 后缀（如
+        "aiocqhttp:GroupMessage:123456"）。两种格式在同一个群里并不相等，
+        若 `peek_recent_group_senders` 直接拿后者去查以前者为 key 的
+        `_groups` 字典，恒为空 → R6 把所有跨群条目都判定为"无法确认干净"而
+        锁死，`cross_group`/`strict` tier 形同虚设（虽是 fail-closed 安全
+        方向，但功能完全不生效）。
+
+        这里只加一层只读别名索引，把"货架格式的群标识"指向"collect() 实际
+        建状态用的群 key"，不改变 `_groups` 本身的 key 规则、不影响任何既有
+        SFPD 行为（消息频率/沉默/话题相关性等一律照旧用原始 key）。
+
+        有界：与 `_groups` 同容量上限（100）、同淘汰策略，防止无界增长。
+        `alias_key == raw_group_id`（两种推导本就相同，如非 aiocqhttp 平台的
+        兜底分支）时不必登记，省一条冗余映射。
+        """
+        if not alias_key or not raw_group_id or alias_key == raw_group_id:
+            return
+        alias_key = self._group_key(alias_key)
+        raw_group_id = self._group_key(raw_group_id)
+        if (
+            alias_key not in self._group_key_aliases
+            and len(self._group_key_aliases) >= 100
+        ):
+            oldest_key = next(iter(self._group_key_aliases))
+            del self._group_key_aliases[oldest_key]
+        self._group_key_aliases[alias_key] = raw_group_id
+
+    def peek_recent_group_senders(self, group_id: str) -> set[str]:
+        """v2.5.0 P0 slice 3（design §2.2 R6）专用：非破坏性只读某群
+        shadow_buffer 里当前留存的 sender_id 集合，**不消费、不 clear**——与
+        `drain_shadow_buffer` 语义完全不同、互不干扰（后者供 ConversationBuffer
+        的旁观上下文注入消费，若这里也 drain 会偷走那条消费链的数据）。
+
+        这是"尽力而为"信号，不是群名册：`shadow_buffer` 是 maxlen=20 的短窗口
+        滚动缓冲，且每次机器人在该群回复后会被 `notify_bot_replied` 清空
+        （见上）——对于"很久以后、在另一个群/私聊里跨群读取"的典型场景，
+        这里返回空集合是常态而非例外。调用方（R6）必须把空集合与"确认无
+        其他已知发言人"区分开：本方法不做这个区分（该区分依赖调用时机是否
+        "刚发生"，本方法无法从纯读一次 buffer 里推断），调用方按 fail-closed
+        原则处理"数据不可靠"的情况（见 `person_shelf.shelf_item_visible` 的
+        `known_other_senders is None` 分支——调用方在没有其他更可靠来源时，
+        应把"没有名单来源"和"看了但为空"同等对待为不可靠，而不是把本方法的
+        返回值直接当作确定性的"该群目前已知发言人"清单来放行）。
+
+        `group_id` 可以是 `collect()` 内部用的原始群 key，也可以是货架
+        `origin_id` 那种 `extract_group_id_from_key(session_key)` 格式——
+        后者查不到时会经 `register_group_key_alias` 登记的别名再查一次
+        （见该方法文档字符串）。两次都查不到则视为无数据，返回空集合。
+        """
+        group_key = self._group_key(group_id)
+        gs = self._groups.get(group_key)
+        if gs is None:
+            raw_group_id = self._group_key_aliases.get(group_key)
+            if raw_group_id:
+                gs = self._groups.get(raw_group_id)
+        if not gs:
+            return set()
+        return {str(e.get("sender_id", "")) for e in gs.shadow_buffer if e.get("sender_id")}
 
     def tick_silence(self, group_id: str) -> None:
         """每条消息（即使不回复）都调用——追踪沉默计数。"""
@@ -299,9 +410,27 @@ class SocialFieldCollector:
         return min(1.0, overlap / max(1, min(len(incoming), len(bot_tokens))))
 
     def is_group_context_by_key(self, session_key: str) -> bool:
+        if self._scoped_components is not None:
+            raise ValueError("scoped social state does not accept a session key")
         return "Group" in session_key or "group" in session_key
 
+    def known_other_sender_ids(self) -> set[str]:
+        """遍历所有群组的旁观缓冲区，收集出现过的 sender_id（非破坏性只读）。
+
+        供 qzone 广播闸（qzone_share.py）拼装"已知第三方"名单用；只读取，
+        不 drain，不与 drain_shadow_buffer 的消费语义冲突，对现有行为零影响。
+        """
+        ids: set[str] = set()
+        for gs in self._groups.values():
+            for entry in gs.shadow_buffer:
+                sid = str(entry.get("sender_id", "") or "")
+                if sid:
+                    ids.add(sid)
+        return ids
+
     def extract_group_id_from_key(self, session_key: str) -> str:
+        if self._scoped_components is not None:
+            raise ValueError("scoped social state does not accept a session key")
         if ":" in session_key:
             return session_key.rsplit(":", 1)[0]
         return session_key
@@ -328,6 +457,119 @@ class SocialFieldCollector:
         self._post_reply_decay = post_reply_decay
         self._inactive_decay = inactive_decay
         self._ema_alpha = ema_alpha
+
+    # ------------------------------------------------------------------
+    # Scope-v1 session component persistence
+    # ------------------------------------------------------------------
+
+    @property
+    def persistence(self) -> ScopedPersistenceGateway | None:
+        components = self._scoped_components
+        return None if components is None else components.gateway
+
+    @staticmethod
+    def _group_snapshot(state: _GroupState) -> dict[str, object]:
+        """Serialize only aggregate state; shadow messages contain raw people/text."""
+
+        return {
+            "last_bot_reply_ts": state.last_bot_reply_ts,
+            "recent_bot_topics": [sorted(topic) for topic in state.recent_bot_topics],
+            "silence_ticks": state.silence_ticks,
+            "message_timestamps": list(state.message_timestamps),
+            "ema_rate": state.ema_rate,
+            "social_void_pressure": state.social_void_pressure,
+        }
+
+    @staticmethod
+    def _restore_group(payload: dict[str, object]) -> _GroupState:
+        state = _GroupState()
+        for value in payload.get("recent_bot_topics", []):
+            if isinstance(value, list) and all(isinstance(token, str) for token in value):
+                state.recent_bot_topics.append(set(value))
+        for value in payload.get("message_timestamps", []):
+            if isinstance(value, (int, float)):
+                state.message_timestamps.append(float(value))
+        for name in ("last_bot_reply_ts", "ema_rate", "social_void_pressure"):
+            value = payload.get(name)
+            if isinstance(value, (int, float)):
+                setattr(state, name, float(value))
+        silence_ticks = payload.get("silence_ticks")
+        if type(silence_ticks) is int and silence_ticks >= 0:
+            state.silence_ticks = silence_ticks
+        return state
+
+    def _scoped_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": "sylanne.social.scoped.v1",
+            "groups": {
+                group_key: self._group_snapshot(state)
+                for group_key, state in self._groups.items()
+            },
+            "group_key_aliases": dict(self._group_key_aliases),
+            "parameters": {
+                "pressure_rate": self._pressure_rate,
+                "pressure_cap": self._pressure_cap,
+                "post_reply_decay": self._post_reply_decay,
+                "inactive_decay": self._inactive_decay,
+                "ema_alpha": self._ema_alpha,
+            },
+        }
+
+    def _restore_scoped_state(self) -> None:
+        components = self._scoped_components
+        if components is None:
+            return
+        payload = components.load("social")
+        if payload is None:
+            return
+        groups = payload.get("groups")
+        if isinstance(groups, dict):
+            for group_key, state in groups.items():
+                if isinstance(group_key, str) and isinstance(state, dict):
+                    self._groups[group_key] = self._restore_group(state)
+        aliases = payload.get("group_key_aliases")
+        if isinstance(aliases, dict):
+            self._group_key_aliases = {
+                alias: target
+                for alias, target in aliases.items()
+                if isinstance(alias, str) and isinstance(target, str)
+            }
+        parameters = payload.get("parameters")
+        if isinstance(parameters, dict):
+            for attr, key in (
+                ("_pressure_rate", "pressure_rate"),
+                ("_pressure_cap", "pressure_cap"),
+                ("_post_reply_decay", "post_reply_decay"),
+                ("_inactive_decay", "inactive_decay"),
+                ("_ema_alpha", "ema_alpha"),
+            ):
+                value = parameters.get(key)
+                if isinstance(value, (int, float)):
+                    setattr(self, attr, float(value))
+
+    def scoped_group_snapshot(self, group_id: str) -> dict[str, object]:
+        """Inspect one raw group only in-memory; no raw group id is durable."""
+
+        if self._scoped_components is None:
+            raise ValueError("scoped persistence is not configured")
+        state = self._groups.get(self._group_key(group_id))
+        return {} if state is None else self._group_snapshot(state)
+
+    def flush_scoped_state(self) -> int:
+        components = self._scoped_components
+        if components is None:
+            raise ValueError("scoped persistence is not configured")
+        return components.save("social", self._scoped_payload())
+
+    def schedule_scoped_flush(self, *, delay_seconds: float) -> asyncio.Task[bool]:
+        components = self._scoped_components
+        if components is None:
+            raise ValueError("scoped persistence is not configured")
+        return components.schedule_save(
+            "social",
+            self._scoped_payload(),
+            delay_seconds=delay_seconds,
+        )
 
 
 def emotional_resistance(current_intensity: float, inner_order: float) -> float:

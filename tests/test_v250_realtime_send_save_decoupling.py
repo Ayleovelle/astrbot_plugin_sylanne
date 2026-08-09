@@ -47,21 +47,69 @@ Plain = astrbot_components.Plain
 Record = astrbot_components.Record
 
 from main import EmotionalStatePlugin
+from sylanne_alpha import transient_context
+from sylanne_alpha.delivery_ledger import SegmentedDeliveryTurn
 from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline
 from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline
 from sylanne_alpha.message_dispatch import realtime_flags
 from sylanne_alpha.rhythm_learner import RhythmLearner
+from sylanne_alpha.scope_contracts import ResolvedScope, ResolvedTransportScope
+from sylanne_alpha.scope_identity import PersonaSource, ScopeResolver
+from sylanne_alpha.scope_runtime import ScopeRuntimeRegistry
 from sylanne_alpha.semantic_segmentation import (
     PauseClass,
     SEMANTIC_BEAT_NONCE_EXTRA,
     build_marker,
 )
 from sylanne_alpha.session_state_store import SessionStateStore
+from tests.scope_fixtures import scopes as build_scopes
 
 
 # ===========================================================================
 # 共用桩件（沿用 tests/test_conv_mgr_sync_race.py 的最小插件桩写法）
 # ===========================================================================
+
+
+class _FrameworkTextPart:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self._no_save = False
+
+    def mark_as_temp(self) -> "_FrameworkTextPart":
+        self._no_save = True
+        return self
+
+
+def _issued_view(registry: ScopeRuntimeRegistry):
+    scope = build_scopes.__wrapped__().bot_a_persona_a
+    return registry.issue_request_view(
+        ResolvedScope(
+            scope=scope,
+            persona_source=PersonaSource(
+                persona_id="v250-semantic-fixture",
+                prompt="static persona",
+                begin_dialogs=(),
+                tools=None,
+                skills=None,
+                resolution_source="test",
+            ),
+            identity_quality="event_self_id",
+            resolution_source="test",
+            resolved_at_ms=1,
+            private_scope_enabled=True,
+            disabled_reason=None,
+            turn_generation=1,
+        ),
+        subject=None,
+        relation_runtime=None,
+    )
+
+
+def _bound_semantic_sink(monkeypatch):
+    monkeypatch.setattr(transient_context, "_make_text_part", _FrameworkTextPart)
+    registry = ScopeRuntimeRegistry.for_test()
+    view = _issued_view(registry)
+    return registry, view, view.transient_context_sink
 
 
 class _FakeEngine:
@@ -124,6 +172,48 @@ class _Ev:
         return self._result
 
 
+class _ScopeSession:
+    platform_id = "adapter"
+    session_id = "42"
+
+    def __str__(self) -> str:
+        return "adapter:FriendMessage:42"
+
+
+class _ScopedEv(_Ev):
+    """Minimal real-shape transport event for scope-gated on_message tests."""
+
+    def __init__(self, *, set_calls: list | None = None) -> None:
+        super().__init__()
+        self.unified_msg_origin = "adapter:FriendMessage:42"
+        self.session_id = "42"
+        self.session = _ScopeSession()
+        self.message_obj = SimpleNamespace(message_id="msg-next")
+        self._set_calls = set_calls
+
+    def get_platform_id(self) -> str:
+        return "adapter"
+
+    def get_platform_name(self) -> str:
+        return "aiocqhttp"
+
+    def get_self_id(self) -> str:
+        return "10001"
+
+    def set_extra(self, key: str, value: object) -> None:
+        if self._set_calls is not None:
+            self._set_calls.append((key, value))
+        super().set_extra(key, value)
+
+
+def _scope_resolver(root: object) -> ScopeResolver:
+    context = SimpleNamespace(
+        get_config=lambda *, umo: {"provider_settings": {}},
+        persona_manager=SimpleNamespace(resolve_selected_persona=None),
+    )
+    return ScopeResolver.for_test(context, root=root)
+
+
 class _Plugin:
     """intercept 分支完整跑通所需的最小插件桩（含 rhythm_learner/host）。"""
 
@@ -148,6 +238,75 @@ class _Plugin:
 
     async def observe_response(self, *args: object, **kwargs: object) -> None:
         return None
+
+
+class _ReactiveContext:
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, object]] = []
+
+    async def send_message(self, origin: str, message: object) -> None:
+        self.sent.append((origin, message))
+
+
+class _RawSendEvent(_Ev):
+    def __init__(self, *, request_view: object | None = None, after_send=None) -> None:
+        super().__init__()
+        if request_view is not None:
+            self.set_extra("_sylanne_runtime_view_v1", request_view)
+        self.after_send = after_send
+        self.sent: list[tuple[str, str]] = []
+
+    def plain_result(self, text: str) -> tuple[str, str]:
+        return ("event-plain", text)
+
+    async def send(self, result: object) -> None:
+        assert isinstance(result, tuple)
+        self.sent.append(result)
+        if self.after_send is not None:
+            self.after_send()
+
+
+class _V3Recorder:
+    def __init__(self) -> None:
+        self.settled: list[dict[str, object]] = []
+
+    def pending_token(self, _session_key: str) -> int:
+        return 17
+
+    def settle(self, **kwargs: object) -> None:
+        self.settled.append(kwargs)
+
+
+class _ReactivePlugin(_Plugin):
+    def __init__(self, root: str, config: dict) -> None:
+        super().__init__(root, config)
+        self.context = _ReactiveContext()
+        self._scope_runtime_registry = ScopeRuntimeRegistry.for_test()
+        self.request_view = _issued_view(self._scope_runtime_registry)
+        scope = self.request_view.resolved.scope
+        assert scope is not None
+        self._runtime_binding = SimpleNamespace(
+            scope=scope,
+            request_runtime_view=self.request_view,
+        )
+        self._v3_shadow = _V3Recorder()
+
+    def _bound_runtime(self) -> SimpleNamespace:
+        return self._runtime_binding
+
+
+def _reactive_delivery_turn(event: _RawSendEvent) -> SegmentedDeliveryTurn:
+    return SegmentedDeliveryTurn(
+        session_key="sess:realtime-decouple",
+        input_epoch=0,
+        planned_parts=("first", "second"),
+        origin=event.unified_msg_origin,
+        dispatch_parts=(
+            {"text": "first", "delay_before_seconds": 0.0},
+            {"text": "second", "delay_before_seconds": 0.0},
+        ),
+        cleaned_text="first\nsecond",
+    )
 
 
 def _cfg(*, enabled: bool, intercept: bool) -> dict:
@@ -195,6 +354,106 @@ def _stub_dispatch(pipe: LLMResponsePipeline) -> list:
 
     pipe._dispatch_segmented_parts = types.MethodType(_fake, pipe)  # type: ignore[method-assign]
     return calls
+
+
+def test_scoped_reactive_turn_sends_only_through_its_original_event() -> None:
+    async def go() -> None:
+        plugin = _ReactivePlugin(
+            tempfile.mkdtemp(prefix="rt_reactive_event_"),
+            _cfg(enabled=True, intercept=True),
+        )
+        pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
+        event = _RawSendEvent(request_view=plugin.request_view)
+        turn = _reactive_delivery_turn(event)
+        event.set_extra(pipe._DELIVERY_TURN_EXTRA, turn)
+
+        assert pipe.activate_segmented_delivery(event) is True
+        await asyncio.gather(*plugin._background_tasks)
+
+        assert event.sent == [("event-plain", "first"), ("event-plain", "second")]
+        assert plugin.context.sent == []
+        assert turn.delivered_parts == ["first", "second"]
+        assert turn.status == "completed"
+        assert plugin._v3_shadow.settled[-1]["all_segments_succeeded"] is True
+
+    asyncio.run(go())
+
+
+def test_scoped_reactive_post_send_view_loss_is_unknown_not_expressed() -> None:
+    async def go() -> None:
+        plugin = _ReactivePlugin(
+            tempfile.mkdtemp(prefix="rt_reactive_stale_"),
+            _cfg(enabled=True, intercept=True),
+        )
+        event = _RawSendEvent(
+            request_view=plugin.request_view,
+            after_send=lambda: plugin._scope_runtime_registry.release_request_view(
+                plugin.request_view
+            )
+        )
+        pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
+        turn = _reactive_delivery_turn(event)
+        event.set_extra(pipe._DELIVERY_TURN_EXTRA, turn)
+
+        assert pipe.activate_segmented_delivery(event) is True
+        await asyncio.gather(*plugin._background_tasks)
+
+        assert event.sent == [("event-plain", "first")]
+        assert plugin.context.sent == []
+        assert turn.delivered_parts == []
+        assert turn.status == "outcome_unknown"
+        assert plugin._v3_shadow.settled[-1]["all_segments_succeeded"] is False
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize(
+    "event_view",
+    [None, object()],
+    ids=("missing", "forged"),
+)
+def test_scoped_reactive_activation_rejects_missing_or_forged_view(
+    event_view: object | None,
+) -> None:
+    async def go() -> None:
+        plugin = _ReactivePlugin(
+            tempfile.mkdtemp(prefix="rt_reactive_reject_"),
+            _cfg(enabled=True, intercept=True),
+        )
+        pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
+        event = _RawSendEvent(request_view=event_view)
+        turn = _reactive_delivery_turn(event)
+        event.set_extra(pipe._DELIVERY_TURN_EXTRA, turn)
+
+        assert pipe.activate_segmented_delivery(event) is False
+        assert event.sent == []
+        assert plugin.context.sent == []
+        assert plugin._background_tasks == []
+        assert turn.task is None
+        assert turn.status == "planned"
+
+    asyncio.run(go())
+
+
+def test_scoped_reactive_dispatch_preserves_unfinished_reply_sentinel() -> None:
+    async def go() -> None:
+        plugin = _ReactivePlugin(
+            tempfile.mkdtemp(prefix="rt_reactive_history_"),
+            _cfg(enabled=True, intercept=True),
+        )
+        pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
+        event = _RawSendEvent(request_view=plugin.request_view)
+        turn = _reactive_delivery_turn(event)
+        sentinel = object()
+        plugin._store.unfinished_replies.set(turn.session_key, sentinel)
+        event.set_extra(pipe._DELIVERY_TURN_EXTRA, turn)
+
+        assert pipe.activate_segmented_delivery(event) is True
+        await asyncio.gather(*plugin._background_tasks)
+
+        assert plugin._store.unfinished_replies.get(turn.session_key) is sentinel
+
+    asyncio.run(go())
 
 
 # ===========================================================================
@@ -389,36 +648,66 @@ def test_semantic_beat_contract_injection_matrix(
     intercept: bool,
     streaming: bool,
     expected: bool,
+    monkeypatch,
 ) -> None:
     event = _Ev()
     event.set_extra("enable_streaming", streaming)
-    request = SimpleNamespace(system_prompt="原始人格契约")
 
-    injected = LLMRequestPipeline._inject_semantic_beat_contract(
-        event,
-        request,
-        realtime_enabled=enabled,
-        intercept=intercept,
-    )
-
-    assert injected is expected
-    nonce = event.get_extra(SEMANTIC_BEAT_NONCE_EXTRA)
     if not expected:
+        request = SimpleNamespace(system_prompt="原始人格契约")
+        injected = LLMRequestPipeline._inject_semantic_beat_contract(
+            event,
+            request,
+            realtime_enabled=enabled,
+            intercept=intercept,
+        )
+        assert injected is False
+        nonce = event.get_extra(SEMANTIC_BEAT_NONCE_EXTRA)
         assert nonce is None
         assert request.system_prompt == "原始人格契约"
         return
 
+    request = SimpleNamespace(
+        system_prompt="原始人格契约",
+        prompt="当前用户消息",
+        contexts=[{"role": "user", "content": "当前用户消息"}],
+        extra_user_content_parts=[],
+    )
+    system_prompt = request.system_prompt
+    prompt = request.prompt
+    contexts = request.contexts
+    contexts_before = [dict(item) for item in contexts]
+    registry, view, sink = _bound_semantic_sink(monkeypatch)
+    with registry.bind_transient_context_sink(view, request):
+        assert sink.set_budget(request, 1_200) is True
+        injected = LLMRequestPipeline._inject_semantic_beat_contract(
+            event,
+            request,
+            realtime_enabled=enabled,
+            intercept=intercept,
+            add_fragment=sink.add,
+        )
+        assert sink.commit(request) is True
+
+    assert injected is expected
+    nonce = event.get_extra(SEMANTIC_BEAT_NONCE_EXTRA)
     assert isinstance(nonce, str)
     assert re.fullmatch(r"[0-9A-F]{6}", nonce)
-    assert request.system_prompt.startswith("原始人格契约\n")
+    assert request.system_prompt is system_prompt
+    assert request.prompt is prompt
+    assert request.contexts is contexts
+    assert request.contexts == contexts_before
+    assert len(request.extra_user_content_parts) == 1
+    part = request.extra_user_content_parts[0]
+    assert part._no_save is True
     for pause in PauseClass:
-        assert build_marker(nonce, pause) in request.system_prompt
-    assert "0 到 5 个" in request.system_prompt
-    assert "不要改写正文" in request.system_prompt
-    assert "单独的省略号或其他纯标点" in request.system_prompt
-    assert "代码、URL、表格" in request.system_prompt
-    assert "provider_id" not in request.system_prompt
-    assert "第二次 LLM" not in request.system_prompt
+        assert build_marker(nonce, pause) in part.text
+    assert "0 到 5 个" in part.text
+    assert "不要改写正文" in part.text
+    assert "单独的省略号或其他纯标点" in part.text
+    assert "代码、URL、表格" in part.text
+    assert "provider_id" not in part.text
+    assert "第二次 LLM" not in part.text
 
 
 def test_punctuation_only_semantic_beat_preserves_meaningful_dispatch_parts() -> None:
@@ -662,7 +951,9 @@ def test_interrupted_delivery_commits_only_successfully_sent_prefix_to_history(
     asyncio.run(scenario())
 
 
-def test_new_inbound_message_advances_epoch_and_interrupts_active_delivery() -> None:
+def test_new_inbound_message_advances_epoch_and_interrupts_active_delivery(
+    tmp_path,
+) -> None:
     """中断必须发生在 AstrBot 会话锁之前，不能等下一轮 on_llm_request。"""
 
     class SessionMap:
@@ -682,14 +973,11 @@ def test_new_inbound_message_advances_epoch_and_interrupts_active_delivery() -> 
         def interrupt(self) -> None:
             self.interrupted = True
 
-    class Event(_Ev):
-        message_str = "行"
-        message_obj = SimpleNamespace(message_id="msg-next")
-
     turn = Turn()
     epochs = SessionMap()
     active_turns = SessionMap()
-    active_turns.set("sess:realtime-decouple", turn)
+    locator = "42"
+    active_turns.set(locator, turn)
     store = SimpleNamespace(
         conversation_input_epoch=epochs,
         segmented_delivery_turns=active_turns,
@@ -699,309 +987,119 @@ def test_new_inbound_message_advances_epoch_and_interrupts_active_delivery() -> 
     shell = object.__new__(EmotionalStatePlugin)
     shell.config = _cfg(enabled=True, intercept=True)
     shell._config = shell.config
+    shell._scope_resolver_v1 = _scope_resolver(tmp_path)
+    shell._inbound_seen = {"existing": 1}
     shell._store = store
     shell._session_ctx = SimpleNamespace(
-        session_key=lambda _event: "sess:realtime-decouple",
+        session_key=lambda _event: locator,
         resolve_authenticated_identity=lambda _event: None,
     )
 
-    event = Event()
+    event = _ScopedEv()
+    event.message_str = "行"
     asyncio.run(EmotionalStatePlugin.on_message(shell, event))
 
     assert event.get_extra("_syl_input_epoch") == 1
-    assert epochs.get("sess:realtime-decouple") == 1
+    assert epochs.get(locator) == 1
     assert turn.interrupted is True
+    assert shell._inbound_seen == {"existing": 1}
+    assert event.get_extra("_syl_inbound_duplicate") is None
+    assert event.get_extra("_syl_inbound_registered") is None
 
 
-def test_active_runner_follow_up_defers_epoch_and_preserves_final_reply(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("legacy_locator", ["", "default", "wrong:session"])
+def test_transport_safety_bridge_rejects_unproven_legacy_locator(
+    tmp_path,
+    legacy_locator: str,
 ) -> None:
-    """工具轮吃掉的补话不能把同一工具轮最终答案判成过期。"""
+    class SessionMap:
+        def __init__(self) -> None:
+            self.values: dict[str, object] = {}
 
-    async def scenario() -> None:
-        from astrbot.core.pipeline.process_stage import follow_up as follow_up_module
+        def get(self, key: str, default: object = None) -> object:
+            return self.values.get(key, default)
 
-        session_key = "sess:realtime-decouple"
+        def set(self, key: str, value: object) -> None:
+            self.values[key] = value
 
-        class SenderEvent(_Ev):
-            def __init__(self, message_id: str, sender_id: str = "same-user") -> None:
-                super().__init__()
-                self.message_obj = SimpleNamespace(message_id=message_id)
-                self._sender_id = sender_id
-                self.is_at_or_wake_command = True
+    class Turn:
+        def __init__(self) -> None:
+            self.interrupted = False
 
-            def get_sender_id(self) -> str:
-                return self._sender_id
+        def interrupt(self) -> None:
+            self.interrupted = True
 
-        original_event = SenderEvent("run-original")
-        original_event.set_extra("_syl_input_epoch", 1)
-        runner = SimpleNamespace(
-            run_context=SimpleNamespace(
-                context=SimpleNamespace(event=original_event)
-            ),
-            done=lambda: False,
-        )
-        monkeypatch.setitem(
-            follow_up_module._ACTIVE_AGENT_RUNNERS,
-            session_key,
-            runner,
-        )
-
-        plugin = _Plugin(
-            tempfile.mkdtemp(prefix="rt_follow_up_consumed_"),
-            _cfg(enabled=True, intercept=True),
-        )
-        plugin._inbound_seen = {}
-        plugin._store.conversation_input_epoch.set(session_key, 1)
-        follow_up_event = SenderEvent("follow-up-message")
-
-        EmotionalStatePlugin._register_or_defer_inbound_delivery_epoch(
-            plugin,
-            follow_up_event,
-            session_key,
-        )
-
-        assert plugin._store.conversation_input_epoch.get(session_key) == 1
-        assert follow_up_event.get_extra("_syl_follow_up_deferred") is True
-        assert follow_up_event.get_extra("_syl_input_epoch") == 1
-
-        sent: list[str] = []
-
-        class Context:
-            async def send_message(self, _origin: str, message: object) -> None:
-                chain = getattr(message, "chain", None) or getattr(
-                    message,
-                    "parts",
-                    None,
-                )
-                sent.append(str(getattr(chain[0], "text", "")) if chain else "")
-
-        plugin.context = Context()
-        pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
-        monkeypatch.setattr(
-            "sylanne_alpha.llm_response_pipeline.realtime_plan",
-            lambda *_args, **_kwargs: {
-                "message_parts": [
-                    {
-                        "index": 0,
-                        "text": "最终分析结果",
-                        "delay_before_seconds": 0.0,
-                    }
-                ],
-                "message_count": 1,
-                "segmentation_source": "single_fallback",
-            },
-        )
-        response = LLMResponse(
-            role="assistant",
-            completion_text="最终分析结果",
-        )
-        await pipe._on_llm_response_inner(original_event, response)
-
-        assistant_part = SimpleNamespace(text=response.completion_text)
-        run_context = SimpleNamespace(
-            messages=[
-                SimpleNamespace(role="user", content="开始分析"),
-                SimpleNamespace(role="assistant", content=[assistant_part]),
-            ]
-        )
-        shell = object.__new__(EmotionalStatePlugin)
-        shell._llm_response_pipeline = pipe
-        shell._has_conversation_manager = lambda: False
-        await EmotionalStatePlugin.on_agent_done(
-            shell,
-            original_event,
-            run_context,
-            response,
-        )
-        original_event._result = SimpleNamespace(
-            chain=[Plain(response.completion_text)]
-        )
-        assert (
-            await EmotionalStatePlugin._maybe_suppress_realtime_takeover(
-                shell,
-                original_event,
-            )
-            is True
-        )
-
-        assert sent == ["最终分析结果"]
-        assert assistant_part.text == "最终分析结果"
-        assert response.completion_text == "最终分析结果"
-        assert plugin._store.conversation_input_epoch.get(session_key) == 1
-
-    asyncio.run(scenario())
-
-
-def test_unconsumed_follow_up_promotes_once_and_interrupts_old_delivery(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """AstrBot 未吃掉补话时，waiting hook 才把它升级为真正的新轮。"""
-
-    async def scenario() -> None:
-        from astrbot.core.pipeline.process_stage import follow_up as follow_up_module
-
-        class SessionMap:
-            def __init__(self) -> None:
-                self.values: dict[str, object] = {}
-
-            def get(self, key: str, default: object = None) -> object:
-                return self.values.get(key, default)
-
-            def set(self, key: str, value: object) -> None:
-                self.values[key] = value
-
-        class Turn:
-            def __init__(self) -> None:
-                self.interrupted = False
-
-            def interrupt(self) -> None:
-                self.interrupted = True
-
-        class SenderEvent(_Ev):
-            def __init__(self, message_id: str, sender_id: str = "same-user") -> None:
-                super().__init__()
-                self.message_obj = SimpleNamespace(message_id=message_id)
-                self._sender_id = sender_id
-                self.is_at_or_wake_command = True
-
-            def get_sender_id(self) -> str:
-                return self._sender_id
-
-        session_key = "sess:realtime-decouple"
-        original_event = SenderEvent("run-original")
-        runner = SimpleNamespace(
-            run_context=SimpleNamespace(
-                context=SimpleNamespace(event=original_event)
-            ),
-            done=lambda: False,
-        )
-        monkeypatch.setitem(
-            follow_up_module._ACTIVE_AGENT_RUNNERS,
-            session_key,
-            runner,
-        )
-
-        epochs = SessionMap()
-        epochs.set(session_key, 1)
-        active_turns = SessionMap()
-        turn = Turn()
-        active_turns.set(session_key, turn)
-        shell = object.__new__(EmotionalStatePlugin)
-        shell._inbound_seen = {}
-        shell._store = SimpleNamespace(
-            conversation_input_epoch=epochs,
-            segmented_delivery_turns=active_turns,
-        )
-        shell._session_ctx = SimpleNamespace(session_key=lambda _event: session_key)
-
-        follow_up_event = SenderEvent("follow-up-message")
-        EmotionalStatePlugin._register_or_defer_inbound_delivery_epoch(
-            shell,
-            follow_up_event,
-            session_key,
-        )
-        duplicate_event = SenderEvent("follow-up-message")
-        EmotionalStatePlugin._register_or_defer_inbound_delivery_epoch(
-            shell,
-            duplicate_event,
-            session_key,
-        )
-        assert epochs.get(session_key) == 1
-        assert turn.interrupted is False
-        assert duplicate_event.get_extra("_syl_inbound_duplicate") is True
-
-        await EmotionalStatePlugin.on_waiting_llm_request(shell, follow_up_event)
-        await EmotionalStatePlugin.on_waiting_llm_request(shell, follow_up_event)
-
-        assert epochs.get(session_key) == 2
-        assert follow_up_event.get_extra("_syl_input_epoch") == 2
-        assert follow_up_event.get_extra("_syl_input_epoch_committed") is True
-        assert follow_up_event.get_extra("_syl_follow_up_deferred") is False
-        assert turn.interrupted is True
-        assert duplicate_event.get_extra("_syl_input_epoch") is None
-        assert duplicate_event.get_extra("_syl_input_epoch_committed") is None
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.parametrize(
-    (
-        "active_sender",
-        "incoming_sender",
-        "done",
-        "stop_requested",
-        "is_wake",
-        "expected",
-    ),
-    [
-        ("same-user", "same-user", False, False, True, True),
-        ("same-user", "other-user", False, False, True, False),
-        ("same-user", "same-user", True, False, True, False),
-        ("same-user", "same-user", False, True, True, False),
-        ("same-user", "same-user", False, False, False, False),
-    ],
-)
-def test_follow_up_deferral_matches_astrbot_runner_guards(
-    monkeypatch: pytest.MonkeyPatch,
-    active_sender: str,
-    incoming_sender: str,
-    done: bool,
-    stop_requested: bool,
-    is_wake: bool,
-    expected: bool,
-) -> None:
-    from astrbot.core.pipeline.process_stage import follow_up as follow_up_module
-
-    class SenderEvent(_Ev):
-        def __init__(self, message_id: str, sender_id: str) -> None:
-            super().__init__()
-            self.message_obj = SimpleNamespace(message_id=message_id)
-            self._sender_id = sender_id
-
-        def get_sender_id(self) -> str:
-            return self._sender_id
-
-    original_event = SenderEvent("run-original", active_sender)
-    original_event.set_extra("agent_stop_requested", stop_requested)
-    runner = SimpleNamespace(
-        run_context=SimpleNamespace(
-            context=SimpleNamespace(event=original_event)
-        ),
-        done=lambda: done,
-    )
-    monkeypatch.setitem(
-        follow_up_module._ACTIVE_AGENT_RUNNERS,
-        "sess:realtime-decouple",
-        runner,
-    )
-    incoming_event = SenderEvent("follow-up-message", incoming_sender)
-    incoming_event.is_at_or_wake_command = is_wake
+    active = Turn()
+    epochs = SessionMap()
+    active_turns = SessionMap()
+    active_turns.set("42", active)
     shell = object.__new__(EmotionalStatePlugin)
-
-    is_follow_up, target_run_id = (
-        EmotionalStatePlugin._astrbot_active_follow_up_target(
-            shell,
-            incoming_event,
-        )
+    shell.config = {}
+    shell._config = {}
+    shell._scope_resolver_v1 = _scope_resolver(tmp_path)
+    shell._store = SimpleNamespace(
+        conversation_input_epoch=epochs,
+        segmented_delivery_turns=active_turns,
     )
-
-    assert is_follow_up is expected
-    assert target_run_id == ("run-original" if expected else "")
-
-
-def test_follow_up_promotion_hook_is_registered_before_other_waiting_hooks() -> None:
-    """未消费补话必须在任何可能 stop 的 waiting hook 之前推进代次。"""
-
-    from astrbot.core.star.register.star_handler import star_handlers_registry
-
-    handler = next(
-        metadata
-        for metadata in star_handlers_registry.get_handlers_by_module_name("main")
-        if metadata.handler_name == "on_waiting_llm_request"
+    shell._session_ctx = SimpleNamespace(
+        session_key=lambda _event: legacy_locator,
     )
+    event = _ScopedEv()
 
-    assert handler.extras_configs.get("priority") == 1000
+    asyncio.run(EmotionalStatePlugin.on_message(shell, event))
+
+    assert epochs.values == {}
+    assert event.get_extra("_syl_input_epoch") is None
+    assert active.interrupted is False
+
+
+def test_transport_safety_bridge_rejects_event_session_id_tamper(tmp_path) -> None:
+    class SessionMap:
+        def __init__(self) -> None:
+            self.values: dict[str, object] = {}
+
+        def get(self, key: str, default: object = None) -> object:
+            return self.values.get(key, default)
+
+        def set(self, key: str, value: object) -> None:
+            self.values[key] = value
+
+    class Turn:
+        def __init__(self) -> None:
+            self.interrupted = False
+
+        def interrupt(self) -> None:
+            self.interrupted = True
+
+    active = Turn()
+    epochs = SessionMap()
+    active_turns = SessionMap()
+    active_turns.set("attacker-controlled", active)
+    calls: list[tuple[str, object]] = []
+    shell = object.__new__(EmotionalStatePlugin)
+    shell.config = _cfg(enabled=True, intercept=True)
+    shell._config = shell.config
+    shell._scope_resolver_v1 = _scope_resolver(tmp_path)
+    shell._store = SimpleNamespace(
+        conversation_input_epoch=epochs,
+        segmented_delivery_turns=active_turns,
+    )
+    shell._session_ctx = SimpleNamespace(
+        session_key=lambda _event: "attacker-controlled",
+    )
+    event = _ScopedEv(set_calls=calls)
+    event.session_id = "attacker-controlled"
+
+    asyncio.run(EmotionalStatePlugin.on_message(shell, event))
+
+    assert not any(key == "enable_streaming" for key, _value in calls)
+    assert epochs.values == {}
+    assert event.get_extra("_syl_input_epoch") is None
+    assert active.interrupted is False
+    assert [key for key, _value in calls] == [
+        "_sylanne_transport_scope_v1",
+        "_sylanne_transport_turn_v1",
+    ]
 
 
 def test_full_delivery_commits_exact_visible_bubbles_as_assistant_history(
@@ -1471,7 +1569,7 @@ def test_semantic_beat_contract_skips_when_event_extras_are_not_round_trippable(
     assert request.system_prompt == "原始人格契约"
 
 
-def test_semantic_beat_contract_uses_astrbot_one_argument_get_extra_api() -> None:
+def test_semantic_beat_contract_uses_astrbot_one_argument_get_extra_api(monkeypatch) -> None:
     class StrictAstrBotExtras:
         def __init__(self) -> None:
             self.values: dict[str, object] = {"enable_streaming": False}
@@ -1483,15 +1581,35 @@ def test_semantic_beat_contract_uses_astrbot_one_argument_get_extra_api() -> Non
             return self.values.get(key)
 
     event = StrictAstrBotExtras()
-    request = SimpleNamespace(system_prompt="原始人格契约")
-
-    assert LLMRequestPipeline._inject_semantic_beat_contract(
-        event,
-        request,
-        realtime_enabled=True,
-        intercept=True,
+    request = SimpleNamespace(
+        system_prompt="原始人格契约",
+        prompt="当前用户消息",
+        contexts=[{"role": "user", "content": "当前用户消息"}],
+        extra_user_content_parts=[],
     )
+    system_prompt = request.system_prompt
+    prompt = request.prompt
+    contexts = request.contexts
+    contexts_before = [dict(item) for item in contexts]
+    registry, view, sink = _bound_semantic_sink(monkeypatch)
+    with registry.bind_transient_context_sink(view, request):
+        assert sink.set_budget(request, 1_200) is True
+        assert LLMRequestPipeline._inject_semantic_beat_contract(
+            event,
+            request,
+            realtime_enabled=True,
+            intercept=True,
+            add_fragment=sink.add,
+        )
+        assert sink.commit(request) is True
+
     assert event.get_extra(SEMANTIC_BEAT_NONCE_EXTRA)
+    assert request.system_prompt is system_prompt
+    assert request.prompt is prompt
+    assert request.contexts is contexts
+    assert request.contexts == contexts_before
+    assert len(request.extra_user_content_parts) == 1
+    assert request.extra_user_content_parts[0]._no_save is True
 
 
 def test_stream_first_do_first_requires_all_three_gates() -> None:
@@ -1510,22 +1628,24 @@ def test_stream_first_do_first_requires_all_three_gates() -> None:
 # ===========================================================================
 
 
-def test_on_message_forces_streaming_off_when_realtime_takeover_active() -> None:
+def test_on_message_forces_streaming_off_when_realtime_takeover_active(
+    tmp_path,
+) -> None:
     calls: list = []
 
-    class _StreamEv:
-        def set_extra(self, key: str, value: object) -> None:
-            calls.append((key, value))
-
     self_stub = SimpleNamespace(
+        _scope_resolver_v1=_scope_resolver(tmp_path),
         config={
             "sylanne_alpha_realtime_chat_enabled": True,
             "sylanne_alpha_realtime_intercept_llm_response": True,
         }
     )
-    # on_message 后续逻辑（session_ctx 等）在桩下必然抛异常，但整段被外层
-    # try/except 吞掉——只关心 M4a 这一行是否先于崩溃执行。
-    asyncio.run(EmotionalStatePlugin.on_message(self_stub, _StreamEv()))
+    asyncio.run(
+        EmotionalStatePlugin.on_message(
+            self_stub,
+            _ScopedEv(set_calls=calls),
+        )
+    )
 
     assert ("enable_streaming", False) in calls
 
@@ -1548,7 +1668,15 @@ def test_on_message_leaves_streaming_alone_when_not_fully_enabled(cfg: dict) -> 
     self_stub = SimpleNamespace(config=cfg)
     asyncio.run(EmotionalStatePlugin.on_message(self_stub, _StreamEv()))
 
-    assert calls == [], f"两开关未同时开启时不应碰 enable_streaming (cfg={cfg})"
+    assert not any(
+        key == "enable_streaming" for key, _value in calls
+    ), f"两开关未同时开启时不应碰 enable_streaming (cfg={cfg})"
+    assert len(calls) == 1
+    key, disabled = calls[0]
+    assert key == "_sylanne_transport_scope_v1"
+    assert type(disabled) is ResolvedTransportScope
+    assert disabled.private_scope_enabled is False
+    assert disabled.disabled_reason == "scope_resolver_unavailable"
 
 
 def _decorate_event(chain: list, *, takeover: bool = True) -> SimpleNamespace:

@@ -44,6 +44,14 @@ from sylanne_alpha.message_dispatch import (
     strip_draft_blocks,
 )
 from sylanne_alpha.proactive_bridge import is_night_fast_reply_exempt
+from sylanne_alpha.scope_contracts import TurnDeliveryLease
+from sylanne_alpha.scope_delivery import (
+    DeliveryClaim,
+    DeliveryLeaseRejected,
+    DeliveryState,
+    ProcessLocalDeliveryTurn,
+    ReactiveDeliveryCoordinator,
+)
 from sylanne_alpha.semantic_segmentation import (
     SEMANTIC_BEAT_NONCE_EXTRA,
     SemanticBeatPart,
@@ -158,6 +166,78 @@ class LLMResponsePipeline:
 
     def __init__(self, plugin: PluginHost) -> None:
         self._p = plugin
+
+    def _active_scope(self) -> Any | None:
+        getter = getattr(self._p, "_bound_runtime", None)
+        if not callable(getter):
+            return None
+        try:
+            binding = getter()
+        except Exception:
+            return None
+        return getattr(binding, "scope", None) if binding is not None else None
+
+    def _claim_reactive_delivery(
+        self,
+        event: Any,
+        parts: list[dict[str, Any]],
+    ) -> tuple[ReactiveDeliveryCoordinator, DeliveryClaim] | None:
+        """Seal one scoped reactive turn to its original AstrBot event.
+
+        Registry-free fixture and compatibility callers retain the historical
+        ``Context.send_message`` path. A production plugin always owns a scope
+        registry; once that capability exists, an incomplete frozen view is a
+        fail-closed activation error rather than a reason to fall back.
+        """
+
+        registry = getattr(self._p, "_scope_runtime_registry", None)
+        if registry is None:
+            return None
+        is_issued_request_view = getattr(registry, "is_issued_request_view", None)
+        binding_getter = getattr(self._p, "_bound_runtime", None)
+        if not callable(is_issued_request_view) or not callable(binding_getter):
+            raise DeliveryLeaseRejected("scoped reactive delivery runtime is unavailable")
+
+        binding = binding_getter()
+        view = getattr(binding, "request_runtime_view", None)
+        event_view = self._event_extra(event, "_sylanne_runtime_view_v1", None)
+        if event_view is not view:
+            raise DeliveryLeaseRejected(
+                "reactive delivery event is not sealed to the request view"
+            )
+        try:
+            issued = is_issued_request_view(view)
+        except Exception as exc:
+            raise DeliveryLeaseRejected(
+                "reactive delivery request view could not be verified"
+            ) from exc
+        if issued is not True:
+            raise DeliveryLeaseRejected("reactive delivery request view is not issued")
+        resolved = getattr(view, "resolved", None)
+        scope = getattr(resolved, "scope", None)
+        turn_generation = getattr(resolved, "turn_generation", None)
+        if scope is None or turn_generation is None:
+            raise DeliveryLeaseRejected("reactive delivery has no frozen request view")
+
+        planned_parts = tuple(str(part.get("text", "")) for part in parts)
+        if not planned_parts or any(not text for text in planned_parts):
+            raise DeliveryLeaseRejected("reactive delivery requires non-empty planned parts")
+
+        lease = TurnDeliveryLease(
+            transport_session_token=scope.session_ref.token,
+            resolved_scope_token=scope.storage_token,
+            bot_binding_generation=scope.bot_ref.generation,
+            persona_lifecycle_generation=scope.persona_ref.lifecycle_generation,
+            session_generation=scope.session_ref.generation,
+            scope_generation=scope.scope_generation,
+            turn_generation=turn_generation,
+        )
+        coordinator = ReactiveDeliveryCoordinator(
+            ProcessLocalDeliveryTurn(planned_parts=planned_parts),
+            is_issued_request_view=is_issued_request_view,
+        )
+        claim = coordinator.claim(view=view, lease=lease, event=event)
+        return coordinator, claim
 
     # ------------------------------------------------------------------
     # Injection defense
@@ -694,6 +774,15 @@ class LLMResponsePipeline:
         parts = [dict(part) for part in turn.dispatch_parts]
         if not parts:
             return False
+        try:
+            reactive_delivery = self._claim_reactive_delivery(event, parts)
+        except (AttributeError, TypeError, ValueError, DeliveryLeaseRejected):
+            logger.warning(
+                "Sylanne scoped reactive delivery lease rejected: session=%s",
+                turn.session_key,
+                exc_info=True,
+            )
+            return False
 
         task: asyncio.Task[Any] | None = None
         background_tasks: list[asyncio.Task[Any]] | None = None
@@ -706,6 +795,7 @@ class LLMResponsePipeline:
                 parts,
                 session_key=turn.session_key,
                 delivery_turn=turn,
+                reactive_delivery=reactive_delivery,
             )
 
         dispatch_coro = dispatch_after_commit()
@@ -1389,7 +1479,10 @@ class LLMResponsePipeline:
         try:
             from sylanne_alpha.v2core.integration import consume_dispatch_modulators
 
-            dispatch_mods = consume_dispatch_modulators(self._p, session_key)
+            dispatch_mods = consume_dispatch_modulators(
+                self._p,
+                self._active_scope() or session_key,
+            )
         except Exception:
             dispatch_mods = None
         default_cps, default_max_part, extra_predelay = self._apply_dispatch_modulators(
@@ -1761,6 +1854,99 @@ class LLMResponsePipeline:
     # ------------------------------------------------------------------
     # Segmented dispatch
     # ------------------------------------------------------------------
+    async def _dispatch_scoped_reactive_parts(
+        self,
+        parts: list[dict[str, Any]],
+        *,
+        session_key: str,
+        settle_v3: bool,
+        delivery_turn: SegmentedDeliveryTurn | None,
+        coordinator: ReactiveDeliveryCoordinator,
+        claim: DeliveryClaim,
+    ) -> None:
+        """Deliver one scoped reply through its sealed original event only."""
+
+        total = len(parts)
+        v3_token = self._v3_pending_token(session_key) if settle_v3 else None
+
+        def settle(*, succeeded: bool) -> None:
+            if not settle_v3:
+                return
+            self._v3_settle_segments(
+                session_key,
+                total,
+                succeeded=succeeded,
+                token=v3_token,
+            )
+
+        async def before_send(index: int, text: str) -> bool:
+            if index >= len(parts) or str(parts[index].get("text", "")) != text:
+                return False
+            if delivery_turn is None:
+                delay = float(parts[index].get("delay_before_seconds", 0))
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                return True
+
+            epochs = getattr(self._p._store, "conversation_input_epoch", None)
+            current_epoch = (
+                int(epochs.get(session_key, 0) or 0)
+                if epochs is not None
+                else delivery_turn.input_epoch
+            )
+            if delivery_turn.should_stop(current_epoch):
+                return False
+            delay = float(parts[index].get("delay_before_seconds", 0))
+            if delay > 0 and not await delivery_turn.wait_delay(delay):
+                return False
+            current_epoch = (
+                int(epochs.get(session_key, 0) or 0)
+                if epochs is not None
+                else delivery_turn.input_epoch
+            )
+            return not delivery_turn.should_stop(current_epoch)
+
+        def copy_confirmed_parts() -> None:
+            if delivery_turn is not None:
+                delivery_turn.delivered_parts[:] = list(coordinator.turn.confirmed_parts)
+
+        try:
+            snapshot = await coordinator.deliver(
+                event=claim.event,
+                claim=claim,
+                before_send=before_send,
+            )
+        except asyncio.CancelledError:
+            copy_confirmed_parts()
+            if delivery_turn is not None:
+                delivery_turn.status = "cancelled"
+            settle(succeeded=False)
+            raise
+        except BaseException:
+            copy_confirmed_parts()
+            if delivery_turn is not None:
+                delivery_turn.status = coordinator.state.value
+            settle(succeeded=False)
+            raise
+
+        copy_confirmed_parts()
+        if snapshot.state is DeliveryState.SENT_CONFIRMED:
+            if delivery_turn is not None:
+                delivery_turn.status = "completed"
+            settle(succeeded=True)
+            return
+
+        if delivery_turn is not None:
+            delivery_turn.status = snapshot.state.value
+        settle(succeeded=False)
+        logger.info(
+            "Sylanne scoped reactive dispatch stopped: session=%s state=%s sent=%d/%d",
+            session_key,
+            snapshot.state.value,
+            snapshot.confirmed_parts,
+            total,
+        )
+
     async def _dispatch_segmented_parts(
         self,
         origin: str,
@@ -1769,6 +1955,7 @@ class LLMResponsePipeline:
         *,
         settle_v3: bool = True,
         delivery_turn: SegmentedDeliveryTurn | None = None,
+        reactive_delivery: tuple[ReactiveDeliveryCoordinator, DeliveryClaim] | None = None,
     ) -> None:
         """逐段发送分段回复，每段之间按计划延迟。
 
@@ -1783,6 +1970,18 @@ class LLMResponsePipeline:
                 本次补刀的 SPEAK（带错的 part_count），还把下一轮真正的终端证据挤掉。
                 v3 纯观察，对 v2 行为没有任何影响。
         """
+        if reactive_delivery is not None:
+            coordinator, claim = reactive_delivery
+            await self._dispatch_scoped_reactive_parts(
+                parts,
+                session_key=session_key,
+                settle_v3=settle_v3,
+                delivery_turn=delivery_turn,
+                coordinator=coordinator,
+                claim=claim,
+            )
+            return
+
         total = len(parts)
 
         def record_remaining(start_index: int) -> None:
@@ -1811,7 +2010,6 @@ class LLMResponsePipeline:
         v3_token = self._v3_pending_token(session_key) if settle_v3 else None
         sent_count = 0
         interrupted = False
-        stop_epoch = delivery_turn.input_epoch if delivery_turn is not None else 0
         try:
             for idx, part in enumerate(parts, 1):
                 if delivery_turn is not None:
@@ -1823,7 +2021,6 @@ class LLMResponsePipeline:
                         if epochs is not None
                         else delivery_turn.input_epoch
                     )
-                    stop_epoch = current_epoch
                     if delivery_turn.should_stop(current_epoch):
                         interrupted = True
                         break
@@ -1843,7 +2040,6 @@ class LLMResponsePipeline:
                         if epochs is not None
                         else delivery_turn.input_epoch
                     )
-                    stop_epoch = current_epoch
                     if delivery_turn.should_stop(current_epoch):
                         interrupted = True
                         break
@@ -1894,18 +2090,10 @@ class LLMResponsePipeline:
                     session_key, total, succeeded=False, token=v3_token
                 )
             logger.info(
-                "Sylanne segmented dispatch interrupted: "
-                "session=%s sent=%d/%d turn_epoch=%d current_epoch=%d "
-                "explicit_interrupt=%s",
+                "Sylanne segmented dispatch interrupted: session=%s sent=%d/%d",
                 session_key,
                 sent_count,
                 total,
-                delivery_turn.input_epoch if delivery_turn is not None else 0,
-                stop_epoch,
-                bool(
-                    delivery_turn is not None
-                    and delivery_turn.interrupt_requested
-                ),
             )
             return
         # 所有段发送成功——清除未完成标记
@@ -2199,11 +2387,21 @@ class LLMResponsePipeline:
             )
         return fragment
 
-    def _append_request_prompt_fragment(self, request: Any, fragment: str) -> None:
-        if not fragment:
-            return
-        current = str(getattr(request, "system_prompt", "") or "")
-        request.system_prompt = f"{current}\n{fragment}".strip()
+    def _add_transient_context(
+        self,
+        request: Any,
+        channel: str,
+        text: str,
+        source: str,
+        priority: int,
+    ) -> bool:
+        add = getattr(self._p, "_add_transient_context", None)
+        if not callable(add):
+            return False
+        try:
+            return bool(add(request, channel, text, source, priority))
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     # Time context

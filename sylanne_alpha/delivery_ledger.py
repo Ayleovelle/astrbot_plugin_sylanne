@@ -40,10 +40,6 @@ class SegmentedDeliveryTurn:
     def should_stop(self, current_input_epoch: int) -> bool:
         return self._interrupted.is_set() or current_input_epoch > self.input_epoch
 
-    @property
-    def interrupt_requested(self) -> bool:
-        return self._interrupted.is_set()
-
     async def wait_delay(self, seconds: float) -> bool:
         """Wait for one typing delay; return False when interrupted first."""
 

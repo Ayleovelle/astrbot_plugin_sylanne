@@ -1,0 +1,55 @@
+name: '💡 设计建议'
+description: 对 Sylanne 的计算模型、人格系统、自我进化或交互设计提出想法。
+title: '[Design] '
+labels: ['type/design']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Sylanne 是个偏研究性的项目——伤痕代数、空洞微积分、多智能体自我进化都还在长。
+        如果你对她「应该如何感知 / 演化 / 表达」有想法，欢迎在这里聊。哪怕只是一个直觉也行。
+
+  - type: textarea
+    attributes:
+      label: 你的设计想法
+      description: 描述你想到的设计点子，以及它解决/改善了什么。
+      placeholder: >
+        如：反思层能不能不只调门控阈值，还反向影响记忆召回的情绪染色权重？
+    validations:
+      required: true
+
+  - type: dropdown
+    attributes:
+      label: 涉及哪一块
+      description: 选最接近的一项。
+      options:
+        - '计算栈（7 层 / Void-Scar / Relational Sheaf）'
+        - '人格系统（Embodiment 五维 / 漂移闭环）'
+        - '自我进化（反应式 / 反思 / 巩固 / 护栏）'
+        - '多智能体编排（9 agent / 四时点 / 预算闸）'
+        - '主动发言 / 生活模拟 / Proactive_Chat 桥接'
+        - '记忆系统'
+        - '交互体验（分段回复 / 节奏 / 犹豫）'
+        - 'WebUI 观测'
+        - '其他'
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: 设计动机 / 想达成的效果
+      description: 你希望她表现出什么不一样的行为？为什么这样更好？
+      placeholder: >
+        如：希望她对长期被忽略的话题，主动开口时语气更克制而非更急切。
+
+  - type: textarea
+    attributes:
+      label: 可能的实现思路（可选）
+      description: 如果你已经想到怎么落地（公式、参数、护栏），可以写在这里。
+
+  - type: checkboxes
+    attributes:
+      label: 确认
+      options:
+        - label: 我已搜索过现有 Issues，确认没有重复提交。
+          required: true

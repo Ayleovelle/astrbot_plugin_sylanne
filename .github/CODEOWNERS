@@ -1,0 +1,12 @@
+# Default owner for plugin core and docs
+* @Ayleovelle
+
+# Entry and orchestration
+/main.py @Ayleovelle
+/sylanne_alpha/ @Ayleovelle
+
+# Docs and workflow
+/docs/ @Ayleovelle
+/CONTRIBUTING.md @Ayleovelle
+/.github/pull_request_template.md @Ayleovelle
+/.github/CODEOWNERS @Ayleovelle

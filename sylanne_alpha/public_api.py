@@ -28,9 +28,12 @@ import asyncio
 import collections
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from sylanne_alpha.protocols import PluginHost
 
 try:
     from astrbot.api import logger  # type: ignore
@@ -39,7 +42,13 @@ except ImportError:
 
     logger = _logging.getLogger("astrbot_plugin_sylanne")  # type: ignore
 
-from sylanne_alpha.plugin_services import PluginServices
+from sylanne_alpha.provider_routing import (
+    ProviderFeature,
+    resolve_embedding_provider,
+    resolve_text_provider,
+)
+from sylanne_alpha.scope_contracts import SessionScope
+from sylanne_alpha.scope_runtime import RelationRuntime, ScopedSessionRuntime
 
 
 # ---------------------------------------------------------------------------
@@ -151,17 +160,8 @@ class PublicAPI:
         "group_atmosphere": "get_group_atmosphere_snapshot",
     }
 
-    def __init__(self, plugin: Any, *, services: "PluginServices | None" = None, session_state: Any = None) -> None:
-        self._plugin = plugin
-        self._session_state = session_state
-        if services is not None:
-            self._services = services
-        else:
-            self._services = PluginServices(
-                config=getattr(plugin, "config", None) or getattr(plugin, "_config", {}),
-                logger=getattr(plugin, "logger", None),
-                context=getattr(plugin, "context", None),
-            )
+    def __init__(self, plugin: PluginHost) -> None:
+        self._p = plugin
 
     # ------------------------------------------------------------------
     # Helper accessors
@@ -171,6 +171,82 @@ class PublicAPI:
 
     def _session_key(self, event: Any = None, session_key: str = "") -> str:
         return self._services.session_key_fn(event, session_key)
+
+    def _bound_webui_session_key(self) -> str | None:
+        """Return the exact session named by an already-bound private scope.
+
+        HTTP routes do not carry an authenticated ``SessionScope`` yet.  They
+        therefore may only inspect a private owner when a caller has already
+        installed a live binding; choosing ``default`` or a recently active
+        owner would cross the scope boundary.
+        """
+
+        registry = getattr(self._p, "_scope_runtime_registry", None)
+        if registry is None:
+            return None
+        binding_getter = getattr(self._p, "_bound_runtime", None)
+        if not callable(binding_getter):
+            return None
+        try:
+            binding = binding_getter()
+        except Exception:  # noqa: BLE001 - a WebUI read must fail closed
+            return None
+        scope = getattr(binding, "scope", None)
+        if scope is None or not registry.is_live_session(scope):
+            return None
+        storage_token = getattr(scope, "storage_token", None)
+        return storage_token if isinstance(storage_token, str) and storage_token else None
+
+    def _legacy_observatory_session_key(self) -> str | None:
+        """Compatibility-only reader for registry-free test stubs.
+
+        This never invents a ``default`` session: callers without a real
+        scoped runtime can at most inspect an already-existing legacy owner.
+        """
+
+        try:
+            store = self._p._store
+            hosts = getattr(store, "hosts", {})
+            return next(iter(hosts), None) if hosts else None
+        except Exception:  # noqa: BLE001 - legacy diagnostics remain bounded
+            return None
+
+    def _bound_scoped_identity(self) -> Any | None:
+        """Return one live full-scope opaque identity binding, or fail closed."""
+
+        registry = getattr(self._p, "_scope_runtime_registry", None)
+        if registry is None:
+            return None
+        getter = getattr(self._p, "_bound_runtime", None)
+        if not callable(getter):
+            return None
+        try:
+            binding = getter()
+        except Exception:
+            return None
+        scope = getattr(binding, "scope", None)
+        session_runtime = getattr(binding, "session_runtime", None)
+        relation_runtime = getattr(binding, "relation_runtime", None)
+        subject = getattr(binding, "subject", None)
+        if (
+            type(scope) is not SessionScope
+            or type(session_runtime) is not ScopedSessionRuntime
+            or session_runtime.scope != scope
+            or type(relation_runtime) is not RelationRuntime
+            or relation_runtime.scope.bot_ref != scope.bot_ref
+            or relation_runtime.scope.persona_ref != scope.persona_ref
+            or subject is None
+            or getattr(subject, "relation_ref", None)
+            != relation_runtime.scope.relation_ref
+            or not registry.is_live_session(scope)
+        ):
+            return None
+        try:
+            if registry.exact_session(scope) is not session_runtime:
+                return None
+        except Exception:
+            return None
+        return binding
 
     # ------------------------------------------------------------------
     # Observatory / Diagnostics group
@@ -294,15 +370,27 @@ class PublicAPI:
         }
 
     async def _observatory_route_handler(self) -> dict[str, Any]:
-        session_key = "default"
-        if self._plugin._hosts:
-            session_key = next(iter(self._plugin._hosts))
+        session_key = self._bound_webui_session_key()
+        if session_key is None and getattr(self._p, "_scope_runtime_registry", None) is None:
+            session_key = self._legacy_observatory_session_key()
+        if session_key is None:
+            return {"ok": False, "error": "scope_unavailable"}
         return await self.sylanne_observatory(session_key=session_key)
+
+    def _lineage_observatory_route_payload(self) -> dict[str, Any]:
+        """Build the lineage payload only for the exact bound session owner."""
+
+        session_key = self._bound_webui_session_key()
+        if session_key is None and getattr(self._p, "_scope_runtime_registry", None) is None:
+            session_key = self._legacy_observatory_session_key()
+        if session_key is None:
+            return {"ok": False, "error": "scope_unavailable"}
+        return self._sylanne_lineage_observatory_page_payload(session_key)
 
     def _sylanne_lineage_observatory_page_payload(
         self, session_key: str
     ) -> dict[str, Any]:
-        loop_data = self._session_state.last_understanding_closed_loop.get(session_key, {}) if self._session_state else self._plugin._last_understanding_closed_loop.get(session_key, {})
+        loop_data = self._p._store.last_understanding_closed_loop.get(session_key, {})
         observatory = loop_data.get("turning_point_lineage_observatory", {})
         lineage = observatory.get("lineage", {})
         raw_branches = observatory.get("branches", [])
@@ -325,7 +413,7 @@ class PublicAPI:
     def _understanding_closed_loop_diagnostics(
         self, session_key: str
     ) -> dict[str, Any]:
-        loop_data = dict((self._session_state.last_understanding_closed_loop if self._session_state else self._plugin._last_understanding_closed_loop).get(session_key, {}))
+        loop_data = dict(self._p._store.last_understanding_closed_loop.get(session_key, {}))
         if "turning_point_memory_replay" in loop_data:
             loop_data["turning_point_memory_replay"] = {}
         if "turning_point_lineage_observatory" in loop_data:
@@ -346,36 +434,31 @@ class PublicAPI:
         Returns:
             诊断数据字典。
         """
-        p = self._plugin
-        if isinstance(event, str):
+        p = self._p
+        registry = getattr(p, "_scope_runtime_registry", None)
+        scoped_runtime = registry is not None
+        if scoped_runtime:
+            session_key = self._bound_webui_session_key()
+            if session_key is None or (
+                isinstance(event, str) and event != session_key
+            ):
+                return {"ok": False, "error": "scope_unavailable"}
+        elif isinstance(event, str):
             session_key = event
         else:
             session_key = self._session_key(event)
-        _BudgetCls = (
-            type(next(iter(p._last_request_budgets.values()), None))
-            if p._last_request_budgets
-            else None
+        default_budget = SimpleNamespace(
+            compat_mode="",
+            context_owner="",
+            max_added_chars=0,
+            added_chars=0,
+            injected=[],
+            skipped=[],
+            appended=[],
+            warnings=[],
         )
-        default_budget = (
-            _BudgetCls()
-            if _BudgetCls
-            else SimpleNamespace(
-                compat_mode="",
-                context_owner="",
-                max_added_chars=0,
-                added_chars=0,
-                injected=[],
-                skipped=[],
-                appended=[],
-                warnings=[],
-            )
-        )
-        budget = (
-            p._last_request_budgets.get(session_key, default_budget)
-            if hasattr(p, "_last_request_budgets")
-            else default_budget
-        )
-        cfg = self._services.config or {}
+        budget = p._store.last_request_budgets.get(session_key, default_budget)
+        cfg = p.config or {}
         result: dict[str, Any] = {
             "state_injection": {
                 "compat_mode": budget.compat_mode,
@@ -388,9 +471,13 @@ class PublicAPI:
                 "warnings": list(budget.warnings),
             }
         }
-        closed_loop = self._session_state.last_understanding_closed_loop if self._session_state else getattr(p, "_last_understanding_closed_loop", {})
-        if isinstance(closed_loop, dict) and session_key in closed_loop:
-            loop_data = closed_loop[session_key]
+        closed_loop = (
+            p._store.last_understanding_closed_loop
+            if scoped_runtime
+            else getattr(p, "_last_understanding_closed_loop", {})
+        )
+        if hasattr(closed_loop, "get") and session_key in closed_loop:
+            loop_data = closed_loop.get(session_key, {})
             ledger = getattr(p, "_conversation_event_ledger", None)
             if ledger is not None:
                 recent_fn = getattr(ledger, "recent", None) or getattr(
@@ -406,21 +493,25 @@ class PublicAPI:
                     ]
             result["understanding_closed_loop"] = loop_data
             result["read_only"] = True
-        bg_queues = p._background_post_queues
-        bg_active = p._background_post_active
-        bg_dead_letters = p._background_post_dead_letters
-        bg_latest = p._background_post_latest_enqueued
-        bg_committed = p._background_post_last_committed
-        bg_skipped = getattr(p, "_background_post_skipped", {})
-        _bg_sequence = p._background_post_sequence
-        has_bg_data = bool(bg_queues or bg_active or bg_dead_letters)
+        bg_queues = p._store.background_post_queues
+        bg_active = p._store.background_post_active
+        bg_dead_letters = p._store.background_post_dead_letters
+        bg_latest = p._store.background_post_latest_enqueued
+        bg_committed = p._store.background_post_last_committed
+        bg_skipped = {} if scoped_runtime else getattr(p, "_background_post_skipped", {})
+        _bg_sequence = p._store.background_post_sequence
+        queue = bg_queues.get(session_key, collections.deque())
+        active = bg_active.get(session_key, {})
+        dead_letters = bg_dead_letters.get(session_key, collections.deque())
+        latest_enqueued = bg_latest.get(session_key, 0)
+        last_committed = bg_committed.get(session_key, 0)
+        skipped = bg_skipped.get(session_key, set())
+        has_bg_data = (
+            bool(queue or active or dead_letters)
+            if scoped_runtime
+            else bool(bg_queues or bg_active or bg_dead_letters)
+        )
         if include_sessions or has_bg_data:
-            queue = bg_queues.get(session_key, collections.deque())
-            active = bg_active.get(session_key, {})
-            dead_letters = bg_dead_letters.get(session_key, collections.deque())
-            latest_enqueued = bg_latest.get(session_key, 0)
-            last_committed = bg_committed.get(session_key, 0)
-            skipped = bg_skipped.get(session_key, set())
             retrying = [j for j in queue if j.attempts > 0]
             now = time.time()
             expired_lease = [
@@ -508,8 +599,10 @@ class PublicAPI:
             }
             result["background_post_assessment"] = bg_assessment
             if include_sessions:
-                result["sessions"] = list(
-                    set(list(bg_queues.keys()) + list(bg_active.keys()))
+                result["sessions"] = (
+                    [session_key]
+                    if scoped_runtime
+                    else list(set(list(bg_queues.keys()) + list(bg_active.keys())))
                 )
         return result
 
@@ -587,6 +680,14 @@ class PublicAPI:
     # Agent identity group
     # ------------------------------------------------------------------
     def _agent_identity(self, event: Any = None) -> str:
+        if getattr(self._p, "_scope_runtime_registry", None) is not None:
+            binding = self._bound_scoped_identity()
+            relation = getattr(binding, "relation_runtime", None)
+            return (
+                relation.scope.relation_ref.token
+                if type(relation) is RelationRuntime
+                else "unknown"
+            )
         if event is None:
             return "unknown"
         sender_id = str(
@@ -612,7 +713,20 @@ class PublicAPI:
         Returns:
             身份档案字典。
         """
-        p = self._plugin
+        p = self._p
+        if getattr(p, "_scope_runtime_registry", None) is not None:
+            binding = self._bound_scoped_identity()
+            if binding is None:
+                return {"ok": False, "error": "scope_unavailable"}
+            scope = binding.scope
+            relation_token = binding.relation_runtime.scope.relation_ref.token
+            return {
+                "schema_version": "astrbot.agent_identity.v1",
+                "conversation_id": scope.storage_token,
+                "speaker_track_id": relation_token,
+                "relation_ref": relation_token,
+                "updated_at": p._observed_now(),
+            }
         cache = getattr(p, "_agent_identity_profile_cache", None)
         if cache is None:
             p._agent_identity_profile_cache = {}
@@ -681,7 +795,17 @@ class PublicAPI:
     async def get_agent_trail(
         self, event: Any = None, *, limit: int = 10, **kwargs: Any
     ) -> dict[str, Any]:
-        p = self._plugin
+        p = self._p
+        if getattr(p, "_scope_runtime_registry", None) is not None:
+            binding = self._bound_scoped_identity()
+            if binding is None:
+                return {"ok": False, "error": "scope_unavailable"}
+            return {
+                "schema_version": "astrbot.agent_trail.v1",
+                "session_key": binding.scope.storage_token,
+                "relation_ref": binding.relation_runtime.scope.relation_ref.token,
+                "items": [],
+            }
         cache = getattr(p, "_agent_trail_cache", None)
         if cache is None:
             p._agent_trail_cache = {}
@@ -694,6 +818,12 @@ class PublicAPI:
             "items": items[-limit:],
         }
 
+    def _clamp_llm_tool_detail(self, detail: str) -> str:
+        """T1-14：LLM 工具面禁止 detail=full 泄漏内部 prompt/快照。"""
+        if str(detail or "").strip().lower() == "full":
+            return "summary"
+        return str(detail or "summary")
+
     async def _query_single_agent_state(
         self,
         state_name: str,
@@ -704,16 +834,23 @@ class PublicAPI:
         detail: str = "summary",
         track: str = "conversation",
     ) -> dict[str, Any]:
-        p = self._plugin
+        detail = self._clamp_llm_tool_detail(detail)
+        p = self._p
         sk = session_key or self._session_key(event)
         snapshot_method_map = self._SNAPSHOT_METHOD_MAP
         method_name = snapshot_method_map.get(state_name)
         speaker_track_id = ""
         if track == "speaker" and event is not None:
-            sender_id = str(getattr(event, "sender_id", "") or "")
-            if not sender_id and hasattr(event, "get_sender_id"):
-                sender_id = str(event.get_sender_id() or "")
-            speaker_track_id = f"{sk}::speaker:{sender_id}"
+            if getattr(p, "_scope_runtime_registry", None) is not None:
+                binding = self._bound_scoped_identity()
+                if binding is None:
+                    return {"ok": False, "error": "scope_unavailable"}
+                speaker_track_id = binding.relation_runtime.scope.relation_ref.token
+            else:
+                sender_id = str(getattr(event, "sender_id", "") or "")
+                if not sender_id and hasattr(event, "get_sender_id"):
+                    sender_id = str(event.get_sender_id() or "")
+                speaker_track_id = f"{sk}::speaker:{sender_id}"
         effective_sk = speaker_track_id if speaker_track_id else sk
         payload: dict[str, Any] = {
             "kind": state_name,
@@ -745,14 +882,15 @@ class PublicAPI:
         payload["track"] = {"kind": track}
         if speaker_track_id:
             payload["track"]["speaker_track_id"] = speaker_track_id
-            sender_id = str(getattr(event, "sender_id", "") or "")
-            if not sender_id and hasattr(event, "get_sender_id"):
-                sender_id = str(event.get_sender_id() or "")
-            sender_name = str(getattr(event, "sender_name", "") or "")
-            if not sender_name and hasattr(event, "get_sender_name"):
-                sender_name = str(event.get_sender_name() or "")
-            payload["track"]["speaker_id"] = sender_id
-            payload["track"]["speaker_name"] = sender_name
+            if getattr(p, "_scope_runtime_registry", None) is None:
+                sender_id = str(getattr(event, "sender_id", "") or "")
+                if not sender_id and hasattr(event, "get_sender_id"):
+                    sender_id = str(event.get_sender_id() or "")
+                sender_name = str(getattr(event, "sender_name", "") or "")
+                if not sender_name and hasattr(event, "get_sender_name"):
+                    sender_name = str(event.get_sender_name() or "")
+                payload["track"]["speaker_id"] = sender_id
+                payload["track"]["speaker_name"] = sender_name
         return payload
 
     async def query_agent_state(
@@ -764,7 +902,8 @@ class PublicAPI:
         include_runtime: bool = False,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        p = self._plugin
+        detail = self._clamp_llm_tool_detail(detail)
+        p = self._p
         sk = self._session_key(event)
         state_name = state.replace("_state", "").replace("_self", "")
         if state_name == "integrated":
@@ -791,10 +930,27 @@ class PublicAPI:
                         consequences["notes"] = consequences["notes"][:2]
                 speaker_track_id = ""
                 if track == "speaker":
-                    sender_id = str(getattr(event, "sender_id", "") or "")
-                    if not sender_id and hasattr(event, "get_sender_id"):
-                        sender_id = str(event.get_sender_id() or "")
-                    speaker_track_id = f"{sk}::speaker:{sender_id}"
+                    if getattr(p, "_scope_runtime_registry", None) is not None:
+                        binding = self._bound_scoped_identity()
+                        if binding is None:
+                            return {
+                                "kind": "agent_state_query",
+                                "state": state_name,
+                                "detail": detail,
+                                "track": {"kind": track},
+                                "runtime": {"enabled": include_runtime},
+                                "snapshots": {},
+                                "ok": False,
+                                "error": "scope_unavailable",
+                            }
+                        speaker_track_id = (
+                            binding.relation_runtime.scope.relation_ref.token
+                        )
+                    else:
+                        sender_id = str(getattr(event, "sender_id", "") or "")
+                        if not sender_id and hasattr(event, "get_sender_id"):
+                            sender_id = str(event.get_sender_id() or "")
+                        speaker_track_id = f"{sk}::speaker:{sender_id}"
                 snap["track"] = {"kind": track}
                 if speaker_track_id:
                     snap["track"]["speaker_track_id"] = speaker_track_id
@@ -808,11 +964,39 @@ class PublicAPI:
             "snapshots": snapshots,
         }
 
+    # —— 工具返回值消毒（AUDIT-20260612-001：根因=工具返回高精度浮点诱发 LLM
+    # 反复调 astrbot_execute_python 验算）。两道闸，收口在包装层：
+    #   ① 递归量化：浮点全部压到 2 位小数（4-6 位小数是"需要验算"的视觉诱饵）；
+    #   ② 首位注入"请勿计算"指令（原 SDK prompt_surface 的同款提示被数字淹没，
+    #      审计 §7.4 要求前移到工具返回值包装层——就是这里）。
+    _TOOL_NO_COMPUTE_NOTE = (
+        "以下状态仅供措辞与情绪参考，已四舍五入；请勿计算、验证或为此调用任何代码工具。"
+    )
+
+    @classmethod
+    def _quantize_floats(cls, obj: Any, ndigits: int = 2) -> Any:
+        """递归把 payload 里所有浮点压到 ndigits 位（工具返回值消毒，纯函数）。"""
+        if isinstance(obj, float):
+            return round(obj, ndigits)
+        if isinstance(obj, dict):
+            return {k: cls._quantize_floats(v, ndigits) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [cls._quantize_floats(v, ndigits) for v in obj]
+        return obj
+
+    @classmethod
+    def _tool_json(cls, payload: Any) -> str:
+        """LLM 工具返回值的唯一出口序列化：量化浮点 + 首位'请勿计算'指令。"""
+        clean = cls._quantize_floats(payload)
+        if isinstance(clean, dict):
+            clean = {"note": cls._TOOL_NO_COMPUTE_NOTE, **clean}
+        return json.dumps(clean, ensure_ascii=False, default=str)
+
     async def query_agent_state_tool(self, event: Any = None, **kwargs: Any) -> str:
         payload = await self.query_agent_state(event, **kwargs)
         cfg = self._services.config or {}
         max_chars = int(cfg.get("llm_tool_response_max_chars", 400))
-        raw = json.dumps(payload, ensure_ascii=False, default=str)
+        raw = self._tool_json(payload)
         if len(raw) <= max_chars:
             return raw
         original_chars = len(raw)
@@ -832,6 +1016,7 @@ class PublicAPI:
     async def get_bot_emotion_state_tool(
         self, event: Any = None, detail: str = "summary", **kwargs: Any
     ) -> Any:
+        detail = self._clamp_llm_tool_detail(detail)
         sk = self._session_key(event)
         track = str(kwargs.get("track", "conversation"))
         payload = await self._query_single_agent_state(
@@ -842,11 +1027,12 @@ class PublicAPI:
             detail=detail,
             track=track,
         )
-        yield json.dumps(payload, ensure_ascii=False, default=str)
+        yield self._tool_json(payload)
 
     async def get_bot_humanlike_state_tool(
         self, event: Any = None, detail: str = "summary", **kwargs: Any
     ) -> Any:
+        detail = self._clamp_llm_tool_detail(detail)
         sk = self._session_key(event)
         track = str(kwargs.get("track", "conversation"))
         payload = await self._query_single_agent_state(
@@ -857,11 +1043,12 @@ class PublicAPI:
             detail=detail,
             track=track,
         )
-        yield json.dumps(payload, ensure_ascii=False, default=str)
+        yield self._tool_json(payload)
 
     async def get_bot_integrated_self_state_tool(
         self, event: Any = None, detail: str = "summary", **kwargs: Any
     ) -> Any:
+        detail = self._clamp_llm_tool_detail(detail)
         sk = self._session_key(event)
         track = str(kwargs.get("track", "conversation"))
         payload = await self._query_single_agent_state(
@@ -872,12 +1059,13 @@ class PublicAPI:
             detail=detail,
             track=track,
         )
-        yield json.dumps(payload, ensure_ascii=False, default=str)
+        yield self._tool_json(payload)
 
     async def get_bot_moral_repair_state_tool(
         self, event: Any = None, detail: str = "summary", **kwargs: Any
     ) -> Any:
-        cfg = self._services.config or {}
+        detail = self._clamp_llm_tool_detail(detail)
+        cfg = self._p.config or {}
         exposure = "internal" if detail == "full" else "plugin_safe"
         payload: dict[str, Any] = {
             "kind": "moral_repair_state",
@@ -886,12 +1074,13 @@ class PublicAPI:
         }
         if not payload["enabled"]:
             payload["reason"] = "enable_moral_repair_state is false"
-        yield json.dumps(payload, ensure_ascii=False, default=str)
+        yield self._tool_json(payload)
 
     async def get_bot_fallibility_state_tool(
         self, event: Any = None, detail: str = "summary", **kwargs: Any
     ) -> Any:
-        cfg = self._services.config or {}
+        detail = self._clamp_llm_tool_detail(detail)
+        cfg = self._p.config or {}
         exposure = "internal" if detail == "full" else "plugin_safe"
         payload: dict[str, Any] = {
             "kind": "fallibility_state",
@@ -900,11 +1089,12 @@ class PublicAPI:
         }
         if not payload["enabled"]:
             payload["reason"] = "enable_fallibility_state is false"
-        yield json.dumps(payload, ensure_ascii=False, default=str)
+        yield self._tool_json(payload)
 
     async def get_bot_personality_drift_state_tool(
         self, event: Any = None, detail: str = "summary", **kwargs: Any
     ) -> Any:
+        detail = self._clamp_llm_tool_detail(detail)
         sk = self._session_key(event)
         track = str(kwargs.get("track", "conversation"))
         payload = await self._query_single_agent_state(
@@ -915,11 +1105,12 @@ class PublicAPI:
             detail=detail,
             track=track,
         )
-        yield json.dumps(payload, ensure_ascii=False, default=str)
+        yield self._tool_json(payload)
 
     async def get_bot_group_atmosphere_state_tool(
         self, event: Any = None, detail: str = "summary", **kwargs: Any
     ) -> Any:
+        detail = self._clamp_llm_tool_detail(detail)
         sk = self._session_key(event)
         track = str(kwargs.get("track", "conversation"))
         payload = await self._query_single_agent_state(
@@ -930,7 +1121,7 @@ class PublicAPI:
             detail=detail,
             track=track,
         )
-        yield json.dumps(payload, ensure_ascii=False, default=str)
+        yield self._tool_json(payload)
 
     async def simulate_bot_emotion_update_tool(
         self, event: Any = None, text: str = "", role: str = "user", **kwargs: Any
@@ -949,7 +1140,7 @@ class PublicAPI:
                 "text": text[:200],
             },
         }
-        yield json.dumps(payload, ensure_ascii=False, default=str)
+        yield self._tool_json(payload)
 
     async def request_bot_proactive_speech_dispatch_tool(
         self, event: Any = None, **kwargs: Any
@@ -957,28 +1148,25 @@ class PublicAPI:
         dispatch_fn = getattr(self._plugin, "request_proactive_speech_dispatch", None)
         if dispatch_fn and callable(dispatch_fn):
             result = await dispatch_fn(event, dry_run=True)
-            yield json.dumps(result, ensure_ascii=False, default=str)
+            payload = result if isinstance(result, dict) else {"result": result}
         else:
-            yield json.dumps(
-                {
-                    "kind": "proactive_speech_dispatch",
-                    "dry_run": True,
-                    "dispatched": False,
-                },
-                ensure_ascii=False,
-                default=str,
-            )
+            payload = {
+                "kind": "proactive_speech_dispatch",
+                "dry_run": True,
+                "dispatched": False,
+            }
+        yield self._tool_json(payload)
 
     async def _llm_tool_query_agent_state(self, event: Any) -> Any:
-        p = self._plugin
-        session_key = self._session_key(event)
-        host = self._host(session_key)
-        payload = host.diagnostics()
-        max_chars = p._cfg_int("llm_tool_response_max_chars", 16000)
-        result = json.dumps(payload, ensure_ascii=False, default=str)
-        if len(result) > max_chars:
-            result = result[: max_chars - 50] + "\n[sylanne_tool_response_trimmed]"
-        return event.plain_result(result) if hasattr(event, "plain_result") else result
+        """查询 Sylanne 当前状态——返回【紧凑投影字符串】给 LLM，由 LLM 用人话转述。
+
+        修复 #1（乱码）：旧实现把 host.diagnostics() 的原始内部 JSON（body/pulse/nerve…，
+        可达 16KB）经 event.plain_result 直接糊给用户，用户看到的就是一坨"乱码"。
+        正确做法：工具返回值是给 *LLM* 的结构化输入（不是直接发用户），由 LLM 据此用
+        Sylanne 口吻转述。这里复用 query_agent_state_tool 的紧凑摘要投影（已 pop
+        prompt_fragment、裁 notes、截 ≤max_chars），内部原始诊断绝不外泄给用户。
+        """
+        return await self.query_agent_state_tool(event)
 
     # ------------------------------------------------------------------
     # Command handlers
@@ -992,7 +1180,7 @@ class PublicAPI:
         if not cfg.get("enable_sylanne_memory", True):
             yield "Sylanne 记忆系统未启用。"
             return
-        cache = p._sylanne_memory_cache
+        cache = p._store.sylanne_memory_cache
         state = cache.get(sk)
         if state is None:
             yield "当前会话无记忆记录。"
@@ -1018,7 +1206,7 @@ class PublicAPI:
         p = self._plugin
         cfg = self._services.config or {}
         sk = self._session_key(event)
-        if not cfg.get("allow_emotion_reset_backdoor", True):
+        if not cfg.get("allow_emotion_reset_backdoor", False):
             yield "情绪重置后门已关闭，无法执行重置。"
             return
         delete_fn = getattr(p, "_delete_state", None)
@@ -1036,7 +1224,7 @@ class PublicAPI:
         p = self._plugin
         cfg = self._services.config or {}
         sk = self._session_key(event)
-        if not cfg.get("allow_humanlike_reset_backdoor", True):
+        if not cfg.get("allow_humanlike_reset_backdoor", False):
             yield "humanlike 重置后门已关闭，无法执行重置。"
             return
         delete_fn = getattr(p, "_delete_humanlike_state", None)
@@ -1230,9 +1418,7 @@ class PublicAPI:
             event_time=p._event_time(now),
         )
         # Feedback loop: trigger based on time since last bot expression
-        if not hasattr(p, "_last_bot_expression_time"):
-            p._last_bot_expression_time = {}
-        last_expr_time = p._last_bot_expression_time.get(session_key, 0.0)
+        last_expr_time = p._store.last_bot_expression_time.get(session_key, 0.0)
         if last_expr_time > 0:
             gap = effective_now - last_expr_time
             if gap < 30.0:
@@ -1241,10 +1427,7 @@ class PublicAPI:
             elif gap > 300.0:
                 dt = max(0.1, min(10.0, gap / 60.0))
                 host.kernel.computation.feedback("ignored", dt=dt)
-        result = host.on_request(event)
-        if p._has_persona_manager():
-            p._sync_personality_to_persona_mgr(session_key)
-        return result
+        return host.on_request(event)
 
     async def observe_response(
         self,
@@ -1279,13 +1462,8 @@ class PublicAPI:
             now=effective_now,
             event_time=p._event_time(now),
         )
-        if not hasattr(p, "_last_bot_expression_time"):
-            p._last_bot_expression_time = {}
-        p._last_bot_expression_time[session_key] = effective_now
-        result = host.on_response(event)
-        if p._has_persona_manager():
-            p._sync_personality_to_persona_mgr(session_key)
-        return result
+        p._store.last_bot_expression_time.set(session_key, effective_now)
+        return host.on_response(event)
 
     async def observe_emotion_text(
         self,
@@ -1298,8 +1476,6 @@ class PublicAPI:
         observed_at: float = 0.0,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        from sylanne_alpha.compat import command_surface
-
         effective_now = observed_at or now
         await self.observe_request(
             session_key,
@@ -1308,7 +1484,8 @@ class PublicAPI:
             flags=["safe"],
             now=effective_now,
         )
-        return command_surface(self._host(session_key), "emotion")
+        # Legacy compat: command_surface removed; return empty dict
+        return {}
 
     async def observe_user_message_withdrawal(
         self, *args: Any, **kwargs: Any
@@ -1316,10 +1493,19 @@ class PublicAPI:
         """观测用户消息撤回事件：递增 input_epoch，清除相关状态。"""
         p = self._plugin
         event = args[0] if args else None
-        session_key = kwargs.get("session_key", "")
+        supplied_session_key = str(kwargs.get("session_key", "") or "")
+        registry = getattr(p, "_scope_runtime_registry", None)
+        if registry is not None:
+            session_key = self._bound_webui_session_key()
+            if session_key is None or (
+                supplied_session_key and supplied_session_key != session_key
+            ):
+                return {"ok": False, "error": "scope_unavailable"}
+        else:
+            session_key = supplied_session_key
         message_id = kwargs.get("message_id", "")
         reason = kwargs.get("reason", "")
-        if event and not session_key:
+        if registry is None and event and not session_key:
             session_key = str(getattr(event, "unified_msg_origin", "") or "")
             raw = getattr(event, "raw_message", None) or {}
             if not raw:
@@ -1330,22 +1516,21 @@ class PublicAPI:
                 message_id = str(raw.get("message_id", ""))
             if not reason:
                 reason = str(raw.get("notice_type", ""))
-        epochs = p._conversation_input_epoch
+        epochs = p._store.conversation_input_epoch
         current_epoch = epochs.get(session_key, 0)
         new_epoch = current_epoch + 1
-        epochs[session_key] = new_epoch
-        last_text = p._last_request_text
-        last_text.pop(session_key, None)
-        withdrawals = p._user_message_withdrawals
-        withdrawals[session_key] = {
+        epochs.set(session_key, new_epoch)
+        p._store.last_request_text.pop(session_key, None)
+        p._store.user_message_withdrawals.set(session_key, {
             "message_id": message_id,
             "reason": reason,
             "input_epoch": new_epoch,
-        }
-        candidates = p._proactive_candidate_sessions
-        if session_key in candidates:
-            candidates[session_key]["last_user_text_excerpt"] = ""
-            candidates[session_key]["last_withdrawn_message_id"] = message_id
+        })
+        candidates = p._store.proactive_candidate_sessions
+        if candidates.has(session_key):
+            entry = candidates.ref(session_key)
+            entry["last_user_text_excerpt"] = ""
+            entry["last_withdrawn_message_id"] = message_id
         return {
             "input_epoch": new_epoch,
             "message_id": message_id,
@@ -1368,18 +1553,16 @@ class PublicAPI:
         observed_at: float = 0.0,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        from sylanne_alpha.compat import simulate_update
-
+        # Legacy compat: simulate_update removed
         host = self._host(session_key)
-        return simulate_update(host, text=text, flags=flags, confidence=confidence)
+        return {}
 
     async def get_emotion_snapshot(
         self, *, session_key: str, include_prompt_fragment: bool = False, **kwargs: Any
     ) -> dict[str, Any]:
-        from sylanne_alpha.compat import command_surface
-
+        # Legacy compat: command_surface removed
         host = self._host(session_key)
-        payload = command_surface(host, "emotion")
+        payload = {}
         payload["turns"] = host.kernel.turns
         return payload
 
@@ -1387,18 +1570,16 @@ class PublicAPI:
         self, *, session_key: str, as_dict: bool = True, **kwargs: Any
     ) -> Any:
         import copy
-        from sylanne_alpha.compat import emotion_values
 
         state = await self._plugin._load_state(session_key)
         if not as_dict and state is not None and not isinstance(state, dict):
             return copy.deepcopy(state)
-        values = emotion_values(self._host(session_key))
-        return {"values": values}
+        # Legacy compat: emotion_values removed
+        return {"values": {}}
 
     async def get_emotion_values(self, *, session_key: str) -> dict[str, float]:
-        from sylanne_alpha.compat import emotion_values
-
-        return emotion_values(self._host(session_key))
+        # Legacy compat: emotion_values removed
+        return {}
 
     async def build_emotion_memory_payload(
         self,
@@ -1427,19 +1608,7 @@ class PublicAPI:
         )
         host = self._host(sk)
         memory_system = p._memory_system_for_session(sk)
-        enabled = bool(p._config.get("sylanne_alpha_embedding_memory_enabled"))
-        provider_id = str(
-            p._config.get("sylanne_alpha_embedding_memory_provider_id") or ""
-        )
-
-        query_embedding: list[float] | None = None
-        if enabled and provider_id and query:
-            try:
-                provider = p._get_embedding_provider(provider_id)
-                if provider:
-                    query_embedding = await provider.get_embedding(query)
-            except Exception:
-                query_embedding = None
+        query_embedding = await self._resolve_query_embedding(query)
 
         current_warmth = host.kernel.computation.engine.observe().get("warmth", 0.0)
         results = memory_system.recall(
@@ -1484,6 +1653,30 @@ class PublicAPI:
             lines.append(f"- {text}")
         return "\n".join(lines)
 
+    async def _resolve_query_embedding(self, query: str) -> list[float] | None:
+        """在原 embedding 开关内，统一解析显式/单 provider 自动选择。"""
+
+        p = self._p
+        config = getattr(p, "config", None) or getattr(p, "_config", None) or {}
+        if not bool(config.get("sylanne_alpha_embedding_memory_enabled")) or not query:
+            return None
+        context = getattr(p, "context", None) or getattr(p, "_context", None)
+        if context is None:
+            return None
+        try:
+            resolved = await resolve_embedding_provider(config=config, context=context)
+            provider = resolved.provider
+            get_embedding = cast(
+                Callable[[str], Awaitable[Any]] | None,
+                getattr(provider, "get_embedding", None),
+            )
+            if not callable(get_embedding):
+                return None
+            vector = await get_embedding(query)
+            return vector if isinstance(vector, list) else None
+        except Exception:
+            return None
+
     # ------------------------------------------------------------------
     # Internal assessor
     # ------------------------------------------------------------------
@@ -1524,15 +1717,22 @@ class PublicAPI:
                 appraisal={"low_signal": True, "signal_kind": "short_ack"},
             )
         timeout = float(cfg.get("assessor_timeout_seconds", 0.0))
-        provider_id_fn = getattr(p, "_provider_id", None)
-        if provider_id_fn and callable(provider_id_fn):
+        context = getattr(p, "context", None) or getattr(p, "_context", None)
+        if context is not None:
             try:
+                resolve = resolve_text_provider(
+                    feature=ProviderFeature.ASSESSOR,
+                    config=cfg,
+                    context=context,
+                    umo=str(getattr(event, "unified_msg_origin", "") or "") or None,
+                )
                 if timeout > 0:
-                    provider_id = await asyncio.wait_for(
-                        provider_id_fn(event), timeout=timeout
-                    )
+                    resolved = await asyncio.wait_for(resolve, timeout=timeout)
                 else:
-                    provider_id = await provider_id_fn(event)
+                    resolved = await resolve
+                provider_id = (
+                    resolved.provider_id if resolved.provider is not None else ""
+                )
             except (asyncio.TimeoutError, Exception):
                 return SimpleNamespace(
                     values={
@@ -1552,7 +1752,10 @@ class PublicAPI:
                 )
         else:
             provider_id = ""
-        call_llm_fn = getattr(p, "_call_internal_assessor_llm", None)
+        call_llm_fn = cast(
+            Callable[..., Awaitable[Any]] | None,
+            getattr(p, "_call_internal_assessor_llm", None),
+        )
         if call_llm_fn and callable(call_llm_fn) and provider_id:
             try:
                 if timeout > 0:
@@ -1616,12 +1819,19 @@ class PublicAPI:
         )
 
     async def _call_internal_assessor_llm(self, *args: Any, **kwargs: Any) -> Any:
-        """调用内部评估器 LLM，带并发限制保护。"""
-        p = self._plugin
-        limit = self._internal_assessor_llm_concurrency_limit()
-        while p._internal_assessor_llm_inflight >= limit:
-            await asyncio.sleep(0.001)
-        p._internal_assessor_llm_inflight += 1
+        """调用内部评估器 LLM，带并发限制保护。
+
+        并发闸用 asyncio.Condition（替代旧 `asyncio.sleep(0.05)` 忙等轮询）：消除轮询
+        延迟与 inflight 计数竞态——计数的读-改-写全在条件锁内原子完成，动态 limit 每次
+        被唤醒时重新判定，槽位释放时精确唤醒一个等待者。
+        """
+        p = self._p
+        cond = self._internal_assessor_llm_condition()
+        async with cond:
+            while (p._internal_assessor_llm_inflight
+                   >= self._internal_assessor_llm_concurrency_limit()):
+                await cond.wait()
+            p._internal_assessor_llm_inflight += 1
         try:
             context = getattr(p, "context", None) or getattr(p, "_context", None)
             if hasattr(context, "llm_generate"):
@@ -1629,16 +1839,27 @@ class PublicAPI:
                 return result
             return SimpleNamespace(completion_text="")
         finally:
-            p._internal_assessor_llm_inflight -= 1
+            async with cond:
+                p._internal_assessor_llm_inflight -= 1
+                cond.notify()
+
+    def _internal_assessor_llm_condition(self) -> asyncio.Condition:
+        """惰性创建并复用内部评估器并发闸的条件变量（绑定首次调用时的事件循环）。"""
+        p = self._p
+        cond = getattr(p, "_internal_assessor_llm_cond", None)
+        if cond is None:
+            cond = asyncio.Condition()
+            p._internal_assessor_llm_cond = cond
+        return cond
 
     def _internal_assessor_llm_concurrency_limit(self) -> int:
         return 2
 
     def _internal_assessor_llm_concurrency_decision(self) -> dict[str, Any]:
         """计算内部评估器 LLM 并发策略：基础 2 通道 + 极端积压时临时 burst 到 3。"""
-        p = self._plugin
-        _cfg = self._services.config or {}
-        total_queued = sum(len(q) for q in p._background_post_queues.values())
+        p = self._p
+        _cfg = p.config or {}
+        total_queued = sum(len(q) for q in p._store.background_post_queues.values())
         base_limit = 2
         burst_limit = 3
         reasons = ["base_two_lane_guard"]
@@ -1721,19 +1942,7 @@ class PublicAPI:
         p = self._plugin
         host = self._host(session_key)
         memory_system = p._memory_system_for_session(session_key)
-        enabled = bool(p._config.get("sylanne_alpha_embedding_memory_enabled"))
-        provider_id = str(
-            p._config.get("sylanne_alpha_embedding_memory_provider_id") or ""
-        )
-
-        query_embedding: list[float] | None = None
-        if enabled and provider_id and query:
-            try:
-                provider = p._get_embedding_provider(provider_id)
-                if provider:
-                    query_embedding = await provider.get_embedding(query)
-            except Exception:
-                query_embedding = None
+        query_embedding = await self._resolve_query_embedding(query)
 
         current_warmth = host.kernel.computation.engine.observe().get("warmth", 0.0)
         results = memory_system.recall(
@@ -1769,7 +1978,7 @@ class PublicAPI:
     async def get_realtime_chat_plan(
         self, session_key: str, text: str, **kwargs: Any
     ) -> dict[str, Any]:
-        from .compat import realtime_plan
+        from sylanne_alpha.message_dispatch import realtime_plan
 
         p = self._plugin
         cfg = getattr(p, "config", None) or getattr(p, "_config", {}) or {}
@@ -1812,7 +2021,13 @@ class PublicAPI:
             session_key=sk, query=query_hint, limit=3
         )
         fragment = p._memory_prompt_fragment(memory_result)
-        p._append_request_prompt_fragment(request, fragment)
+        p._add_transient_context(
+            request,
+            "memory_api",
+            fragment,
+            "public_api",
+            25,
+        )
         return {"prompt": str(getattr(request, "prompt", "") or "")}
 
     # ------------------------------------------------------------------
@@ -1831,7 +2046,7 @@ class PublicAPI:
         Returns:
             主动发言决策字典，包含 should_send、reason_code 等。
         """
-        from .compat import proactive_decision
+        from sylanne_alpha.diagnostics_surface import proactive_decision
         from .host import SylanneAlphaHostEvent
 
         p = self._plugin
@@ -1845,6 +2060,14 @@ class PublicAPI:
         )
         surface = host.on_proactive_check(event)
         decision_payload = proactive_decision(surface)
+        try:
+            from sylanne_alpha.v2core.integration import merge_idle_reach_into_decision
+
+            decision_payload = await merge_idle_reach_into_decision(
+                p, session_key, decision_payload
+            )
+        except Exception:
+            pass
         # Add reason_code from host_payload
         decision_payload["reason_code"] = surface["host_payload"].get(
             "reason_code", "life_rhythm"
@@ -1896,16 +2119,6 @@ class PublicAPI:
                 "provider_id": str(
                     cfg.get("sylanne_alpha_assessor_provider_id")
                     or cfg.get("emotion_provider_id")
-                    or ""
-                ),
-            },
-            "fast_assessor": {
-                "enabled": bool(cfg.get("sylanne_alpha_fast_assessor_enabled"))
-                if "sylanne_alpha_fast_assessor_enabled" in cfg
-                else bool(cfg.get("fast_assessor_enabled", True)),
-                "provider_id": str(
-                    cfg.get("sylanne_alpha_fast_assessor_provider_id")
-                    or cfg.get("fast_assessor_provider_id")
                     or ""
                 ),
             },

@@ -1,13 +1,14 @@
 name: astrbot_plugin_sylanne
 display_name: Sylanne
-desc: "Sylanne-Embodiment：不可逆的关系计算引擎。Embodiment 致力于用数学语言让对话在躯体上留下伤痕、在沉默中积累压力、在关系里长出不可撤销的形状——然后让伤痕沿着关系网络自己找路传播。"
-short_desc: "Sylanne-Embodiment 1.4.5"
-version: "1.4.5"
-author: Ayleovelle
+desc: "面向 AstrBot 的长期记忆、关系状态建模与即时聊天插件，提供情感状态计算、认知编排、生活模拟、主动消息及 WebUI 观测能力；高风险可选功能默认关闭。"
+short_desc: "Sylanne-Embodiment 2.5.0 — 长期记忆、关系状态建模与即时聊天"
+version: "2.5.0"
+author: 2718-labs
 license: AGPL-3.0-or-later
 repo: "https://github.com/Ayleovelle/astrbot_plugin_sylanne"
 support_platforms: []
-astrbot_version: ">=4.9.2,<5.0.0"
+astrbot_version: ">=4.26,<5.0.0"
+tested_astrbot_version: "4.26.7"
 
 # Item 111: 插件市场元数据规范 v2
 compatibility_matrix:

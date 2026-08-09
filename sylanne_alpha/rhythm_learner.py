@@ -18,14 +18,19 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from statistics import median
 from typing import Any
+
+from .scoped_session_components import ScopedSessionComponentStore
+from .scope_repository import ScopedPersistenceGateway
 
 _MAX_SAMPLES = 60  # 最大采样数
 _MIN_SAMPLES_FOR_PROFILE = 8  # 生成有效画像所需的最少采样数
 _DEFAULT_CHARS_PER_SECOND = 7.5  # 默认打字速度（字符/秒）
 _DEFAULT_MAX_PART_CHARS = 48  # 默认单条消息最大字符数
+_SCOPED_SLOT = "_scoped"
 
 
 class RhythmProfile:
@@ -94,6 +99,32 @@ class RhythmProfile:
             if median_gap > 0.1:
                 self._chars_per_second = max(2.0, min(20.0, median_len / median_gap))
 
+    def median_gap_seconds(self) -> float | None:
+        """用户消息间隔中位数（秒）。样本不足（<3）时返回 None（调用方应回退默认值）。"""
+        if len(self._inter_msg_gaps) < 3:
+            return None
+        sorted_gaps = sorted(self._inter_msg_gaps)
+        return sorted_gaps[len(sorted_gaps) // 2]
+
+    def intra_burst_median_gap_seconds(
+        self, burst_threshold: float = 10.0
+    ) -> float | None:
+        """连发内间隔中位数（秒）——只用小于 burst_threshold 的样本。
+
+        review 发现：median_gap_seconds() 的全量样本混着"两条连发之间隔几秒"和
+        "一轮对话结束到下一轮重新开口之间隔几十秒"两种截然不同的停顿，成熟画像
+        的全量中位数几乎总落在几十秒量级——用它去撑 T2-04③ 的自适应合并窗口，
+        会把 clamp 钝化成常量 8.0s 天花板，等于没自适应。这里先过滤掉像是跨轮
+        停顿的大间隔样本，只留"像连发"的间隔再取中位数，更贴近"这个人连着发
+        消息时，条与条之间隔多久"这个问题本身。
+
+        样本不足（过滤后 <3）时返回 None，调用方应回退默认值/整体中位数。
+        """
+        candidates = sorted(g for g in self._inter_msg_gaps if g < burst_threshold)
+        if len(candidates) < 3:
+            return None
+        return candidates[len(candidates) // 2]
+
     @property
     def confidence(self) -> float:
         return self._confidence
@@ -105,34 +136,6 @@ class RhythmProfile:
     @property
     def chars_per_second(self) -> float:
         return self._chars_per_second
-
-    def modulate(
-        self, default_max_part: int, default_cps: float, blend: float
-    ) -> tuple[int, float]:
-        """返回混合后的 (max_part_chars, chars_per_second)。
-
-        参数:
-            default_max_part: 默认最大分段字符数
-            default_cps: 默认打字速度
-            blend: 混合比例，0.0=纯默认，1.0=纯用户节奏
-
-        实际混合比例还会乘以置信度（采样不足时不生效）。
-        """
-        effective_blend = blend * self._confidence
-        if effective_blend < 0.05:
-            return default_max_part, default_cps
-
-        learned_part = max(12, min(120, int(self._avg_part_chars)))
-        learned_cps = self._chars_per_second
-
-        blended_part = int(
-            default_max_part * (1 - effective_blend) + learned_part * effective_blend
-        )
-        blended_cps = (
-            default_cps * (1 - effective_blend) + learned_cps * effective_blend
-        )
-
-        return max(12, min(120, blended_part)), max(2.0, min(20.0, blended_cps))
 
     def to_dict(self) -> dict[str, Any]:
         """序列化画像状态。"""
@@ -182,15 +185,32 @@ class RhythmLearner:
         "_tempo_timestamps",
         "_last_tempo",
         "_tempo_shift",
+        "_scoped_components",
     )
 
-    def __init__(self, intimacy_threshold: float = 0.6):
+    def __init__(
+        self,
+        intimacy_threshold: float = 0.6,
+        *,
+        persistence: ScopedPersistenceGateway | None = None,
+    ):
+        """Build an explicit legacy learner or one frozen scoped learner."""
+
         self._profiles: dict[str, RhythmProfile] = {}  # session_key → 节奏画像
         self._intimacy_threshold = intimacy_threshold  # 开始学习的亲密度阈值
         self._default_blend = 0.6  # 默认混合比例
         self._tempo_timestamps: dict[str, deque] = {}  # session_key → 时间戳窗口
         self._last_tempo: dict[str, float] = {}  # session_key → 上次 tempo
         self._tempo_shift: dict[str, bool] = {}  # session_key → 是否突变
+        self._scoped_components = (
+            None if persistence is None else ScopedSessionComponentStore(persistence)
+        )
+        if self._scoped_components is not None:
+            self._restore_scoped_state()
+
+    def _require_legacy_session_api(self) -> None:
+        if self._scoped_components is not None:
+            raise ValueError("scoped rhythm state requires scoped methods")
 
     def set_personality_params(self, intimacy_threshold: float, blend_rate: float):
         """设置人格驱动的节奏学习参数。"""
@@ -213,6 +233,7 @@ class RhythmLearner:
         engine_observation: dict[str, float],
     ) -> None:
         """观察一条用户消息。只有亲密度足够时才学习。"""
+        self._require_legacy_session_api()
         # 始终记录 tempo（不受亲密度门控）
         self._record_tempo(session_key, timestamp)
 
@@ -239,6 +260,7 @@ class RhythmLearner:
             session_key: 会话标识。
             duration_seconds: 语音消息时长（秒）。
         """
+        self._require_legacy_session_api()
         if duration_seconds <= 0:
             return
         # 1 秒 ≈ 5 个字符的信息量
@@ -283,6 +305,7 @@ class RhythmLearner:
         返回:
             (max_part_chars, chars_per_second) 元组
         """
+        self._require_legacy_session_api()
         profile = self._profiles.get(session_key)
         if profile is None or profile.confidence < 0.1:
             return default_max_part, default_cps
@@ -293,7 +316,11 @@ class RhythmLearner:
 
         # 净同步意图：正值=想同步，负值=在退缩
         sync_intent = drive_factor - withdrawal_factor
-        effective_blend = max(0.0, blend * profile.confidence * max(0.1, sync_intent))
+        # flavor 级校准（核查任务 wzwd8i0ta #27）：内层地板 0.1 让成熟画像
+        # （confidence≈1）的 effective_blend 恒 ≥ blend*1*0.1=0.06 > 0.05，退缩分支永不可达。
+        # 改地板 0.0：净退缩（sync_intent≤0）时 effective_blend 真归零，成熟画像也能进退缩放慢。
+        # 正向同步区间（sync_intent>0.1）行为不变，不动整体节律语义。
+        effective_blend = max(0.0, blend * profile.confidence * max(0.0, sync_intent))
 
         if effective_blend < 0.05:
             # 退缩模式：使用比默认更慢的节奏
@@ -313,7 +340,36 @@ class RhythmLearner:
         return max(12, min(120, blended_part)), max(2.0, min(20.0, blended_cps))
 
     def profile(self, session_key: str) -> RhythmProfile | None:
+        self._require_legacy_session_api()
         return self._profiles.get(session_key)
+
+    def get_median_inter_message_gap(self, session_key: str) -> float | None:
+        """获取该会话用户消息间隔中位数（秒），供自适应防抖合并窗口等场景使用。
+
+        门槛与 get_rhythm_params 一致（confidence >= 0.1）——画像还不成熟时返回
+        None，调用方应回退到固定/配置窗口，而不是拿噪声样本硬算。
+        """
+        self._require_legacy_session_api()
+        profile = self._profiles.get(session_key)
+        if profile is None or profile.confidence < 0.1:
+            return None
+        return profile.median_gap_seconds()
+
+    def get_intra_burst_median_gap(
+        self, session_key: str, burst_threshold: float = 10.0
+    ) -> float | None:
+        """获取该会话"像连发"的消息间隔中位数（秒），排除跨轮对话停顿污染。
+
+        门槛与 get_median_inter_message_gap 一致（confidence >= 0.1）。供 T2-04②③
+        自适应探测/合并窗口使用——比全量中位数更贴近"这个人连发时条与条之间
+        隔多久"，不会被对话轮次之间的长静默拉高（见
+        RhythmProfile.intra_burst_median_gap_seconds 的 review 说明）。
+        """
+        self._require_legacy_session_api()
+        profile = self._profiles.get(session_key)
+        if profile is None or profile.confidence < 0.1:
+            return None
+        return profile.intra_burst_median_gap_seconds(burst_threshold)
 
     # ------------------------------------------------------------------
     # Item 79: 回复长度自适应控制器
@@ -327,6 +383,7 @@ class RhythmLearner:
         - 用户消息长（>200 字）→ 1.5（回复详尽）
         - 中间线性插值，最终 clamp 到 [0.5, 2.0]
         """
+        self._require_legacy_session_api()
         profile = self._profiles.get(session_key)
         if profile is None or len(profile._msg_lengths) == 0:
             return 1.0
@@ -391,6 +448,7 @@ class RhythmLearner:
 
     def session_tempo(self, session_key: str) -> float:
         """获取指定会话的 tempo。"""
+        self._require_legacy_session_api()
         return self._session_tempo(session_key)
 
     @property
@@ -400,6 +458,7 @@ class RhythmLearner:
 
     def session_tempo_shift(self, session_key: str) -> bool:
         """指定会话是否发生 tempo 突变。"""
+        self._require_legacy_session_api()
         return self._tempo_shift.get(session_key, False)
 
     # ------------------------------------------------------------------
@@ -412,6 +471,8 @@ class RhythmLearner:
         正常间隔从 tempo_clock 的历史中位数计算。
         如果历史数据不足（<2 条时间戳），返回 False。
         """
+        if self._scoped_components is not None and session_key:
+            raise ValueError("scoped rhythm state requires scoped methods")
         timestamps = self._tempo_timestamps.get(session_key) if session_key else None
         if not timestamps:
             all_ts = [t for dq in self._tempo_timestamps.values() for t in dq]
@@ -453,3 +514,141 @@ class RhythmLearner:
             if isinstance(v, dict):
                 learner._profiles[k] = RhythmProfile.from_dict(v)
         return learner
+
+    # ------------------------------------------------------------------
+    # Scope-v1 session component persistence
+    # ------------------------------------------------------------------
+
+    @property
+    def persistence(self) -> ScopedPersistenceGateway | None:
+        components = self._scoped_components
+        return None if components is None else components.gateway
+
+    def observe_scoped_user_message(
+        self,
+        *,
+        text: str,
+        timestamp: float,
+        engine_observation: dict[str, float],
+    ) -> None:
+        """Observe this exact scope without accepting a transport/session key."""
+
+        if self._scoped_components is None:
+            raise ValueError("scoped persistence is not configured")
+        self._record_tempo(_SCOPED_SLOT, timestamp)
+        if not self.is_intimate(engine_observation):
+            return
+        profile = self._profiles.get(_SCOPED_SLOT)
+        if profile is None:
+            profile = RhythmProfile()
+            self._profiles[_SCOPED_SLOT] = profile
+        profile.observe(text, timestamp)
+
+    def observe_scoped_voice_message(self, *, duration_seconds: float) -> None:
+        """Add one voice sample to the frozen session's only rhythm profile."""
+
+        if self._scoped_components is None:
+            raise ValueError("scoped persistence is not configured")
+        if duration_seconds <= 0:
+            return
+        profile = self._profiles.get(_SCOPED_SLOT)
+        if profile is None:
+            profile = RhythmProfile()
+            self._profiles[_SCOPED_SLOT] = profile
+        equivalent_chars = int(duration_seconds * 5)
+        if equivalent_chars >= 1:
+            profile._msg_lengths.append(equivalent_chars)
+            profile._recompute()
+
+    def scoped_profile(self) -> RhythmProfile | None:
+        if self._scoped_components is None:
+            raise ValueError("scoped persistence is not configured")
+        return self._profiles.get(_SCOPED_SLOT)
+
+    def scoped_rhythm_params(
+        self,
+        *,
+        default_max_part: int = 48,
+        default_cps: float = 7.5,
+        blend: float = 0.6,
+        expression_drive: float = 0.5,
+        recent_ignored_rate: float = 0.0,
+    ) -> tuple[int, float]:
+        """Return the frozen scope's adaptation values with no key fallback."""
+
+        if self._scoped_components is None:
+            raise ValueError("scoped persistence is not configured")
+        profile = self._profiles.get(_SCOPED_SLOT)
+        if profile is None or profile.confidence < 0.1:
+            return default_max_part, default_cps
+        drive_factor = min(1.0, expression_drive * 1.5)
+        withdrawal_factor = min(0.8, recent_ignored_rate * 2.0)
+        effective_blend = max(
+            0.0,
+            blend * profile.confidence * max(0.0, drive_factor - withdrawal_factor),
+        )
+        if effective_blend < 0.05:
+            slowdown = 1.0 + withdrawal_factor * 0.5
+            return int(default_max_part * slowdown), default_cps / slowdown
+        learned_part = max(12, min(120, int(profile.avg_part_chars)))
+        blended_part = int(default_max_part * (1 - effective_blend) + learned_part * effective_blend)
+        blended_cps = default_cps * (1 - effective_blend) + profile.chars_per_second * effective_blend
+        return max(12, min(120, blended_part)), max(2.0, min(20.0, blended_cps))
+
+    def _scoped_payload(self) -> dict[str, object]:
+        profile = self._profiles.get(_SCOPED_SLOT)
+        timestamps = self._tempo_timestamps.get(_SCOPED_SLOT, ())
+        return {
+            "schema_version": "sylanne.rhythm.scoped.v1",
+            "intimacy_threshold": self._intimacy_threshold,
+            "default_blend": self._default_blend,
+            "profile": None if profile is None else profile.to_dict(),
+            "tempo_timestamps": list(timestamps),
+            "last_tempo": self._last_tempo.get(_SCOPED_SLOT, 0.0),
+            "tempo_shift": self._tempo_shift.get(_SCOPED_SLOT, False),
+        }
+
+    def _restore_scoped_state(self) -> None:
+        components = self._scoped_components
+        if components is None:
+            return
+        payload = components.load("rhythm")
+        if payload is None:
+            return
+        threshold = payload.get("intimacy_threshold")
+        blend = payload.get("default_blend")
+        if isinstance(threshold, (int, float)):
+            self._intimacy_threshold = float(threshold)
+        if isinstance(blend, (int, float)):
+            self._default_blend = float(blend)
+        profile = payload.get("profile")
+        if isinstance(profile, dict):
+            self._profiles[_SCOPED_SLOT] = RhythmProfile.from_dict(profile)
+        timestamps = payload.get("tempo_timestamps")
+        if isinstance(timestamps, list):
+            self._tempo_timestamps[_SCOPED_SLOT] = deque(
+                (float(value) for value in timestamps if isinstance(value, (int, float))),
+                maxlen=300,
+            )
+        last_tempo = payload.get("last_tempo")
+        if isinstance(last_tempo, (int, float)):
+            self._last_tempo[_SCOPED_SLOT] = float(last_tempo)
+        tempo_shift = payload.get("tempo_shift")
+        if type(tempo_shift) is bool:
+            self._tempo_shift[_SCOPED_SLOT] = tempo_shift
+
+    def flush_scoped_state(self) -> int:
+        components = self._scoped_components
+        if components is None:
+            raise ValueError("scoped persistence is not configured")
+        return components.save("rhythm", self._scoped_payload())
+
+    def schedule_scoped_flush(self, *, delay_seconds: float) -> asyncio.Task[bool]:
+        components = self._scoped_components
+        if components is None:
+            raise ValueError("scoped persistence is not configured")
+        return components.schedule_save(
+            "rhythm",
+            self._scoped_payload(),
+            delay_seconds=delay_seconds,
+        )

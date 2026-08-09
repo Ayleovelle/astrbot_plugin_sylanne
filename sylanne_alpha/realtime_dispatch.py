@@ -24,8 +24,10 @@ import asyncio
 from datetime import datetime
 from typing import Any, TYPE_CHECKING
 
+from sylanne_alpha.infra import ensure_background_tasks_list
+
 if TYPE_CHECKING:
-    pass  # plugin type is dynamic (Star subclass)
+    from sylanne_alpha.protocols import PluginHost
 
 from sylanne_alpha.constants import CHINA_TZ as _CHINA_TZ
 from sylanne_alpha.plugin_services import PluginServices
@@ -43,17 +45,8 @@ class RealtimeDispatch:
       - 被 llm_request_pipeline 调用注入上下文
     """
 
-    def __init__(self, plugin: Any, *, services: "PluginServices | None" = None, session_state: Any = None) -> None:
-        self._plugin = plugin
-        self._session_state = session_state
-        if services is not None:
-            self._services = services
-        else:
-            self._services = PluginServices(
-                config=getattr(plugin, "config", None) or getattr(plugin, "_config", {}),
-                logger=getattr(plugin, "logger", None),
-                context=getattr(plugin, "context", None),
-            )
+    def __init__(self, plugin: PluginHost) -> None:
+        self._p = plugin
 
     # ------------------------------------------------------------------
     # Segmented dispatch helpers
@@ -111,7 +104,7 @@ class RealtimeDispatch:
             await context.send_message(origin, message)
         # All parts sent successfully — clear unfinished marker
         if session_key:
-            self._session_state.unfinished_replies.pop(session_key, None)
+            self._p._store.unfinished_replies.pop(session_key, None)
 
     # ------------------------------------------------------------------
     # Realtime chat plan delivery
@@ -148,7 +141,7 @@ class RealtimeDispatch:
         media_count = 0
         media_results: list[dict[str, Any]] = []
         interrupted_reason = ""
-        epochs = p._conversation_input_epoch
+        epochs = p._store.conversation_input_epoch
 
         for part in parts:
             if plan_epoch and epochs.get(session_key, 0) > plan_epoch:
@@ -243,14 +236,13 @@ class RealtimeDispatch:
                 input_epoch=plan_epoch,
                 reason=interrupted_reason,
             )
-            dispatches = self._session_state.realtime_chat_active_dispatches
-            dispatches[session_key] = [
+            p._store.realtime_chat_active_dispatches.set(session_key, [
                 {
                     "sent_parts": sent_parts,
                     "unsent_parts": unsent_parts,
                     "interrupted_reason": interrupted_reason,
                 }
-            ]
+            ])
 
         if record_history_shadow and message_count > 0:
             full_text = plan.get("full_text", "")
@@ -343,7 +335,8 @@ class RealtimeDispatch:
         source: str = "",
         delivery_status: str = "",
     ) -> None:
-        entries = self._session_state.realtime_ordinary_history_backfills.setdefault(session_key, [])
+        p = self._p
+        entries = p._store.realtime_ordinary_history_backfills.get_or_create(session_key, list)
         entries.append(
             {
                 "role": role,
@@ -405,14 +398,27 @@ class RealtimeDispatch:
             p._realtime_assistant_history_shadows: dict[str, list[dict[str, Any]]] = {}
         return p._realtime_assistant_history_shadows
 
-    def realtime_ordinary_history_backfill_cache(
-        self,
-    ) -> dict[str, list[dict[str, Any]]]:
-        return self._session_state.realtime_ordinary_history_backfills
+    def realtime_ordinary_history_backfill_cache(self) -> Any:
+        return self._p._store.realtime_ordinary_history_backfills
 
     # ------------------------------------------------------------------
     # Context injection (append_*_if_any)
     # ------------------------------------------------------------------
+
+    def _add_transient_context(
+        self,
+        request: Any,
+        channel: str,
+        text: str,
+        priority: int,
+    ) -> bool:
+        add = getattr(self._p, "_add_transient_context", None)
+        if not callable(add):
+            return False
+        try:
+            return bool(add(request, channel, text, "realtime", priority))
+        except Exception:
+            return False
 
     def append_realtime_assistant_history_shadow_if_any(
         self,
@@ -452,14 +458,16 @@ class RealtimeDispatch:
                 f"{event_time.get('event_local_time', event_time.get('local_datetime', ''))}"
                 f"\ntimezone={event_time.get('timezone', '')}"
             )
-        _sys = str(getattr(request, "system_prompt", "") or "")
-        request.system_prompt = (
-            _sys
-            + "\n[sylanne_realtime_assistant_history]"
+        injection = (
+            "[sylanne_realtime_assistant_history]"
             + event_time_line
             + "\n"
             + full_text
         )
+        if not self._add_transient_context(
+            request, "realtime_assistant_history", injection, 40
+        ):
+            return False
         last["consumed"] = True
         last["consumed_reason"] = "injected"
         self._trim_consumed(shadows)
@@ -489,14 +497,16 @@ class RealtimeDispatch:
                 f"{event_time.get('event_local_time', event_time.get('local_datetime', ''))}"
                 f"\ntimezone={event_time.get('timezone', '')}"
             )
-        _sys = str(getattr(request, "system_prompt", "") or "")
-        request.system_prompt = (
-            _sys
-            + "\n[sylanne_interrupted_reply_breakpoint]"
+        injection = (
+            "[sylanne_interrupted_reply_breakpoint]"
             + event_time_line
             + "\n"
             + full_text
         )
+        if not self._add_transient_context(
+            request, "realtime_interrupted_reply", injection, 41
+        ):
+            return False
         last["consumed"] = True
         self._trim_consumed(entries)
         return True
@@ -532,7 +542,8 @@ class RealtimeDispatch:
         source: str = "",
         event_time: dict[str, Any] | None = None,
     ) -> None:
-        dispatches = self._session_state.realtime_chat_active_dispatches.setdefault(session_key, [])
+        p = self._p
+        dispatches = p._store.realtime_chat_active_dispatches.get_or_create(session_key, list)
         entry: dict[str, Any] = {
             "input_epoch": input_epoch,
             "full_text": full_text,
@@ -549,7 +560,7 @@ class RealtimeDispatch:
         *,
         budget: Any = None,
     ) -> bool:
-        dispatches = self._session_state.realtime_chat_active_dispatches
+        dispatches = self._p._store.realtime_chat_active_dispatches
         entries = dispatches.get(session_key, [])
         if not entries:
             return False
@@ -565,14 +576,16 @@ class RealtimeDispatch:
                 f"{event_time.get('event_local_time', event_time.get('local_datetime', ''))}"
                 f"\ntrigger_timezone={event_time.get('timezone', '')}"
             )
-        _sys = str(getattr(request, "system_prompt", "") or "")
-        request.system_prompt = (
-            _sys
-            + "\n[sylanne_realtime_chat_active_dispatch]"
+        injection = (
+            "[sylanne_realtime_chat_active_dispatch]"
             + event_time_line
             + "\n"
             + full_text
         )
+        if not self._add_transient_context(
+            request, "realtime_active_dispatch", injection, 42
+        ):
+            return False
         last["consumed"] = True
         self._trim_consumed(entries)
         return True
@@ -594,7 +607,6 @@ class RealtimeDispatch:
         if not full_text:
             return False
         if "？" in full_text or "?" in full_text:
-            _sys = str(getattr(request, "system_prompt", "") or "")
             injection = (
                 "[sylanne_realtime_pending_bot_question]\n"
                 + "上一轮 bot 刚提出了一个未闭合问题："
@@ -603,8 +615,9 @@ class RealtimeDispatch:
                 + "current_user_short_answer="
                 + current_user_text
             )
-            request.system_prompt = _sys + "\n" + injection
-            return True
+            return self._add_transient_context(
+                request, "realtime_continuity", injection, 43
+            )
         return False
 
     def append_realtime_ordinary_history_backfills_if_any(
@@ -614,7 +627,6 @@ class RealtimeDispatch:
         entries = backfills.get(session_key, [])
         if not entries:
             return False
-        current = str(getattr(request, "system_prompt", "") or "")
         parts = []
         for entry in entries:
             if isinstance(entry, dict):
@@ -622,11 +634,14 @@ class RealtimeDispatch:
             else:
                 parts.append(str(entry))
         if parts:
-            request.system_prompt = f"{current}\n[sylanne_backfill_context]\n" + "\n".join(
-                parts
-            )
-        backfills[session_key] = []
-        return True
+            injection = "[sylanne_backfill_context]\n" + "\n".join(parts)
+            if not self._add_transient_context(
+                request, "realtime_backfill", injection, 44
+            ):
+                return False
+            backfills[session_key] = []
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # Release / cleanup
@@ -671,14 +686,16 @@ class RealtimeDispatch:
         if changed:
             self._trim_consumed(shadows)
             backfills = self.realtime_ordinary_history_backfill_cache()
-            if session_key in backfills:
-                backfills[session_key] = [
+            if backfills.has(session_key):
+                filtered = [
                     e
-                    for e in backfills[session_key]
+                    for e in backfills.get(session_key)
                     if e.get("input_epoch", 0) > input_epoch
                 ]
-                if not backfills[session_key]:
-                    del backfills[session_key]
+                if filtered:
+                    backfills.set(session_key, filtered)
+                else:
+                    backfills.pop(session_key, None)
         return changed
 
     # ------------------------------------------------------------------
@@ -695,7 +712,7 @@ class RealtimeDispatch:
         p = self._plugin
         if state is None:
             return ""
-        cache = getattr(p, "_group_atmosphere_injection_snapshot_cache", {})
+        cache = p._store.group_atmosphere_injection_snapshot_cache
         previous = cache.get(session_key)
         cfg = self._services.config or {}
         diff_mode = str(cfg.get("state_injection_compact_mode", "")).lower() == "diff"
@@ -713,10 +730,7 @@ class RealtimeDispatch:
             if max_delta < threshold:
                 return '<bot_group_atmosphere detail="diff">No material room-mood change since last injection.</bot_group_atmosphere>'
         snapshot = {"values": dict(values)}
-        cache[session_key] = snapshot
-        if not hasattr(p, "_group_atmosphere_injection_snapshot_cache"):
-            p._group_atmosphere_injection_snapshot_cache = {}
-        p._group_atmosphere_injection_snapshot_cache[session_key] = snapshot
+        cache.set(session_key, snapshot)
         lines = ["<bot_group_atmosphere>"]
         for k, v in values.items():
             lines.append(f"  {k}={v:.2f}" if isinstance(v, float) else f"  {k}={v}")
@@ -748,6 +762,52 @@ class RealtimeDispatch:
             "timezone": "Asia/Shanghai",
             "event_local_time": f"{ts.strftime('%Y-%m-%d %H:%M:%S')} {offset_formatted}",
         }
+
+    def napcat_recall_payload(self, event: Any = None) -> dict[str, Any]:
+        """从 NapCat 消息撤回事件中提取载荷信息。"""
+        raw = None
+        if event:
+            msg_obj = getattr(event, "message_obj", None)
+            if msg_obj:
+                raw = getattr(msg_obj, "raw_message", None)
+            if not raw:
+                raw = getattr(event, "raw_message", None)
+        if not raw or not isinstance(raw, dict):
+            return {}
+        return {
+            "notice_type": str(raw.get("notice_type", "")),
+            "message_id": str(raw.get("message_id", "")),
+            "group_id": str(raw.get("group_id", "")),
+            "user_id": str(raw.get("user_id", "")),
+            "operator_id": str(raw.get("operator_id", "")),
+        }
+
+    async def observe_stickers_background(
+        self, event: Any = None, stickers: Any = None, **kwargs: Any
+    ) -> None:
+        pass
+
+    def extract_sticker_observations_from_event(
+        self, event: Any = None
+    ) -> list[dict[str, Any]]:
+        return []
+
+    def fast_assessor_max_context_chars(self) -> int:
+        p = self._p
+        return p._cfg_int("fast_assessor_max_context_chars", 240)
+
+    def discard_conversation_pending_response_epoch(
+        self, session_key: str, epoch: int = 0
+    ) -> None:
+        p = self._p
+        p._store.conversation_pending_response_epochs.pop(session_key, None)
+
+    def conversation_reply_is_stale(self, session_key: str, reply_epoch: int) -> bool:
+        """判断回复是否已过期（用户在回复生成期间发送了新消息）。"""
+        p = self._p
+        epochs = p._store.conversation_input_epoch
+        current = epochs.get(session_key, 0)
+        return reply_epoch < current
 
     # ------------------------------------------------------------------
     # Item 145: 主动沉默引擎
@@ -789,9 +849,11 @@ class RealtimeDispatch:
                 )
 
         task = asyncio.ensure_future(_wrapper())
-        p._background_tasks.add(task)
+        ensure_background_tasks_list(p).append(task)
         task.add_done_callback(
-            lambda t: p._background_tasks.discard(t)
+            lambda t: (
+                p._background_tasks.remove(t) if t in p._background_tasks else None
+            )
         )
         return task
 
@@ -805,13 +867,21 @@ class DeliberateSilence:
     def should_be_silent(
         self, valence: float, tension: float, void_pressure: float
     ) -> tuple[bool, str]:
-        """判断是否应该主动沉默。返回 (是否沉默, 原因)。"""
+        """判断是否应该主动沉默。返回 (是否沉默, 原因)。
+
+        MINOR 修复（红队 finding）：本类复活时沿用旧值域写的阈值，"content" 分支
+        原判据 tension < -0.5 在 v2core 里永不可达——tension 由调用方传入
+        BodySnapshot.tension，其契约域是 [0,1]（见 contracts.py），负值不存在，
+        原分支是死代码（唯一能命中它的路径是测试直接手造越界的 tension=-0.8）。
+        改按 v2core 真实值域重新标定："低张力+高温暖"＝安稳满足、无需多言，
+        与 valence（此处调用方传的是 body.warmth，[-1,1]）同一套已生效的语义。
+        """
         if tension > 0.7 and valence < -0.3:
             return True, "hurt"  # 受伤但不想表达
         if void_pressure > 3.0 and valence > 0:
             return True, "digesting"  # 在消化
-        if tension < -0.5:
-            return True, "content"  # 满足无需言语
+        if tension < 0.15 and valence > 0.5:
+            return True, "content"  # 满足无需言语（低张力 + 高温暖）
         return False, ""
 
     def get_minimal_response(self, reason: str) -> str | None:

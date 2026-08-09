@@ -48,11 +48,14 @@ if "pytest" not in sys.modules:
 
 import asyncio  # noqa: E402
 import collections  # noqa: E402
+import contextlib  # noqa: E402
 import contextvars  # noqa: E402
+import functools  # noqa: E402
 import importlib  # noqa: E402
 import json  # noqa: E402
 import math  # noqa: E402
 import time  # noqa: E402
+from dataclasses import dataclass  # noqa: E402
 from datetime import timedelta, timezone  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Any  # noqa: E402
@@ -89,12 +92,6 @@ except ImportError:
             return decorator
 
         def on_llm_response(self, *args, **kwargs):
-            def decorator(func):
-                return func
-
-            return decorator
-
-        def on_waiting_llm_request(self, *args, **kwargs):
             def decorator(func):
                 return func
 
@@ -203,21 +200,13 @@ from sylanne_alpha.diagnostics_surface import command_surface, memory_surface, r
 from sylanne_alpha.message_dispatch import realtime_dispatch, realtime_flags  # noqa: E402
 from sylanne_alpha.host import SylanneAlphaHost, SylanneAlphaHostEvent  # noqa: E402
 from sylanne_alpha.life_simulation import LifeSimulator  # noqa: E402
-from sylanne_alpha.memory_system import MemorySystem  # noqa: E402
+from sylanne_alpha.memory_system import ConversationBuffer, MemorySystem  # noqa: E402
 from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline  # noqa: E402
 from sylanne_alpha.rhythm_learner import RhythmLearner  # noqa: E402
 from sylanne_alpha.proactive_scheduler import ProactiveScheduler  # noqa: E402
 from sylanne_alpha.proactive_bridge import ProactiveBridge  # noqa: E402
 from sylanne_alpha.emotion_spirit_bridge import EmotionSpiritBridge  # noqa: E402
-from sylanne_alpha.follow_up_epoch import (  # noqa: E402
-    active_follow_up_target,
-    advance_inbound_delivery_epoch,
-    commit_inbound_delivery_epoch,
-    event_extra,
-    register_inbound_event_once,
-    register_or_defer_inbound_delivery_epoch,
-)
-from sylanne_alpha.session_context import SessionContext, RitualRegistry  # noqa: E402
+from sylanne_alpha.session_context import SessionContext  # noqa: E402
 from sylanne_alpha.session_state_store import SessionStateStore  # noqa: E402
 from sylanne_alpha.agents import (  # noqa: E402
     SelfCore,
@@ -231,7 +220,63 @@ from sylanne_alpha.state_persistence import StatePersistence  # noqa: E402
 from sylanne_alpha.memory_facade import MemoryFacade  # noqa: E402
 from sylanne_alpha.realtime_dispatch import RealtimeDispatch  # noqa: E402
 from sylanne_alpha.background_queue import BackgroundPostQueue  # noqa: E402
+from sylanne_alpha.scoped_host_runtime import ScopedHostRuntime  # noqa: E402
+from sylanne_alpha.v2core.integration import ScopedV2DomainPersistence  # noqa: E402
+from sylanne_alpha.v3bridge.integration import ScopedV3ShadowState  # noqa: E402
 from sylanne_alpha.webui_routes import WebUIRoutes  # noqa: E402
+from sylanne_alpha.scoped_api import (  # noqa: E402
+    SCOPED_API_METHODS,
+    issue_scoped_api_nonce_for_binding,
+    scoped_api_service_for_plugin,
+)
+from sylanne_alpha.scope_contracts import (  # noqa: E402
+    ResolvedScope,
+    ResolvedTransportScope,
+    SessionScope,
+    TurnSubjectProof,
+    VerifiedSubjectInput,
+)
+from sylanne_alpha.scope_identity import (  # noqa: E402
+    NoAdapterAccountProofProvider,
+    PreparedPersonaScope,
+    ScopeResolver,
+)
+from sylanne_alpha.scope_delivery import (  # noqa: E402
+    AstrBotAccountAwareTransport,
+    DeliveryOutbox,
+    DeliveryOutboxWorker,
+    ScopedDeliveryGateway,
+)
+from sylanne_alpha.scope_runtime import (  # noqa: E402
+    PersonaRuntime,
+    RequestRuntimeView,
+    ScopeRuntimeRegistry,
+    ScopeUnavailable,
+    ScopedSessionRuntime,
+)
+from sylanne_alpha.session_catalog import TransportTurn  # noqa: E402
+
+
+def _scoped_private_event_hook(func):
+    """Bind private hook work to the event's frozen runtime, or skip it.
+
+    Small registry-free test doubles retain their historical behavior.  The real
+    plugin always has ``_scope_runtime_registry`` and therefore can never borrow
+    a default/recent session when a late framework hook lacks its frozen scope.
+    """
+
+    @functools.wraps(func)
+    async def wrapped(self, event: Any, *args: Any, **kwargs: Any):
+        binder = getattr(self, "_bind_runtime_for_event", None)
+        if not callable(binder):
+            return await func(self, event, *args, **kwargs)
+        try:
+            with binder(event):
+                return await func(self, event, *args, **kwargs)
+        except ScopeUnavailable:
+            return None
+
+    return wrapped
 
 # 加载 WebUI dashboard HTML（从 UI/index.html）
 _webui_dashboard_path = Path(_PLUGIN_DIR) / "UI" / "index.html"
@@ -533,7 +578,8 @@ class _V3PendingTurn:
 class _V3ShadowFacade:
     """插件持有的唯一 v3 对象；构造零 IO，全部失败模式 fail-close v3。"""
 
-    def __init__(self) -> None:
+    def __init__(self, plugin: Any | None = None) -> None:
+        self._plugin = plugin
         self.enabled = False
         try:
             from sylanne_alpha.v3bridge.build_flags import V3_SHADOW_ENABLED
@@ -565,6 +611,10 @@ class _V3ShadowFacade:
     async def initialize(self, *, root: Any, supervisor_kwargs: dict | None = None) -> bool:
         """Coalesce concurrent starts; caller cancellation cannot cancel startup."""
 
+        if getattr(self._plugin, "_scope_runtime_registry", None) is not None:
+            # Active scoped sessions construct their own v3-shadow capability.
+            # Never start the legacy journal/root runtime for a scoped plugin.
+            return False
         async with self._lifecycle_lock:
             if not self.enabled or self.runtime is not None:
                 return False
@@ -1005,6 +1055,56 @@ class _V3ShadowFacade:
         except Exception as exc:  # noqa: BLE001 - 结算失败只丢这一轮影子
             logger.debug(f"Sylanne v3 shadow settle skipped: {exc}")
 
+    def settle_scoped(
+        self,
+        *,
+        scope: SessionScope,
+        route_kind: str,
+        reply_kind: str | None = None,
+        part_count: int = 0,
+        after_message_sent: bool = False,
+        all_segments_succeeded: bool | None = None,
+        proactive_dispatched: bool | None = None,
+        token: int | None = None,
+    ) -> bool:
+        """Persist scoped V3 terminal evidence through the exact Session owner."""
+
+        plugin = self._plugin
+        registry = getattr(plugin, "_scope_runtime_registry", None)
+        binding_getter = getattr(plugin, "_bound_runtime", None)
+        if registry is None or not callable(binding_getter):
+            return False
+        try:
+            binding = binding_getter()
+            if (
+                binding is None
+                or binding.scope != scope
+                or type(getattr(binding, "turn_generation", None)) is not int
+                or not registry.is_live_session(scope)
+                or registry.exact_session(scope) is not binding.session_runtime
+            ):
+                return False
+            state = binding.session_runtime.v3_shadow_state
+            save = getattr(state, "save", None)
+            if not callable(save):
+                return False
+            save(
+                {
+                    "schema_version": "sylanne.v3-shadow-settlement.v1",
+                    "route_kind": str(route_kind),
+                    "reply_kind": None if reply_kind is None else str(reply_kind),
+                    "part_count": int(part_count),
+                    "after_message_sent": bool(after_message_sent),
+                    "all_segments_succeeded": all_segments_succeeded,
+                    "proactive_dispatched": proactive_dispatched,
+                    "token": token,
+                    "turn_generation": binding.turn_generation,
+                }
+            )
+            return True
+        except Exception:
+            return False
+
     def _offer_pending(
         self,
         pending: _V3PendingTurn,
@@ -1214,6 +1314,19 @@ def _v3_shadow_of(owner: Any) -> Any:
     return getattr(owner, "_v3_shadow", None)
 
 
+@dataclass(frozen=True, slots=True)
+class _ScopedRuntimeBinding:
+    """Request-local view of the only mutable runtime an active hook may touch."""
+
+    scope: SessionScope
+    persona_runtime: PersonaRuntime
+    session_runtime: ScopedSessionRuntime
+    relation_runtime: Any | None = None
+    subject: Any | None = None
+    turn_generation: int | None = None
+    request_runtime_view: RequestRuntimeView | None = None
+
+
 @register(
     "astrbot_plugin_sylanne",
     "2718 Labs",
@@ -1259,27 +1372,26 @@ class EmotionalStatePlugin(Star):
         super().__init__(context)
         self.config = config or {}
         self._config = self.config
-        # 会话态集中存储：所有 session-keyed 容器收拢于此（CP8-P2）。
-        # 经语义方法访问，release_session 统一清理。
-        self._store = SessionStateStore()
+        # 所有私有可变态由冻结 scope 选出的 PersonaRuntime 持有；没有精确
+        # binding 的生产路径必须 fail closed，绝不临时造一个 default runtime。
+        self._scope_runtime_binding: contextvars.ContextVar[
+            _ScopedRuntimeBinding | None
+        ] = contextvars.ContextVar("sylanne_scope_runtime_binding", default=None)
+        self._scope_runtime_registry = ScopeRuntimeRegistry(
+            self._create_persona_runtime,
+            session_runtime_factory=self._create_session_runtime,
+        )
         self._background_tasks: list[asyncio.Task] = []
+        self._persona_genesis_shutting_down = False
         # hosts/记忆系统/对话缓冲已迁入 self._store（CP8-P2 批3）
         # 计算日志环形缓冲区（供 WebUI 实时显示）
         self._computation_logs: collections.deque = collections.deque(maxlen=200)
         # WebUI 运行时标识（用于探针验证实例一致性）
         self._webui_runtime_id = f"{int(time.time() * 1000)}-{id(self):x}"
-        # 节律学习器：学习用户的交互节奏
-        self._rhythm_learner = RhythmLearner(intimacy_threshold=0.6)
         # T1-04②：节奏学习器节流落盘状态（镜像 life_sim 的节流落盘模式）
-        self._rhythm_learner_last_save_ts: float = 0.0
-        self._rhythm_learner_dirty_in_flight: bool = False
         self.logger = logger
         # 生命模拟器：idle 时自主演化身体状态
-        self._life_simulator = LifeSimulator(config=self._config)
-        self._life_simulator_started = False
         # PR-A5：life sim 节流落盘状态（tick 间最多 _throttle 秒一次 KV 写）
-        self._life_sim_last_save_ts: float = 0.0
-        self._life_sim_dirty_in_flight: bool = False
         # PR-H 解耦：关系层独立节流落盘状态（不再折进 life_sim 落盘——
         # 否则 life_sim 关掉时 throttled 路径整段被早返回挡掉，只剩 terminate 兜底）。
         self._rel_state_last_save_ts: float = 0.0
@@ -1294,12 +1406,7 @@ class EmotionalStatePlugin(Star):
         # 全局单表（非 SessionMap，不进 self._store._reg 清理表）：自身 LRU
         # 有界即可，不按 session 生命周期清理。见 _inbound_dup_gate。
         self._inbound_seen: BoundedDict = BoundedDict(maxsize=1024)
-        # M8：主动发言反馈 audit（feedback_pressure 单一数据源）。按 session_key 索引，
-        # 值为 deque（_record_dispatch_feedback 写、derive_dispatch_policy 读）。
-        # BoundedDict LRU 防会话无限增长；每会话内 deque maxlen 防单会话条目无界。
-        self._proactive_dispatch_audit: BoundedDict = BoundedDict(maxsize=100)
         # 社交场收集器：群聊氛围感知
-        self._social_field = SocialFieldCollector(config=self._config)
         # PR-Qzone：说说功能审计/频率闸状态 + HTTP session（initialize 时按需建立，
         # terminate 时收；session 建立前 qzone_share._do_publish 会因 None 直接失败，
         # 不阻塞其余子系统初始化）。
@@ -1308,11 +1415,8 @@ class EmotionalStatePlugin(Star):
         self._qzone_audit_dirty_in_flight: bool = False
         self._qzone_http_session: Any = None
         # 后台投递队列已迁入 self._store（CP8-P2 批2）
-        self._background_post_recovered_sessions: set[str] = set()
         self._internal_assessor_llm_inflight: int = 0
         # outreach/origins/candidates/locks/realtime_dispatches 已迁入 self._store（批3）
-        self._amnesia_sessions: set[str] = set()
-        self._proactive_scheduler_task: asyncio.Task | None = None
         # 子系统初始化：各子系统持有 self 引用，通过委托模式分工
         self._session_ctx = SessionContext(self)
         self._state_persistence = StatePersistence(self)
@@ -1320,21 +1424,17 @@ class EmotionalStatePlugin(Star):
         # _state_persistence（写走单写咽喉），本身不持有新状态。
         self._memory_facade = MemoryFacade(self)
         self._realtime_dispatch = RealtimeDispatch(self)
-        self._background_queue = BackgroundPostQueue(self)
         self._webui_routes = WebUIRoutes(self)
-        self._memory_system = self._memory_system_for_session("default")
+        # Do not create a default memory owner.  Memory creation requires a frozen
+        # SessionScope and is performed lazily through _memory_system_for_scope.
         # 异步评估器：调用 LLM 评估用户文本的情感维度
         self._async_assessor = AsyncAssessor(config=self._config)
         self._llm_response_pipeline = LLMResponsePipeline(self)
         self._llm_request_pipeline = LLMRequestPipeline(self)
         self._public_api = PublicAPI(self)
-        # SelfCore 自主生命周期：仅注册 LifeAgent。
-        self._self_core = SelfCore(self)
-        self._self_core.register(LifeAgent(self))
-        # 全局自驱心跳（CP8-P3b）：让她没人说话也演化。initialize 启动、terminate 回收。
-        self._autonomy_scheduler = AutonomyScheduler(self, self._self_core)
+        # SelfCore / AutonomyScheduler are PersonaRuntime owners.  Constructing
+        # either here would capture whichever Persona happened to bind first.
         # 主动发言调度器：基于身体需求和节律决定是否主动发言
-        self._proactive_scheduler = ProactiveScheduler(self)
         # 主动发言桥接器：把意图+生活素材交给大饼插件执行发送
         self._proactive_bridge = ProactiveBridge(self)
         # emotion_spirit 适配桥（检测门控；未装即 no-op，对现有行为零影响）
@@ -1342,7 +1442,16 @@ class EmotionalStatePlugin(Star):
         # v3 shadow facade（plan Task 13）：纯构造、零 IO——仓库/线程池/epoch 全在
         # initialize() 里拿。默认关（源码/stable 构建 V3_SHADOW_ENABLED=False），
         # 只有 grey 打包生成的 build_flags 才翻开；不是用户可选项，故不进 _conf_schema。
-        self._v3_shadow = _V3ShadowFacade()
+        self._v3_shadow = _V3ShadowFacade(self)
+        # Scope-v1 is opened lazily at the first real AstrBot adapter event.  Tests
+        # with a deliberately absent Context retain the pre-scope compatibility path.
+        self._scope_account_proof_provider = NoAdapterAccountProofProvider()
+        self._scope_resolver_v1: ScopeResolver | None = None
+        self._scope_delivery_outbox: DeliveryOutbox | None = None
+        self._scope_delivery_worker: DeliveryOutboxWorker | None = None
+        # The outbox remains durable during teardown, but no new intents may
+        # enter once termination has started.
+        self._scope_delivery_accepting = True
         self._register_web_apis(context)
 
         # AstrBot ConversationManager / PersonaManager 集成
@@ -1406,6 +1515,7 @@ class EmotionalStatePlugin(Star):
         webui_routes: list[tuple[str, str, list[str]]] = [
             (f"/{P}/webui", "page_handler", ["GET"]),
             (f"/{P}/api/state", "state_handler", ["GET"]),
+            (f"/{P}/api/observation_history", "observation_history_handler", ["GET"]),
             (f"/{P}/api/settings", "settings_get_handler", ["GET"]),
             (f"/{P}/api/settings", "settings_post_handler", ["POST"]),
             (f"/{P}/api/computation_logs", "computation_logs_handler", ["GET"]),
@@ -1450,6 +1560,41 @@ class EmotionalStatePlugin(Star):
                 )
                 continue
             context.register_web_api(path, handler, methods, f"Sylanne {handler_name}")
+
+        context.register_web_api(
+            f"/{P}/api/scopes",
+            wr.scope_catalog_handler,
+            ["GET"],
+            "Sylanne scoped API catalog",
+        )
+        context.register_web_api(
+            f"/{P}/api/v1/bots/<bot_ref>/personas/<persona_ref>/dossier",
+            wr.persona_dossier_handler,
+            ["GET"],
+            "Sylanne Persona dossier",
+        )
+        context.register_web_api(
+            f"/{P}/api/scopes/<bot_ref>/personas/<persona_ref>/sessions/<session_ref>/nonce",
+            wr.scope_bootstrap_handler,
+            ["POST"],
+            "Sylanne scoped API nonce bootstrap",
+        )
+
+        scoped_root = (
+            f"/{P}/api/v1/bots/<bot_ref>/personas/<persona_ref>/sessions/<session_ref>"
+        )
+        for endpoint, method in SCOPED_API_METHODS.items():
+            path = scoped_root if endpoint == "scope" else f"{scoped_root}/{endpoint}"
+
+            async def scoped_handler(_endpoint: str = endpoint) -> Any:
+                return await wr.scoped_api_handler(_endpoint)
+
+            context.register_web_api(
+                path,
+                scoped_handler,
+                [method],
+                f"Sylanne scoped API {endpoint}",
+            )
 
     @property
     def config(self) -> dict[str, Any]:
@@ -1572,8 +1717,7 @@ class EmotionalStatePlugin(Star):
         return await self._update_sylanne_memory_settings_from_page(body)
 
     async def _lineage_observatory_handler(self) -> dict[str, Any]:
-        session_key = "default"
-        return self._sylanne_lineage_observatory_page_payload(session_key)
+        return self._public_api._lineage_observatory_route_payload()
 
     # WebUI route handlers (kept for internal cross-references)
     async def _webui_provider_items(self) -> list[dict[str, Any]]:
@@ -1610,12 +1754,554 @@ class EmotionalStatePlugin(Star):
     ) -> dict[str, Any]:
         return self._public_api._understanding_closed_loop_diagnostics(session_key)
 
+    # ------------------------------------------------------------------
+    # Frozen scope runtime ownership
+    # ------------------------------------------------------------------
+    def _construct_persona_services(self, runtime: PersonaRuntime) -> bool:
+        """Construct growth-capable Persona services exactly once after activation."""
+
+        # Keep construction transactional: no partially attached core/scheduler
+        # may make a later readiness probe bypass failed wiring.
+        self_core = runtime.self_core
+        if self_core is None:
+            self_core = SelfCore(self, store=runtime.store)
+        autonomy_scheduler = runtime.autonomy_scheduler
+        if autonomy_scheduler is None:
+            autonomy_scheduler = AutonomyScheduler(
+                self,
+                self_core,
+                persona_runtime=runtime,
+            )
+        self._state_persistence._wire_memory_eviction_persistence(runtime.store)
+        runtime.self_core = self_core
+        runtime.autonomy_scheduler = autonomy_scheduler
+        return True
+
+    def _create_persona_runtime(self, scope: SessionScope) -> PersonaRuntime:
+        """Construct mutable owners for exactly one Bot + Persona lifecycle."""
+
+        runtime = PersonaRuntime(persona_ref=scope.persona_ref)
+        runtime.persona_services_factory = self._construct_persona_services
+        config = self.config if isinstance(self.config, dict) else {}
+        genesis_awaiting = (
+            config.get("sylanne_alpha_persona_genesis_enabled") is True
+            and config.get("sylanne_alpha_persona_genesis_paid_opt_in") is True
+        )
+        runtime.genesis_required = genesis_awaiting
+        # Existing installations keep their normal Persona service construction
+        # when Genesis is off.  With both explicit opt-ins on, construction is
+        # deferred until the durable activation record is ready.
+        if not genesis_awaiting:
+            runtime.ensure_persona_services_ready(require_genesis=False)
+        return runtime
+
+    def _schedule_persona_genesis_before_view(
+        self,
+        registry: ScopeRuntimeRegistry,
+        scope: SessionScope,
+        source: Any,
+        *,
+        turn_generation: int,
+    ) -> PersonaRuntime | None:
+        """Fire-and-forget Genesis before any Session/Relation/view construction."""
+
+        try:
+            if getattr(self, "_persona_genesis_shutting_down", False):
+                return None
+            runtime = registry.for_scope(scope)
+            config = self.config if isinstance(self.config, dict) else {}
+            genesis_awaiting = (
+                config.get("sylanne_alpha_persona_genesis_enabled") is True
+                and config.get("sylanne_alpha_persona_genesis_paid_opt_in") is True
+            )
+            has_existing_persona_owners = (
+                runtime.self_core is not None
+                or runtime.autonomy_scheduler is not None
+                or bool(runtime.memory_systems)
+                or bool(runtime.relation_runtimes)
+                or bool(getattr(runtime.store, "hosts", {}))
+                or any(
+                    session_runtime.scope.persona_ref == runtime.persona_ref
+                    for session_runtime in registry.live_session_runtimes()
+                )
+            )
+            if has_existing_persona_owners:
+                runtime.genesis_baseline_latched = True
+            # A runtime that was created while Genesis was off, or that has
+            # already constructed baseline services after a gate close, never
+            # re-enters an awaiting state until a new runtime/restart exists.
+            if runtime.genesis_baseline_latched or not runtime.genesis_required:
+                return (
+                    runtime
+                    if runtime.ensure_persona_services_ready(require_genesis=False)
+                    else None
+                )
+            owner = runtime.persona_genesis
+            if not genesis_awaiting:
+                invalidate = getattr(owner, "invalidate_inflight", None)
+                if callable(invalidate):
+                    invalidate()
+                return (
+                    runtime
+                    if runtime.ensure_persona_services_ready(require_genesis=False)
+                    else None
+                )
+            schedule = getattr(owner, "schedule", None)
+            if not callable(schedule):
+                return None
+            ready = bool(
+                schedule(
+                    source,
+                    config=config,
+                    context=getattr(self, "context", None),
+                    origin_turn_generation=turn_generation,
+                )
+            )
+            if not ready or not runtime.ensure_persona_services_ready():
+                return None
+            return runtime
+        except Exception:
+            return None
+
+    def _create_session_runtime(
+        self,
+        scope: SessionScope,
+        persona_runtime: PersonaRuntime,
+        persistence: Any,
+    ) -> ScopedSessionRuntime:
+        """Construct all active Session owners through one frozen gateway."""
+
+        if persistence is None:
+            raise ScopeUnavailable("active session runtime requires scoped persistence")
+        cfg = self._config or {}
+        recall_mode = cfg.get("sylanne_alpha_recall_mode") or None
+        session_runtime = ScopedSessionRuntime.build(
+            scope=scope,
+            store=persona_runtime.store,
+            persistence=persistence,
+            host_session_factory=lambda gateway: ScopedHostRuntime(
+                gateway,
+                root=_sylanne_infra.resolve_data_root(cfg),
+                profile=None,
+                pel_enabled=False,
+            ).build_session(),
+            memory_system_factory=lambda: MemorySystem(recall_mode=recall_mode),
+            conversation_factory=ConversationBuffer.from_dict,
+            background_queue_factory=BackgroundPostQueue,
+            life_simulator_factory=lambda gateway: LifeSimulator(
+                config=cfg,
+                persistence=gateway,
+            ),
+            rhythm_learner_factory=lambda gateway: RhythmLearner(
+                intimacy_threshold=0.6,
+                persistence=gateway,
+            ),
+            social_field_factory=lambda gateway: SocialFieldCollector(
+                config=cfg,
+                persistence=gateway,
+            ),
+            proactive_scheduler_factory=lambda gateway: ProactiveScheduler(
+                self,
+                persistence=gateway,
+            ),
+            v2_persistence_factory=ScopedV2DomainPersistence,
+            v3_shadow_state_factory=ScopedV3ShadowState,
+        )
+        token = scope.storage_token
+        persona_runtime.store.hosts.set(token, session_runtime.host)
+        persona_runtime.store.memory_systems.set(token, session_runtime.memory_system)
+        persona_runtime.store.conversation_buffers.set(
+            token,
+            session_runtime.conversation_buffer,
+        )
+        self._session_ctx._bind_observation_sink(session_runtime.host)
+        personality = session_runtime.host.kernel._personality()
+        if isinstance(personality, dict) and personality:
+            session_runtime.memory_system.derive_params(personality)
+        if not self._session_ctx.memory_system_has_content(session_runtime.memory_system):
+            self._session_ctx.hydrate_memory_system_from_body_traces(
+                token,
+                session_runtime.memory_system,
+                session_runtime.host.kernel.body.memory.get("traces", []),
+            )
+        return session_runtime
+
+    def _runtime_binding_for_scope(self, scope: SessionScope) -> _ScopedRuntimeBinding:
+        persona_runtime = self._scope_runtime_registry.for_scope(scope)
+        return _ScopedRuntimeBinding(
+            scope=scope,
+            persona_runtime=persona_runtime,
+            session_runtime=self._scope_runtime_registry.exact_session(scope),
+        )
+
+    def _publish_transport_runtime_owner(
+        self,
+        event: Any,
+        resolved_scope: ResolvedScope,
+    ) -> bool:
+        """Publish only the exact successfully frozen runtime for transport safety."""
+
+        binding = self._bound_runtime()
+        scope = resolved_scope.scope
+        transport = ScopeResolver._event_extra(
+            event,
+            "_sylanne_transport_scope_v1",
+        )
+        if (
+            binding is None
+            or type(scope) is not SessionScope
+            or binding.scope != scope
+            or type(transport) is not ResolvedTransportScope
+            or transport.private_scope_enabled is not True
+            or transport.bot_ref != scope.bot_ref
+            or transport.session_ref != scope.session_ref
+        ):
+            return False
+        return self._scope_runtime_registry.publish_transport_owner(
+            transport,
+            scope,
+        )
+
+    @staticmethod
+    def _event_resolved_scope(event: Any) -> ResolvedScope | None:
+        getter = getattr(event, "get_extra", None)
+        if not callable(getter):
+            return None
+        try:
+            resolved = getter("_sylanne_resolved_scope_v1")
+        except Exception:
+            return None
+        return resolved if type(resolved) is ResolvedScope else None
+
+    @staticmethod
+    def _event_runtime_view(event: Any) -> RequestRuntimeView | None:
+        getter = getattr(event, "get_extra", None)
+        if not callable(getter):
+            return None
+        try:
+            view = getter("_sylanne_runtime_view_v1")
+        except Exception:
+            return None
+        return view if type(view) is RequestRuntimeView else None
+
+    def _validated_event_runtime_view(
+        self,
+        event: Any,
+    ) -> RequestRuntimeView | None:
+        """Validate the immutable carrier against this exact event's frozen turn."""
+
+        view = self._event_runtime_view(event)
+        if view is None:
+            return None
+        resolved = self._event_resolved_scope(event)
+        transport = ScopeResolver._event_extra(
+            event,
+            "_sylanne_transport_scope_v1",
+        )
+        turn = ScopeResolver._event_extra(
+            event,
+            "_sylanne_transport_turn_v1",
+        )
+        scope = view.resolved.scope
+        if (
+            resolved is not view.resolved
+            or scope is None
+            or type(transport) is not ResolvedTransportScope
+            or transport.private_scope_enabled is not True
+            or transport.bot_ref != scope.bot_ref
+            or transport.session_ref != scope.session_ref
+            or type(turn) is not TransportTurn
+            or turn.turn_state != "frozen"
+            or turn.session_ref != scope.session_ref.token
+            or turn.turn_generation != view.resolved.turn_generation
+            or not self._scope_runtime_registry.is_issued_request_view(view)
+            or not self._scope_runtime_registry.is_live_session(scope)
+        ):
+            return None
+        return view
+
+    def _runtime_for_event(self, event: Any) -> PersonaRuntime:
+        """Return only the exact runtime named by the event's frozen scope."""
+
+        raw_view = self._event_runtime_view(event)
+        view = self._validated_event_runtime_view(event)
+        if view is not None:
+            return view.persona_runtime
+        if raw_view is not None:
+            raise ScopeUnavailable("request runtime view does not match event")
+        resolved = self._event_resolved_scope(event)
+        if (
+            resolved is None
+            or resolved.private_scope_enabled is not True
+            or resolved.scope is None
+        ):
+            raise ScopeUnavailable("resolved private scope is unavailable")
+        return self._scope_runtime_registry.for_scope(resolved.scope)
+
+    def _session_runtime_for_event(self, event: Any) -> ScopedSessionRuntime:
+        raw_view = self._event_runtime_view(event)
+        view = self._validated_event_runtime_view(event)
+        if view is not None:
+            return view.session_runtime
+        if raw_view is not None:
+            raise ScopeUnavailable("request runtime view does not match event")
+        resolved = self._event_resolved_scope(event)
+        if (
+            resolved is None
+            or resolved.private_scope_enabled is not True
+            or resolved.scope is None
+        ):
+            raise ScopeUnavailable("resolved private scope is unavailable")
+        return self._scope_runtime_registry.exact_session(resolved.scope)
+
+    @contextlib.contextmanager
+    def _bind_runtime_for_event(self, event: Any):
+        """Bind a request-local view; no event may borrow another scope's owner."""
+
+        raw_view = self._event_runtime_view(event)
+        view = self._validated_event_runtime_view(event)
+        if view is not None:
+            with self._bind_request_runtime_view(view):
+                yield self._bound_runtime()
+            return
+        if raw_view is not None:
+            raise ScopeUnavailable("request runtime view does not match event")
+        # Historical object.__new__/SimpleNamespace tests predate the atomic
+        # request carrier. A fully initialized production plugin always has this
+        # attribute and must never reconstruct a runtime from ResolvedScope alone.
+        if hasattr(self, "_scope_resolver_v1"):
+            raise ScopeUnavailable("request runtime view is unavailable")
+        resolved = self._event_resolved_scope(event)
+        if (
+            resolved is None
+            or resolved.private_scope_enabled is not True
+            or resolved.scope is None
+        ):
+            raise ScopeUnavailable("resolved private scope is unavailable")
+        binding = self._runtime_binding_for_scope(resolved.scope)
+        token = self._scope_runtime_binding.set(binding)
+        try:
+            yield binding
+        finally:
+            self._scope_runtime_binding.reset(token)
+
+    @contextlib.contextmanager
+    def _bind_request_runtime_view(
+        self,
+        view: RequestRuntimeView,
+        *,
+        request: Any | None = None,
+    ):
+        """Bind only the exact immutable carrier published for this request."""
+
+        if type(view) is not RequestRuntimeView or view.resolved.scope is None:
+            raise ScopeUnavailable("an exact request runtime view is required")
+        if (
+            not self._scope_runtime_registry.is_live_session(view.resolved.scope)
+            or not self._scope_runtime_registry.is_issued_request_view(view)
+        ):
+            raise ScopeUnavailable("request runtime view is stale")
+        binding = _ScopedRuntimeBinding(
+            scope=view.resolved.scope,
+            persona_runtime=view.persona_runtime,
+            session_runtime=view.session_runtime,
+            relation_runtime=view.relation_runtime,
+            subject=view.subject,
+            turn_generation=view.resolved.turn_generation,
+            request_runtime_view=view,
+        )
+        token = self._scope_runtime_binding.set(binding)
+        try:
+            if request is None:
+                yield binding
+            else:
+                with self._scope_runtime_registry.bind_transient_context_sink(
+                    view,
+                    request,
+                ):
+                    yield binding
+        finally:
+            self._scope_runtime_binding.reset(token)
+
+    @contextlib.contextmanager
+    def _bind_runtime_for_scope(self, scope: SessionScope):
+        binding = self._runtime_binding_for_scope(scope)
+        token = self._scope_runtime_binding.set(binding)
+        try:
+            yield binding
+        finally:
+            self._scope_runtime_binding.reset(token)
+
+    def _bound_runtime(self) -> _ScopedRuntimeBinding | None:
+        binding = self._scope_runtime_binding.get()
+        if binding is None:
+            return None
+        # ContextVars propagate into child tasks.  A delayed task retaining an old
+        # binding must not keep writing after release/recreation of that scope.
+        if not self._scope_runtime_registry.is_live_session(binding.scope):
+            return None
+        return binding
+
+    def issue_scoped_api_nonce(self) -> str | None:
+        """Issue a private UI capability only for the currently frozen relation."""
+
+        binding = self._bound_runtime()
+        if binding is None:
+            return None
+        return issue_scoped_api_nonce_for_binding(
+            scoped_api_service_for_plugin(self),
+            binding,
+        )
+
+    def _active_scoped_session_runtime(self) -> ScopedSessionRuntime | None:
+        binding = self._bound_runtime()
+        return binding.session_runtime if binding is not None else None
+
+    def _active_relation_runtime(self) -> Any | None:
+        binding = self._bound_runtime()
+        return binding.relation_runtime if binding is not None else None
+
+    @property
+    def _store(self) -> SessionStateStore:
+        if self.__dict__.get("_scope_runtime_registry") is None:
+            legacy_key = "_registry_free_legacy_store"
+            if legacy_key in self.__dict__:
+                return self.__dict__[legacy_key]
+        binding = self._bound_runtime()
+        if binding is None:
+            raise ScopeUnavailable("private store requires a frozen scope runtime")
+        return binding.persona_runtime.store
+
+    @_store.setter
+    def _store(self, value: SessionStateStore) -> None:
+        """Narrow compatibility seam for registry-free historical test hosts."""
+
+        if self.__dict__.get("_scope_runtime_registry") is not None:
+            raise ScopeUnavailable("scoped plugins cannot replace the private store")
+        self.__dict__["_registry_free_legacy_store"] = value
+
+    @property
+    def _life_simulator(self) -> LifeSimulator:
+        binding = self._bound_runtime()
+        owner = binding.session_runtime.life_simulator if binding is not None else None
+        if owner is None:
+            raise ScopeUnavailable("life simulator requires a frozen scope runtime")
+        return owner
+
+    @property
+    def _rhythm_learner(self) -> RhythmLearner:
+        binding = self._bound_runtime()
+        owner = binding.session_runtime.rhythm_learner if binding is not None else None
+        if owner is None:
+            raise ScopeUnavailable("rhythm learner requires a frozen scope runtime")
+        return owner
+
+    @property
+    def _social_field(self) -> SocialFieldCollector:
+        binding = self._bound_runtime()
+        owner = binding.session_runtime.social_field if binding is not None else None
+        if owner is None:
+            raise ScopeUnavailable("social field requires a frozen scope runtime")
+        return owner
+
+    @property
+    def _background_queue(self) -> BackgroundPostQueue:
+        binding = self._bound_runtime()
+        owner = binding.session_runtime.background_queue if binding is not None else None
+        if owner is None:
+            raise ScopeUnavailable("background queue requires a frozen scope runtime")
+        return owner
+
+    @property
+    def _proactive_scheduler(self) -> ProactiveScheduler:
+        binding = self._bound_runtime()
+        owner = binding.session_runtime.proactive_scheduler if binding is not None else None
+        if owner is None:
+            raise ScopeUnavailable("proactive scheduler requires a frozen scope runtime")
+        return owner
+
+    @property
+    def _self_core(self) -> SelfCore:
+        binding = self._bound_runtime()
+        owner = binding.persona_runtime.self_core if binding is not None else None
+        if owner is None:
+            raise ScopeUnavailable("self core requires a frozen scope runtime")
+        return owner
+
+    @property
+    def _autonomy_scheduler(self) -> AutonomyScheduler:
+        binding = self._bound_runtime()
+        owner = (
+            binding.persona_runtime.autonomy_scheduler
+            if binding is not None
+            else None
+        )
+        if owner is None:
+            raise ScopeUnavailable("autonomy scheduler requires a frozen scope runtime")
+        return owner
+
+    @property
+    def _proactive_scheduler_task(self) -> asyncio.Task | None:
+        binding = self._bound_runtime()
+        if binding is None:
+            raise ScopeUnavailable("proactive scheduler task requires a frozen scope runtime")
+        return binding.session_runtime.lifecycle.proactive_scheduler_task
+
+    @_proactive_scheduler_task.setter
+    def _proactive_scheduler_task(self, task: asyncio.Task | None) -> None:
+        binding = self._bound_runtime()
+        if binding is None:
+            raise ScopeUnavailable("proactive scheduler task requires a frozen scope runtime")
+        binding.session_runtime.lifecycle.proactive_scheduler_task = task
+
+    @property
+    def _background_post_recovered_sessions(self) -> set[str]:
+        binding = self._bound_runtime()
+        if binding is None:
+            raise ScopeUnavailable("background queue recovery requires a frozen scope runtime")
+        return binding.persona_runtime.background_post_recovered_sessions
+
+    @property
+    def _v2core_runtimes(self) -> dict[str, dict[str, Any]]:
+        binding = self._bound_runtime()
+        if binding is None:
+            raise ScopeUnavailable("v2core runtime lookup requires a frozen scope runtime")
+        return binding.persona_runtime.v2core_runtimes
+
+    @property
+    def _memory_system(self) -> MemorySystem | None:
+        binding = self._bound_runtime()
+        if binding is None:
+            return None
+        return self._memory_system_for_scope(binding.scope)
+
     # Host management
     _MAX_HOSTS = 50
     _shared_encoder = None
 
     def _host(self, session_key: str) -> SylanneAlphaHost:
+        binding = self._bound_runtime()
+        if binding is not None:
+            if session_key != binding.scope.storage_token:
+                raise ScopeUnavailable("active host lookup must use frozen storage_token")
+            host = binding.session_runtime.host
+            if not isinstance(host, SylanneAlphaHost):
+                raise ScopeUnavailable("scoped session runtime has no host")
+            return host
+        if hasattr(self, "_scope_runtime_registry"):
+            raise ScopeUnavailable("unbound host lookup requires a frozen scope")
+        return self._legacy_host_for_raw_session(session_key)
+
+    def _legacy_host_for_raw_session(self, session_key: str) -> SylanneAlphaHost:
+        """Explicit compatibility reader; active hooks never call this raw-key path."""
+
         return self._session_ctx.host(session_key)
+
+    def _host_for_scope(self, scope: SessionScope) -> SylanneAlphaHost:
+        runtime = self._scope_runtime_registry.exact_session(scope)
+        if not isinstance(runtime.host, SylanneAlphaHost):
+            raise ScopeUnavailable("scoped session runtime has no host")
+        return runtime.host
 
     def _forget_evolution_session(self, session_key: str) -> None:
         """收口清理某会话的进化层 per-session 状态（CP8-P6 防无界泄漏）。
@@ -1624,11 +2310,25 @@ class EmotionalStatePlugin(Star):
         不到，故这里显式 fan-out。两个触发点：① 会话删除回调 ② host LRU 驱逐
         （驱逐后同 key 重建时 _restored 守卫须先清，否则学习成果不再从 KV 恢复）。
         """
-        for owner in (
-            getattr(self, "_self_core", None),
-            getattr(self, "_autonomy_scheduler", None),
-            getattr(self, "_proactive_bridge", None),
-        ):
+        binding = self._bound_runtime()
+        owners: list[Any] = []
+        if binding is not None:
+            owners.extend(
+                (
+                    binding.persona_runtime.self_core,
+                    binding.persona_runtime.autonomy_scheduler,
+                )
+            )
+        elif not hasattr(self, "_scope_runtime_registry"):
+            # Registry-free compatibility only.
+            owners.extend(
+                (
+                    self.__dict__.get("_self_core"),
+                    self.__dict__.get("_autonomy_scheduler"),
+                )
+            )
+        owners.append(getattr(self, "_proactive_bridge", None))
+        for owner in owners:
             fn = getattr(owner, "forget_session", None)
             if callable(fn):
                 try:
@@ -1637,7 +2337,26 @@ class EmotionalStatePlugin(Star):
                     logger.debug(f"Sylanne forget_session [{session_key}]: {e}")
 
     def _memory_system_for_session(self, session_key: str) -> MemorySystem:
+        binding = self._bound_runtime()
+        if binding is not None:
+            if session_key != binding.scope.storage_token:
+                raise ScopeUnavailable("active memory lookup must use frozen storage_token")
+            return self._memory_system_for_scope(binding.scope)
+        if hasattr(self, "_scope_runtime_registry"):
+            raise ScopeUnavailable("unbound memory lookup requires a frozen scope")
+        return self._legacy_memory_system_for_raw_session(session_key)
+
+    def _legacy_memory_system_for_raw_session(self, session_key: str) -> MemorySystem:
+        """Explicit compatibility reader; production event paths require SessionScope."""
+
         return self._memory_facade.memory_system_for_session(session_key)
+
+    def _memory_system_for_scope(self, scope: SessionScope) -> MemorySystem:
+        runtime = self._scope_runtime_registry.exact_session(scope)
+        memory = runtime.memory_system
+        if not isinstance(memory, MemorySystem):
+            raise ScopeUnavailable("scoped memory factory returned an invalid owner")
+        return memory
 
     def _memory_system_has_content(self, memory_system: Any) -> bool:
         return self._session_ctx.memory_system_has_content(memory_system)
@@ -1653,6 +2372,23 @@ class EmotionalStatePlugin(Star):
         return self._session_ctx.known_webui_sessions(requested)
 
     def _session_key(self, event: Any = None, session_key: str = "") -> str:
+        binding = self._bound_runtime()
+        if binding is not None:
+            if session_key and session_key != binding.scope.storage_token:
+                raise ScopeUnavailable("active session key does not match frozen scope")
+            return binding.scope.storage_token
+        resolved = self._event_resolved_scope(event) if event is not None else None
+        if resolved is not None:
+            if resolved.private_scope_enabled is not True or resolved.scope is None:
+                raise ScopeUnavailable("resolved private scope is unavailable")
+            return resolved.scope.storage_token
+        if hasattr(self, "_scope_runtime_registry"):
+            raise ScopeUnavailable("raw session key requires a frozen scope")
+        return self._legacy_session_key(event, session_key)
+
+    def _legacy_session_key(self, event: Any = None, session_key: str = "") -> str:
+        """Explicit raw-key compatibility reader for plugin stubs without registry."""
+
         return self._session_ctx.session_key(event, session_key)
 
     # Core observe lifecycle
@@ -1950,39 +2686,628 @@ class EmotionalStatePlugin(Star):
     # 消息事件监听：捕获所有消息（含未经 LLM 的），更新时间戳和节奏
     # -----------------------------------------------------------------------
 
-    def _register_inbound_event_once(self, event: Any) -> bool:
-        return register_inbound_event_once(self, event)
+    def _register_inbound_duplicate(self, event: Any) -> bool:
+        """Register the inbound delivery before any transport or identity read."""
 
-    @staticmethod
-    def _event_extra(event: Any, key: str, default: Any = None) -> Any:
-        return event_extra(event, key, default)
+        get_extra = getattr(event, "get_extra", None)
+        set_extra = getattr(event, "set_extra", None)
+        if callable(get_extra):
+            try:
+                if get_extra("_syl_inbound_registered", False):
+                    return bool(get_extra("_syl_inbound_duplicate", False))
+            except Exception:
+                pass
 
-    def _astrbot_active_follow_up_target(self, event: Any) -> tuple[bool, str]:
-        return active_follow_up_target(event)
+        duplicate = False
+        key = ""
+        seen: Any = None
+        registered_new = False
+        try:
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            mid = getattr(getattr(event, "message_obj", None), "message_id", None)
+            key = (
+                umo + "\x00" + mid
+                if umo and isinstance(mid, str) and mid.strip()
+                else ""
+            )
+            seen = getattr(self, "_inbound_seen", None)
+            # Only pre-register when the event can carry ownership into
+            # on_llm_request. Otherwise the legacy gate below would mistake this
+            # first legitimate pass for a redelivery.
+            if key and seen is not None and callable(set_extra):
+                duplicate = key in seen
+                if not duplicate:
+                    seen[key] = time.time()
+                    registered_new = True
+        except Exception:
+            logger.warning(
+                "Sylanne inbound epoch registration failed open",
+                exc_info=True,
+            )
 
-    def _commit_inbound_delivery_epoch(
+        if callable(set_extra):
+            try:
+                set_extra("_syl_inbound_duplicate", duplicate)
+                # Commit marker last: _inbound_dup_gate only trusts the pair
+                # after both values have been written.
+                set_extra("_syl_inbound_registered", True)
+            except Exception:
+                registered = False
+                if callable(get_extra):
+                    try:
+                        registered = bool(
+                            get_extra("_syl_inbound_registered", False)
+                        )
+                    except Exception:
+                        pass
+                if registered_new and not registered and seen is not None:
+                    try:
+                        seen.pop(key, None)
+                    except Exception:
+                        pass
+
+        if duplicate:
+            return True
+        return False
+
+    def _advance_transport_delivery_fence(
         self,
         event: Any,
-        session_key: str,
-        *,
-        reason: str,
-    ) -> int:
-        return commit_inbound_delivery_epoch(
+        transport_or_session: Any,
+    ) -> None:
+        """Advance one exact scoped delivery fence without creating private state."""
+
+        set_extra = getattr(event, "set_extra", None)
+        registry = getattr(self, "_scope_runtime_registry", None)
+        if registry is not None:
+            owner = registry.transport_owner_or_none(transport_or_session)
+            if owner is None:
+                return
+            store = owner.persona_runtime.store
+            session_key = owner.scope.storage_token
+        else:
+            # Narrow registry-free compatibility for historical test doubles.
+            if type(transport_or_session) is not str or not transport_or_session:
+                return
+            store = getattr(self, "_store", None)
+            if store is None:
+                return
+            session_key = transport_or_session
+        epochs = getattr(store, "conversation_input_epoch", None)
+        input_epoch = 0
+        if epochs is not None:
+            try:
+                input_epoch = int(epochs.get(session_key, 0) or 0) + 1
+                epochs.set(session_key, input_epoch)
+            except Exception:
+                logger.warning(
+                    "Sylanne inbound epoch advance failed: session=%s",
+                    session_key,
+                    exc_info=True,
+                )
+                input_epoch = 0
+        if callable(set_extra):
+            try:
+                set_extra("_syl_input_epoch", input_epoch)
+            except Exception:
+                pass
+
+        active_turns = getattr(store, "segmented_delivery_turns", None)
+        if active_turns is None:
+            return
+        try:
+            turn = active_turns.get(session_key)
+            interrupt = getattr(turn, "interrupt", None)
+            if callable(interrupt):
+                interrupt()
+        except Exception:
+            logger.warning(
+                "Sylanne active delivery interrupt failed: session=%s",
+                session_key,
+                exc_info=True,
+            )
+
+    def _advance_inbound_delivery_epoch(self, event: Any, session_key: str) -> None:
+        """Compatibility wrapper for callers that need registration plus fence."""
+
+        if EmotionalStatePlugin._register_inbound_duplicate(self, event):
+            return
+        EmotionalStatePlugin._advance_transport_delivery_fence(
             self,
             event,
             session_key,
-            reason=reason,
         )
 
-    def _advance_inbound_delivery_epoch(self, event: Any, session_key: str) -> None:
-        advance_inbound_delivery_epoch(self, event, session_key)
+    def register_adapter_account_proof_provider(self, provider: Any) -> None:
+        """Install the sole live account-proof source used by scope delivery."""
 
-    def _register_or_defer_inbound_delivery_epoch(
+        if not callable(getattr(provider, "current", None)):
+            raise ValueError("account proof provider must expose current(platform_id)")
+        self._scope_account_proof_provider = provider
+        resolver = getattr(self, "_scope_resolver_v1", None)
+        if resolver is not None:
+            resolver._account_proofs = provider
+            resolver.catalog._account_proofs = provider
+
+    def set_adapter_account_proof_provider(self, provider: Any) -> None:
+        self.register_adapter_account_proof_provider(provider)
+
+    def register_scope_account_proof_provider(self, provider: Any) -> None:
+        self.register_adapter_account_proof_provider(provider)
+
+    def _configure_scope_delivery(self, resolver: ScopeResolver) -> None:
+        outbox = getattr(self, "_scope_delivery_outbox", None)
+        if (
+            type(outbox) is not DeliveryOutbox
+            or outbox.repository is not resolver._repository
+            or outbox.catalog is not resolver.catalog
+        ):
+            outbox = DeliveryOutbox(resolver._repository, resolver.catalog)
+            self._scope_delivery_outbox = outbox
+            self._scope_delivery_worker = None
+        worker = getattr(self, "_scope_delivery_worker", None)
+        if type(worker) is DeliveryOutboxWorker:
+            return
+        context = getattr(self, "context", None)
+        self._scope_delivery_worker = DeliveryOutboxWorker(
+            outbox,
+            lambda: AstrBotAccountAwareTransport(
+                context,
+                self._scope_account_proof_provider,
+            ),
+            worker_id="scope-delivery-worker",
+        )
+
+    def _start_scope_delivery_worker(self) -> None:
+        outbox = getattr(self, "_scope_delivery_outbox", None)
+        worker = getattr(self, "_scope_delivery_worker", None)
+        if type(outbox) is not DeliveryOutbox or type(worker) is not DeliveryOutboxWorker:
+            return
+        if worker.running:
+            return
+        # The recovery ordering is intentional: classify a prior dispatch,
+        # expire stale queued work, then permit new adapter calls.
+        outbox.recover_after_restart()
+        outbox.expire()
+        worker.start()
+
+    def enqueue_scoped_proactive_intent(
+        self,
+        scope: SessionScope,
+        *,
+        text: str,
+        idempotent: bool,
+        expires_at_ms: int | None = None,
+    ) -> Any | None:
+        """Queue one proactive intent for an already-live exact scope only."""
+
+        if getattr(self, "_scope_delivery_accepting", True) is not True:
+            return None
+        if type(scope) is not SessionScope:
+            return None
+        resolver = self._scope_resolver_instance()
+        registry = getattr(self, "_scope_runtime_registry", None)
+        outbox = getattr(self, "_scope_delivery_outbox", None)
+        worker = getattr(self, "_scope_delivery_worker", None)
+        if (
+            resolver is None
+            or registry is None
+            or type(outbox) is not DeliveryOutbox
+            or type(worker) is not DeliveryOutboxWorker
+        ):
+            return None
+        try:
+            self._start_scope_delivery_worker()
+        except RuntimeError:
+            # A pre-initialize caller may enqueue, but cannot create an asyncio
+            # worker without the host loop.  The durable item remains pending.
+            pass
+        gateway = ScopedDeliveryGateway(
+            scope,
+            registry,
+            outbox,
+            wake=worker.wake,
+        )
+        return gateway.enqueue(
+            text=text,
+            idempotent=idempotent,
+            expires_at_ms=expires_at_ms,
+        )
+
+    def _enqueue_scoped_proactive_intent(
+        self,
+        scope: SessionScope,
+        *,
+        text: str,
+        idempotent: bool,
+        expires_at_ms: int | None = None,
+    ) -> Any | None:
+        return self.enqueue_scoped_proactive_intent(
+            scope,
+            text=text,
+            idempotent=idempotent,
+            expires_at_ms=expires_at_ms,
+        )
+
+    def _scope_resolver_instance(self) -> ScopeResolver | None:
+        resolver = getattr(self, "_scope_resolver_v1", None)
+        if resolver is not None:
+            registry = getattr(self, "_scope_runtime_registry", None)
+            repository = getattr(resolver, "_repository", None)
+            if registry is not None and repository is not None:
+                if registry.repository is None:
+                    registry.bind_repository(repository)
+                elif registry.repository is not repository:
+                    registry.bind_repository(repository)
+            try:
+                self._configure_scope_delivery(resolver)
+            except Exception:
+                self._scope_delivery_outbox = None
+                self._scope_delivery_worker = None
+            return resolver
+        context = getattr(self, "context", None)
+        if (
+            context is None
+            or not hasattr(context, "get_config")
+            or not hasattr(context, "persona_manager")
+        ):
+            return None
+        root = _sylanne_infra.resolve_scope_v1_root()
+        provider = getattr(self, "_scope_account_proof_provider", None)
+        if not callable(getattr(provider, "current", None)):
+            provider = NoAdapterAccountProofProvider()
+            self._scope_account_proof_provider = provider
+        resolver = ScopeResolver.for_context(
+            context,
+            root,
+            account_proofs=provider,
+        )
+        self._scope_resolver_v1 = resolver
+        try:
+            self._configure_scope_delivery(resolver)
+        except Exception:
+            self._scope_delivery_outbox = None
+            self._scope_delivery_worker = None
+        registry = getattr(self, "_scope_runtime_registry", None)
+        if registry is not None:
+            if registry.repository is None:
+                registry.bind_repository(resolver._repository)
+            elif registry.repository is not resolver._repository:
+                registry.bind_repository(resolver._repository)
+        return resolver
+
+    def _begin_scope_transport(self, event: Any) -> bool:
+        """Persist one resolving transport turn before any legacy private state."""
+
+        try:
+            resolver = EmotionalStatePlugin._scope_resolver_instance(self)
+        except Exception:
+            resolver = None
+        if resolver is None:
+            ScopeResolver.set_event_extra(
+                event,
+                "_sylanne_transport_scope_v1",
+                ResolvedTransportScope.disabled("scope_resolver_unavailable"),
+            )
+            return False
+        transport = resolver.resolve_transport(event)
+        if transport.private_scope_enabled is not True:
+            resolver.set_event_extra(event, "_sylanne_transport_scope_v1", transport)
+            return False
+        binding = resolver.delivery_binding(event, transport)
+        if binding is None:
+            return False
+
+        def publish(turn: Any) -> bool:
+            if not resolver.set_event_extra(
+                event, "_sylanne_transport_scope_v1", transport
+            ):
+                return False
+            if resolver.set_event_extra(event, "_sylanne_transport_turn_v1", turn):
+                return True
+            resolver.set_event_extra(
+                event,
+                "_sylanne_transport_scope_v1",
+                ResolvedTransportScope.disabled("transport_attachment_failed"),
+            )
+            return False
+
+        try:
+            resolver.catalog.begin_turn(transport, binding, publish=publish)
+        except Exception:
+            resolver.set_event_extra(
+                event,
+                "_sylanne_transport_scope_v1",
+                ResolvedTransportScope.disabled("transport_turn_unverified"),
+            )
+            resolver.set_event_extra(event, "_sylanne_transport_turn_v1", None)
+            return False
+        return True
+
+    def _verified_transport_turn(
         self,
         event: Any,
-        session_key: str,
-    ) -> None:
-        register_or_defer_inbound_delivery_epoch(self, event, session_key)
+    ) -> tuple[ScopeResolver, ResolvedTransportScope, TransportTurn] | None:
+        """Return only an exact attached resolving turn backed by current authority."""
+
+        try:
+            resolver = EmotionalStatePlugin._scope_resolver_instance(self)
+            transport = ScopeResolver._event_extra(
+                event,
+                "_sylanne_transport_scope_v1",
+            )
+            turn = ScopeResolver._event_extra(
+                event,
+                "_sylanne_transport_turn_v1",
+            )
+            if (
+                resolver is None
+                or type(transport) is not ResolvedTransportScope
+                or transport.private_scope_enabled is not True
+                or transport.bot_ref is None
+                or transport.session_ref is None
+                or type(turn) is not TransportTurn
+                or turn.turn_state != "resolving"
+            ):
+                return None
+            session = getattr(event, "session", None)
+            canonical_umo = str(session) if session is not None else ""
+            event_umo = getattr(event, "unified_msg_origin", None)
+            session_id = getattr(session, "session_id", None)
+            event_session_id = getattr(event, "session_id", None)
+            if (
+                not canonical_umo
+                or type(event_umo) is not str
+                or event_umo != canonical_umo
+                or type(session_id) is not str
+                or not session_id
+                or type(event_session_id) is not str
+                or event_session_id != session_id
+                or resolver.resolve_transport(event) != transport
+                or resolver.catalog.binding_generation_for_bot_ref(
+                    transport.bot_ref
+                )
+                != transport.bot_ref.generation
+                or not resolver.catalog.matches_resolving_turn(
+                    transport,
+                    turn,
+                )
+            ):
+                return None
+            return resolver, transport, turn
+        except Exception:
+            return None
+
+    def _attach_turn_subject_proof(
+        self,
+        event: Any,
+        raw_identity: object,
+    ) -> bool:
+        """Convert one ephemeral adapter identity into an opaque turn proof."""
+
+        verified_turn = EmotionalStatePlugin._verified_transport_turn(self, event)
+        if verified_turn is None:
+            return False
+        resolver, transport, turn = verified_turn
+        existing = ScopeResolver._event_extra(event, "_sylanne_turn_subject_v1")
+        if type(existing) is TurnSubjectProof:
+            return (
+                existing.transport_session_token == turn.session_ref
+                and existing.turn_generation == turn.turn_generation
+            )
+
+        subject = None
+        try:
+            if type(raw_identity) is VerifiedSubjectInput:
+                if transport.bot_ref is not None:
+                    subject = resolver._identity.authenticated_subject(
+                        transport.bot_ref,
+                        raw_identity,
+                    )
+            elif type(raw_identity) is dict:
+                sender_id = raw_identity.get("sender_id")
+                platform_realm = raw_identity.get("platform")
+                if (
+                    type(sender_id) is str
+                    and sender_id
+                    and type(platform_realm) is str
+                    and platform_realm
+                    and transport.bot_ref is not None
+                ):
+                    verified_subject = VerifiedSubjectInput(
+                        platform_realm=platform_realm,
+                        subject_id=sender_id,
+                    )
+                    subject = resolver._identity.authenticated_subject(
+                        transport.bot_ref,
+                        verified_subject,
+                    )
+        except Exception:
+            subject = None
+
+        proof = TurnSubjectProof(
+            transport_session_token=turn.session_ref,
+            turn_generation=turn.turn_generation,
+            subject=subject,
+        )
+        if not resolver.set_event_extra(event, "_sylanne_turn_subject_v1", proof):
+            return False
+        return True
+
+    def _verified_turn_subject_proof(
+        self,
+        event: Any,
+    ) -> tuple[
+        ScopeResolver,
+        ResolvedTransportScope,
+        TransportTurn,
+        TurnSubjectProof,
+    ] | None:
+        """Validate the exact transport turn and subject carrier before Persona IO."""
+
+        verified_turn = EmotionalStatePlugin._verified_transport_turn(self, event)
+        if verified_turn is None:
+            return None
+        resolver, transport, turn = verified_turn
+        proof = ScopeResolver._event_extra(event, "_sylanne_turn_subject_v1")
+        if (
+            type(proof) is not TurnSubjectProof
+            or transport.session_ref is None
+            or proof.transport_session_token != transport.session_ref.token
+            or proof.transport_session_token != turn.session_ref
+            or proof.turn_generation != turn.turn_generation
+            or (
+                proof.subject is not None
+                and proof.subject.relation_ref.bot_ref != transport.bot_ref
+            )
+        ):
+            return None
+        return resolver, transport, turn, proof
+
+    def _publish_turn_subject_proof_mismatch(self, event: Any) -> ResolvedScope:
+        """Publish one stable fail-closed result without touching private runtimes."""
+
+        disabled = ResolvedScope.disabled(
+            "turn_subject_proof_mismatch",
+            resolved_at_ms=time.time_ns() // 1_000_000,
+        )
+        ScopeResolver.set_event_extra(event, "_sylanne_runtime_view_v1", None)
+        ScopeResolver.set_event_extra(event, "_sylanne_turn_subject_v1", None)
+        ScopeResolver.set_event_extra(
+            event,
+            "_sylanne_resolved_scope_v1",
+            disabled,
+        )
+        return disabled
+
+    def _verified_legacy_delivery_locator(
+        self,
+        event: Any,
+    ) -> str | None:
+        """Prove the temporary raw delivery key from this exact canonical event."""
+
+        try:
+            session = getattr(event, "session", None)
+            canonical_umo = str(session) if session is not None else ""
+            event_umo = getattr(event, "unified_msg_origin", None)
+            session_ctx = getattr(self, "_session_ctx", None)
+            derive = getattr(session_ctx, "session_key", None)
+            if (
+                not canonical_umo
+                or type(event_umo) is not str
+                or event_umo != canonical_umo
+                or not callable(derive)
+            ):
+                return None
+            locator = derive(event)
+            if type(locator) is not str or not locator or locator == "default":
+                return None
+            session_id = getattr(session, "session_id", "")
+            event_session_id = getattr(event, "session_id", "")
+            if (
+                type(session_id) is not str
+                or type(event_session_id) is not str
+                or (event_session_id and event_session_id != session_id)
+            ):
+                return None
+            base = session_id if session_id else event_umo
+            sender = str(
+                getattr(event, "sender_id", "")
+                or getattr(event, "user_id", "")
+                or ""
+            )
+            expected = (
+                f"{base}:{sender}"
+                if sender and base != "default"
+                else base
+            )
+            if not expected or expected == "default" or locator != expected:
+                return None
+            return locator
+        except Exception:
+            return None
+
+    def _on_transport_ready_safety(self, event: Any) -> None:
+        """Run only event/delivery safety work before AstrBot's agent lock."""
+
+        verified = EmotionalStatePlugin._verified_transport_turn(self, event)
+        if verified is None:
+            return
+        _resolver, transport, _turn = verified
+        # Event-local stream mode must be fixed before AgentSubStage reads it.
+        try:
+            realtime_enabled, realtime_intercept = realtime_flags(self.config)
+            if realtime_enabled and realtime_intercept:
+                setter = getattr(event, "set_extra", None)
+                if callable(setter):
+                    setter("enable_streaming", False)
+        except Exception:
+            pass
+
+        if EmotionalStatePlugin._verified_transport_turn(self, event) is None:
+            return
+        if getattr(self, "_scope_runtime_registry", None) is not None:
+            EmotionalStatePlugin._advance_transport_delivery_fence(
+                self,
+                event,
+                transport,
+            )
+            return
+        # Registry-free compatibility only. Production never derives private
+        # ownership from this raw locator.
+        locator = EmotionalStatePlugin._verified_legacy_delivery_locator(
+            self,
+            event,
+        )
+        if locator is None:
+            return
+        EmotionalStatePlugin._advance_transport_delivery_fence(
+            self,
+            event,
+            locator,
+        )
+
+    async def _prepare_scope_persona(
+        self,
+        event: Any,
+        request: Any,
+    ) -> PreparedPersonaScope | ResolvedScope:
+        try:
+            resolver = EmotionalStatePlugin._scope_resolver_instance(self)
+        except Exception:
+            resolver = None
+        if resolver is None:
+            disabled = ResolvedScope.disabled(
+                "scope_resolver_unavailable",
+                resolved_at_ms=time.time_ns() // 1_000_000,
+            )
+            ScopeResolver.set_event_extra(
+                event,
+                "_sylanne_resolved_scope_v1",
+                disabled,
+            )
+            return disabled
+        return await resolver.prepare(event, request)
+
+    async def _freeze_scope_persona(self, event: Any, request: Any) -> ResolvedScope:
+        try:
+            resolver = EmotionalStatePlugin._scope_resolver_instance(self)
+        except Exception:
+            resolver = None
+        if resolver is None:
+            disabled = ResolvedScope.disabled(
+                "scope_resolver_unavailable",
+                resolved_at_ms=time.time_ns() // 1_000_000,
+            )
+            ScopeResolver.set_event_extra(
+                event,
+                "_sylanne_resolved_scope_v1",
+                disabled,
+            )
+            return disabled
+        if type(request) is PreparedPersonaScope:
+            return resolver.freeze(event, request)
+        return await resolver.resolve(event, request)
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: Any, *args: Any, **kwargs: Any):
@@ -1993,63 +3318,126 @@ class EmotionalStatePlugin(Star):
         `handler(event, *args, **kwargs)`）。签名固定为 (event) 会在这些版本上报
         TypeError "takes 2 positional but N given"，故一律用 *args/**kwargs 兜住，
         本插件只用 event。"""
+        ingress_marker = "_sylanne_transport_ingress_v1"
+        ingress_state = ScopeResolver._event_extra(event, ingress_marker)
+        if ingress_state is not None:
+            return
+        if not ScopeResolver.set_event_extra(event, ingress_marker, "running"):
+            return
         try:
-            # M4a（realtime 完整重做 Model-D）：即时聊天接管开启时强制关闭本轮
-            # 流式，让响应侧走非流式档（on_decorating_result 才够得着、能抑制
-            # 框架重发）。此处（filter.event_message_type(ALL)，由 ProcessStage
-            # 内 star_request_sub_stage 触发）确定运行在 AgentRequestSubStage/
-            # InternalAgentSubStage 读取 event.get_extra("enable_streaming")
-            # （internal.py:169）之前——见 process_stage/stage.py 的调用顺序：
-            # star_request_sub_stage.process 先于 agent_sub_stage.process。
-            # 默认两开关皆关时这里零行为（不碰 enable_streaming，流式配置原样）。
-            try:
-                _realtime_enabled, _realtime_intercept = realtime_flags(self.config)
-                if _realtime_enabled and _realtime_intercept:
-                    set_extra = getattr(event, "set_extra", None)
-                    if callable(set_extra):
-                        set_extra("enable_streaming", False)
-            except Exception:
-                pass
-            session_key = self._session_ctx.session_key(event)
-            # Call through the class so narrow plugin-host stubs that bind only
-            # on_message still exercise the real hook without needing to copy
-            # every private helper onto their namespace.
-            EmotionalStatePlugin._register_or_defer_inbound_delivery_epoch(
+            # A replay must stop before either resolver transport work or the
+            # authenticated identity read.  The later scoped hook keeps the
+            # same registration check as a defense in depth for alternate
+            # framework entry paths.
+            if EmotionalStatePlugin._register_inbound_duplicate(self, event):
+                ScopeResolver.set_event_extra(
+                    event,
+                    "_sylanne_legacy_on_message_v1",
+                    "duplicate",
+                )
+                stop_event = getattr(event, "stop_event", None)
+                if callable(stop_event):
+                    try:
+                        stop_event()
+                    except Exception:
+                        pass
+                ScopeResolver.set_event_extra(event, ingress_marker, "complete")
+                return
+            transport_ready = EmotionalStatePlugin._begin_scope_transport(self, event)
+            if transport_ready is not True:
+                ScopeResolver.set_event_extra(event, ingress_marker, "failed")
+                return
+            EmotionalStatePlugin._on_transport_ready_safety(self, event)
+        except Exception:
+            ScopeResolver.set_event_extra(event, ingress_marker, "failed")
+            return
+        ScopeResolver.set_event_extra(event, ingress_marker, "complete")
+
+    def _registry_free_legacy_identity_stash(
+        self,
+        event: Any,
+        session_key: str,
+    ) -> None:
+        """Compatibility for historical test hosts without scoped runtime owners."""
+
+        if getattr(self, "_scope_runtime_registry", None) is not None:
+            return
+        try:
+            identity = self._session_ctx.resolve_authenticated_identity(event)
+            self._store.stash_authenticated_identity(session_key, identity)
+        except Exception:
+            pass
+
+    async def _on_message_after_scope_frozen(
+        self,
+        event: Any,
+        resolved_scope: ResolvedScope,
+    ) -> bool:
+        """Run legacy private-state message work only after scope publication."""
+
+        if (
+            type(resolved_scope) is not ResolvedScope
+            or resolved_scope.private_scope_enabled is not True
+            or ScopeResolver._event_extra(
+                event,
+                "_sylanne_resolved_scope_v1",
+            )
+            is not resolved_scope
+        ):
+            return False
+        try:
+            resolver = EmotionalStatePlugin._scope_resolver_instance(self)
+            if (
+                resolver is None
+                or not resolver._matches_published_scope(event, resolved_scope)
+            ):
+                return False
+        except Exception:
+            return False
+        marker = "_sylanne_legacy_on_message_v1"
+        marker_state = ScopeResolver._event_extra(event, marker)
+        if marker_state == "complete":
+            return True
+        if marker_state is not None:
+            return False
+        if not ScopeResolver.set_event_extra(event, marker, "running"):
+            return False
+        try:
+            if EmotionalStatePlugin._register_inbound_duplicate(self, event):
+                ScopeResolver.set_event_extra(event, marker, "duplicate")
+                stop_event = getattr(event, "stop_event", None)
+                if callable(stop_event):
+                    try:
+                        stop_event()
+                    except Exception:
+                        pass
+                return False
+            scope = resolved_scope.scope
+            if scope is None:
+                return False
+            session_key = scope.storage_token
+            now = time.time()
+            # Production consumed authenticated sender material in on_message and
+            # retained only an opaque TurnSubjectProof.  The old raw identity stash
+            # survives solely for registry-free historical test hosts.
+            EmotionalStatePlugin._registry_free_legacy_identity_stash(
                 self,
                 event,
                 session_key,
             )
-            now = time.time()
-            # v2.5.0 slice-1b（design §8 BLOCKER B1，全矩阵扎实版修正）：主判据
-            # 消费——供三写点（货架写/profile 软同步/出生播种，本 slice 货架写
-            # 已接线）将来只读的"已认证身份记录"。on_message 覆盖
-            # EventMessageType.ALL（含未触发 LLM 的群聊噪音），比 on_llm_request
-            # 覆盖面更广。
-            # 取值改用 `SessionContext.resolve_authenticated_identity`——只用
-            # event 的公开方法（get_sender_id/get_message_type/get_group_id/
-            # session_id），不再复用 `raw_bucket_sender_id`（只读裸属性
-            # sender_id/user_id，真实 AstrBot 事件从不设这两个属性，在生产上
-            # 对**所有**事件恒返回空串，曾让本暂存层永久哑火——连本该天生
-            # per-user 的私聊都不例外，详见两个方法各自的文档字符串）。
-            # `stash_authenticated_identity` 内部叠加次判据（发言人一致性坍缩）
-            # 与"已坍缩 session_key 永久 SKIP"逻辑，本处只负责主判据求值 + 落地。
-            # 独立 try/except：本插桩失败绝不能连带吞掉本函数其余的 tempo/proactive
-            # 记录逻辑（与下方 rhythm_learner 支路同一收敛纪律）。
-            try:
-                identity = self._session_ctx.resolve_authenticated_identity(event)
-                self._store.stash_authenticated_identity(session_key, identity)
-            except Exception:
-                pass
             # 更新最后消息时间，供 proactive scheduler 计算沉默时长
             self._store.last_user_message_time.set(session_key, now)
             sched = getattr(self, "_proactive_scheduler", None)
-            if sched is not None and hasattr(sched, "record_message_time"):
-                sched.record_message_time(session_key, now)
+            if sched is not None and hasattr(sched, "record_scoped_message_time"):
+                sched.record_scoped_message_time(now)
             # T2-07①：喂主动反馈回路——用户真的回应了，把该会话所有 pending
             # outreach 标 answered（此前只有超时会标 unanswered，她学不到"他回我了"）。
             life_sim = getattr(self, "_life_simulator", None)
-            if life_sim is not None and hasattr(life_sim, "record_user_response"):
-                life_sim.record_user_response(session_key, now)
+            if life_sim is not None and hasattr(
+                life_sim,
+                "record_scoped_user_response",
+            ):
+                life_sim.record_scoped_user_response(now)
             # T1-04①：复活 RhythmLearner 画像学习（内部已含 _record_tempo，
             # 始终记录 tempo、亲密度不够时跳过画像学习——不再只调低层 _record_tempo）。
             # 用 hosts.get() 非创建式查询：on_message 对 EventMessageType.ALL 触发，
@@ -2068,8 +3456,10 @@ class EmotionalStatePlugin(Star):
                     # 宿主/内核链路部分初始化时的任何异常都退化为 engine_obs={}，
                     # 绝不能让 tempo 记录（observe_user_message）跟着一起被吞掉。
                     engine_obs = {}
-                self._rhythm_learner.observe_user_message(
-                    session_key, message_text, now, engine_obs
+                self._rhythm_learner.observe_scoped_user_message(
+                    text=message_text,
+                    timestamp=now,
+                    engine_observation=engine_obs,
                 )
                 # T2-06④：早安/晚安等重复问候模式观察（关键词兜底识别，见
                 # session_context._detect_greeting_ritual_pattern 的偏差说明）。
@@ -2081,7 +3471,9 @@ class EmotionalStatePlugin(Star):
             # T1-04②：节流落盘节奏学习器状态（镜像 life_sim 的节流落盘模式）。
             await self._rhythm_learner_throttled_save()
         except Exception:
-            pass
+            ScopeResolver.set_event_extra(event, marker, "failed")
+            return False
+        return ScopeResolver.set_event_extra(event, marker, "complete")
 
     # on_llm_request 钩子：在 LLM 请求发出前注入情感状态上下文
     @filter.on_llm_request(desc="注入 Sylanne 情感计算上下文到 LLM prompt")
@@ -2090,13 +3482,27 @@ class EmotionalStatePlugin(Star):
     ) -> None:
         # *args/**kwargs：兜住 AstrBot 各版本多传的钩子参数（req 仍固定为第 2 位，
         # 见 4.26.5 文档 (event, req: ProviderRequest)）；否则新版报 TypeError。
+        ingress_marker = "_sylanne_request_ingress_v1"
+        ingress_state = ScopeResolver._event_extra(event, ingress_marker)
+        if ingress_state is not None:
+            return
+        if not ScopeResolver.set_event_extra(event, ingress_marker, "running"):
+            return
         try:
             await self._on_llm_request_inner(event, request)
         except Exception as e:
+            ScopeResolver.set_event_extra(event, ingress_marker, "failed")
             logger.error(f"Sylanne on_llm_request error: {e}", exc_info=True)
             return
+        ScopeResolver.set_event_extra(event, ingress_marker, "complete")
 
     def _session_lock(self, session_key: str) -> asyncio.Lock:
+        binding = self._bound_runtime()
+        if binding is None:
+            if hasattr(self, "_scope_runtime_registry"):
+                raise ScopeUnavailable("unbound session lock requires a frozen scope")
+        elif session_key != binding.scope.storage_token:
+            raise ScopeUnavailable("active session lock must use frozen storage_token")
         return self._session_ctx.session_lock(session_key)
 
     def _inbound_dup_gate(self, event: Any) -> bool:
@@ -2144,6 +3550,196 @@ class EmotionalStatePlugin(Star):
             return False
 
     async def _on_llm_request_inner(self, event: Any, request: Any) -> None:
+        registry = getattr(self, "_scope_runtime_registry", None)
+        strict_subject_carrier = registry is not None or hasattr(
+            self,
+            "_scope_resolver_v1",
+        )
+        subject_carrier = None
+        if strict_subject_carrier and EmotionalStatePlugin._verified_transport_turn(
+            self,
+            event,
+        ) is None:
+            EmotionalStatePlugin._publish_turn_subject_proof_mismatch(self, event)
+            return
+        prepared = await EmotionalStatePlugin._prepare_scope_persona(
+            self,
+            event,
+            request,
+        )
+        if type(prepared) is ResolvedScope:
+            resolved_scope = prepared
+            if (
+                resolved_scope.private_scope_enabled is not True
+                or resolved_scope.scope is None
+            ):
+                return
+        else:
+            if strict_subject_carrier:
+                # This is the sole production sender read. Persona/config has
+                # already prepared successfully, while no scope/runtime/private
+                # owner exists yet. The raw value survives only long enough to
+                # mint the opaque turn proof used by the freeze step below.
+                try:
+                    raw_identity = self._session_ctx.resolve_authenticated_identity(
+                        event
+                    )
+                except Exception:
+                    raw_identity = None
+                if not EmotionalStatePlugin._attach_turn_subject_proof(
+                    self,
+                    event,
+                    raw_identity,
+                ):
+                    EmotionalStatePlugin._publish_turn_subject_proof_mismatch(
+                        self,
+                        event,
+                    )
+                    return
+                raw_identity = None
+                subject_carrier = EmotionalStatePlugin._verified_turn_subject_proof(
+                    self,
+                    event,
+                )
+                if subject_carrier is None:
+                    EmotionalStatePlugin._publish_turn_subject_proof_mismatch(
+                        self,
+                        event,
+                    )
+                    return
+            resolved_scope = await EmotionalStatePlugin._freeze_scope_persona(
+                self,
+                event,
+                prepared,
+            )
+        if strict_subject_carrier and subject_carrier is None:
+            EmotionalStatePlugin._publish_turn_subject_proof_mismatch(self, event)
+            return
+        if (
+            type(resolved_scope) is not ResolvedScope
+            or resolved_scope.private_scope_enabled is not True
+            or resolved_scope.scope is None
+        ):
+            return
+
+        request_view: RequestRuntimeView | None = None
+        if strict_subject_carrier:
+            assert subject_carrier is not None
+            resolver, transport, _resolving_turn, proof = subject_carrier
+            frozen_turn = ScopeResolver._event_extra(
+                event,
+                "_sylanne_transport_turn_v1",
+            )
+            scope = resolved_scope.scope
+            if (
+                ScopeResolver._event_extra(event, "_sylanne_turn_subject_v1")
+                is not proof
+                or type(frozen_turn) is not TransportTurn
+                or frozen_turn.turn_state != "frozen"
+                or frozen_turn.session_ref != proof.transport_session_token
+                or frozen_turn.turn_generation != proof.turn_generation
+                or resolved_scope.turn_generation != proof.turn_generation
+                or scope.session_ref.token != proof.transport_session_token
+                or transport.bot_ref != scope.bot_ref
+                or transport.session_ref != scope.session_ref
+                or not resolver._matches_published_scope(event, resolved_scope)
+            ):
+                EmotionalStatePlugin._publish_turn_subject_proof_mismatch(self, event)
+                return
+            if registry is not None:
+                try:
+                    persona_runtime = EmotionalStatePlugin._schedule_persona_genesis_before_view(
+                        self,
+                        registry,
+                        scope,
+                        resolved_scope.persona_source,
+                        turn_generation=resolved_scope.turn_generation,
+                    )
+                    if persona_runtime is None:
+                        return
+                    relation_runtime = registry.relation_for(scope, proof.subject)
+                    request_view = registry.issue_request_view(
+                        resolved_scope,
+                        relation_runtime=relation_runtime,
+                        subject=proof.subject,
+                    )
+                except Exception:
+                    EmotionalStatePlugin._publish_turn_subject_proof_mismatch(
+                        self,
+                        event,
+                    )
+                    return
+                if not resolver.set_event_extra(
+                    event,
+                    "_sylanne_runtime_view_v1",
+                    request_view,
+                ):
+                    EmotionalStatePlugin._publish_turn_subject_proof_mismatch(
+                        self,
+                        event,
+                    )
+                    return
+                if not resolver.set_event_extra(
+                    event,
+                    "_sylanne_turn_subject_v1",
+                    None,
+                ):
+                    EmotionalStatePlugin._publish_turn_subject_proof_mismatch(
+                        self,
+                        event,
+                    )
+                    return
+
+        async def _run_bound_request() -> None:
+            legacy_ready = await EmotionalStatePlugin._on_message_after_scope_frozen(
+                self,
+                event,
+                resolved_scope,
+            )
+            if legacy_ready is not True:
+                return
+            if getattr(self, "_scope_runtime_registry", None) is not None:
+                if not EmotionalStatePlugin._publish_transport_runtime_owner(
+                    self,
+                    event,
+                    resolved_scope,
+                ):
+                    return
+                EmotionalStatePlugin._start_life_simulator(self)
+            return await EmotionalStatePlugin._on_scope_ready_llm_request(
+                self,
+                event,
+                request,
+            )
+
+        if request_view is not None:
+            with EmotionalStatePlugin._bind_request_runtime_view(
+                self,
+                request_view,
+                request=request,
+            ):
+                return await _run_bound_request()
+
+        binder = getattr(self, "_bind_runtime_for_event", None)
+        if not callable(binder):
+            # Only narrow registry-free test doubles may retain the old direct
+            # hook seam.  A real scoped plugin without a binding must no-op.
+            if registry is not None:
+                return
+            return await _run_bound_request()
+        try:
+            with binder(event):
+                return await _run_bound_request()
+        except ScopeUnavailable:
+            return
+
+    async def _on_scope_ready_llm_request(
+        self,
+        event: Any,
+        request: Any,
+    ) -> None:
+        """Run the request tail only after frozen-scope legacy setup succeeds."""
+
         # v2.5.0 入站消息级幂等闸：必须在任何早退（尤其 should_express 静默
         # return）之前拦截，否则 SILENT 轮的 message_id 不会入集，漏掉最可能
         # 触发悬挂重复的链路。命中即 stop_event + 早退，框架不再跑
@@ -2203,6 +3799,29 @@ class EmotionalStatePlugin(Star):
 
     async def _flush_pending_kernel_persists(self) -> None:
         await self._state_persistence.flush_pending_kernel_persists()
+
+    async def _save_live_scoped_queue_checkpoints(self) -> None:
+        """Persist every live queue through its exact runtime-owned gateway."""
+
+        registry = getattr(self, "_scope_runtime_registry", None)
+        if registry is None:
+            return
+        for session_runtime in registry.live_session_runtimes():
+            checkpoint = getattr(
+                session_runtime.background_queue,
+                "save_checkpoint",
+                None,
+            )
+            if not callable(checkpoint):
+                continue
+            try:
+                await checkpoint()
+            except Exception as exc:
+                logger.debug(
+                    "Sylanne scoped background queue checkpoint skipped [%s]: %s",
+                    session_runtime.storage_token,
+                    exc,
+                )
 
     async def _do_buffer_persist(self, session_key: str) -> None:
         await self._state_persistence._do_buffer_persist(session_key)
@@ -2270,8 +3889,20 @@ class EmotionalStatePlugin(Star):
     async def _life_sim_llm_call(self, prompt: str) -> str:
         return await self._llm_request_pipeline._life_sim_llm_call(prompt)
 
-    async def _life_sim_outreach(self, reason: str, mood: str) -> None:
-        return await self._llm_request_pipeline._life_sim_outreach(reason, mood)
+    async def _life_sim_outreach(
+        self,
+        reason: str,
+        mood: str,
+        intent: dict | None = None,
+        *,
+        scope: SessionScope | None = None,
+    ) -> None:
+        return await self._llm_request_pipeline._life_sim_outreach(
+            reason,
+            mood,
+            intent,
+            scope=scope,
+        )
 
     async def _generate_outreach_message(self, reason: str, mood: str) -> str:
         return await self._llm_request_pipeline._generate_outreach_message(reason, mood)
@@ -2293,6 +3924,7 @@ class EmotionalStatePlugin(Star):
             return
 
     @_optional_agent_begin_filter()
+    @_scoped_private_event_hook
     async def on_agent_begin(
         self,
         event: Any,
@@ -2312,6 +3944,7 @@ class EmotionalStatePlugin(Star):
 
     # 必须先于可能 stop 的普通 hook 恢复 provider-only 历史。
     @_optional_agent_done_filter(priority=1000)
+    @_scoped_private_event_hook
     async def on_agent_done(
         self,
         event: Any,
@@ -2457,6 +4090,7 @@ class EmotionalStatePlugin(Star):
         return self._visible_text(getattr(response, "completion_text", ""))
 
     @_optional_tool_use_filter(desc="语音/发言类工具调用前清理 text（防 thinking 进 TTS）")
+    @_scoped_private_event_hook
     async def on_using_llm_tool(self, event: Any, tool: Any, tool_args: Any) -> None:
         """path3 兜底：模型把要"说"的内容打包进【语音/发言类】工具参数（如 clone_tts 的
         text）时，绕过了 on_llm_response 的剥离。这里在工具执行【前】就地清理。tool_args 是
@@ -2508,6 +4142,7 @@ class EmotionalStatePlugin(Star):
         priority=1000,
         desc="直接发言工具返回后终结本轮历史",
     )
+    @_scoped_private_event_hook
     async def on_llm_tool_respond(
         self,
         event: Any,
@@ -2554,6 +4189,7 @@ class EmotionalStatePlugin(Star):
             )
 
     @filter.on_decorating_result(priority=1000)
+    @_scoped_private_event_hook
     async def on_decorating_result(self, event: Any, *args: Any, **kwargs: Any) -> None:
         """Stage 8 前置清洗：在 TTS/图片装饰器消费文本前移除内部控制内容。
 
@@ -2592,6 +4228,7 @@ class EmotionalStatePlugin(Star):
             )
 
     @filter.on_decorating_result(priority=-1000)
+    @_scoped_private_event_hook
     async def _on_final_output_arbitration(
         self,
         event: Any,
@@ -2627,7 +4264,7 @@ class EmotionalStatePlugin(Star):
             get_extra = getattr(event, "get_extra", None)
             if callable(get_extra) and get_extra("_syl_realtime_takeover", None) is True:
                 return
-            session_key = self._session_ctx.session_key(event)
+            session_key = self._session_key(event)
             # 让路①：主动轮。大饼的 check_and_chat 也走 RespondStage，本钩子照样会响；
             # 若在这里认领，proactive_bridge 的 REACH 就永远落不到 —— 主动轮只能由它结算。
             if facade.pending_is_proactive(session_key):
@@ -2650,6 +4287,7 @@ class EmotionalStatePlugin(Star):
         )
 
     @filter.after_message_sent()
+    @_scoped_private_event_hook
     async def _on_after_message_sent_err_backfill(
         self, event: Any, *args: Any, **kwargs: Any
     ) -> None:
@@ -2725,6 +4363,7 @@ class EmotionalStatePlugin(Star):
     # 同名钩子，跟随同一套约定读同一个 extra key（API 参考 §3 after_message_sent /
     # §4 event.get_extra）。
     @filter.after_message_sent()
+    @_scoped_private_event_hook
     async def on_after_message_sent_reset_ghost_cleanup(
         self, event: Any, *args: Any, **kwargs: Any
     ) -> None:
@@ -2738,13 +4377,32 @@ class EmotionalStatePlugin(Star):
                 clean_session = bool(get_extra("_clean_ltm_session", False))
             if not clean_session:
                 return
-            session_key = self._session_ctx.session_key(event)
+            binding = self._bound_runtime()
+            if binding is None:
+                return
+            session_key = binding.scope.storage_token
             self._on_session_reset(session_key)
         except Exception as e:
             logger.warning(
                 f"Sylanne on_after_message_sent_reset_ghost_cleanup failed: {e}",
                 exc_info=True,
             )
+
+    @filter.after_message_sent(priority=-10_000)
+    async def _release_request_runtime_view(
+        self,
+        event: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Terminally invalidate this exact turn view after later hooks finish."""
+
+        del args, kwargs
+        view = self._event_runtime_view(event)
+        if view is None:
+            return
+        if self._scope_runtime_registry.release_request_view(view):
+            ScopeResolver.set_event_extra(event, "_sylanne_runtime_view_v1", None)
 
     def _on_session_reset(self, session_key: str) -> None:
         """/reset 触发的幽灵源清理（同步、可测试）。
@@ -2786,6 +4444,12 @@ class EmotionalStatePlugin(Star):
             self._store.pending_outreach_context.pop(session_key, None)
         except Exception as e:
             logger.debug(f"Sylanne _on_session_reset pop outreach [{session_key}]: {e}")
+
+    def _release_scoped_session(self, scope: object) -> bool:
+        """Forward an already-frozen lifecycle scope without raw-key selection."""
+
+        release = getattr(self._state_persistence, "release_scoped_session", None)
+        return bool(release(scope)) if callable(release) else False
 
     async def _maybe_takeover_segments(self, event: Any) -> bool:
         """若 event 对应的 origin 被桥接登记为待接管分段：
@@ -2955,6 +4619,17 @@ class EmotionalStatePlugin(Star):
             return False
 
     async def _on_llm_response_inner(self, event: Any, response: Any) -> None:
+        # Response hooks run in a separate framework callback: re-bind from the
+        # event's frozen object rather than relying on request ContextVar leakage.
+        try:
+            with self._bind_runtime_for_event(event):
+                return await self._on_llm_response_with_bound_runtime(event, response)
+        except ScopeUnavailable:
+            return
+
+    async def _on_llm_response_with_bound_runtime(
+        self, event: Any, response: Any
+    ) -> None:
         # 2.4.1 err 轮兜底（三态标记，第二态）：本钩子跑过即置 True。必须在【入口】置位，
         # 这样即便下面 v2 裁决/投递续接抛异常，finally 里的补写也已经执行过，
         # after_message_sent 侧就会早退，不会对同一轮重复补写 user。
@@ -3002,6 +4677,7 @@ class EmotionalStatePlugin(Star):
         )
 
     @_optional_stream_chunk_filter(desc="流式首句提前发送")
+    @_scoped_private_event_hook
     async def on_llm_stream_chunk(self, event: Any, chunk: Any) -> None:
         await self._llm_response_pipeline.on_llm_stream_chunk(event, chunk)
 
@@ -3030,8 +4706,55 @@ class EmotionalStatePlugin(Star):
     def _memory_prompt_fragment(self, payload: dict[str, Any]) -> str:
         return self._llm_response_pipeline._memory_prompt_fragment(payload)
 
-    def _append_request_prompt_fragment(self, request: Any, fragment: str) -> None:
-        self._llm_response_pipeline._append_request_prompt_fragment(request, fragment)
+    def _add_transient_context(
+        self,
+        request: Any,
+        channel: str,
+        text: str,
+        source: str,
+        priority: int,
+        lifecycle: str = "turn",
+    ) -> bool:
+        """Collect dynamic guidance only through this request's sealed sink."""
+
+        binding = self._bound_runtime()
+        view = binding.request_runtime_view if binding is not None else None
+        sink = getattr(view, "transient_context_sink", None)
+        add = getattr(sink, "add", None)
+        if not callable(add):
+            return False
+        try:
+            return bool(add(request, channel, text, source, priority, lifecycle))
+        except Exception:
+            return False
+
+    def _commit_transient_context(self, request: Any) -> bool:
+        """Commit the sole collected runtime overlay for the current request."""
+
+        binding = self._bound_runtime()
+        view = binding.request_runtime_view if binding is not None else None
+        sink = getattr(view, "transient_context_sink", None)
+        commit = getattr(sink, "commit", None)
+        if not callable(commit):
+            return False
+        try:
+            return bool(commit(request))
+        except Exception:
+            return False
+
+    def _set_transient_context_budget(self, request: Any, max_chars: int) -> bool:
+        """Apply the current turn's total rendered-overlay budget."""
+
+        binding = self._bound_runtime()
+        view = binding.request_runtime_view if binding is not None else None
+        sink = getattr(view, "transient_context_sink", None)
+        set_budget = getattr(sink, "set_budget", None)
+        if not callable(set_budget):
+            return False
+        try:
+            return bool(set_budget(request, max_chars))
+        except Exception:
+            return False
 
     # Time context
     def _time_context_fragment(self, session_key: str) -> str:
@@ -3359,9 +5082,6 @@ class EmotionalStatePlugin(Star):
     def _sylanne_memory_kv_key(self, session_key: str) -> str:
         return self._state_persistence.sylanne_memory_kv_key(session_key)
 
-    def _background_post_checkpoint_kv_key(self, session_key: str) -> str:
-        return self._background_queue.checkpoint_kv_key(session_key)
-
     # KV-first persistence helpers
     def _kernel_kv_key(self, session_key: str) -> str:
         return self._state_persistence.kernel_kv_key(session_key)
@@ -3562,9 +5282,6 @@ class EmotionalStatePlugin(Star):
 
     def _has_persona_manager(self) -> bool:
         return self._state_persistence.has_persona_manager()
-
-    def _sync_personality_to_persona_mgr(self, session_key: str) -> None:
-        self._state_persistence.sync_personality_to_persona_mgr(session_key)
 
     async def _persist_kernel(self, session_key: str, host: SylanneAlphaHost) -> None:
         await self._state_persistence.persist_kernel(session_key, host)
@@ -3870,35 +5587,7 @@ class EmotionalStatePlugin(Star):
     def _last_request_text_for_session(self, session_key: str = "") -> str:
         return str(self._store.last_request_text.get(session_key, ""))
 
-    def _background_post_adaptive_worker_decision(
-        self, session_key: str = "", *, commit_scale: bool = False
-    ) -> dict[str, Any]:
-        return self._background_queue.adaptive_worker_decision(
-            session_key, commit_scale=commit_scale
-        )
-
-    def _background_post_max_workers(self, session_key: str = "") -> int:
-        return self._background_queue.max_workers(session_key)
-
-    def _background_post_job_to_dict(self, job: Any) -> dict[str, Any]:
-        return self._background_queue.job_to_dict(job)
-
-    def _recover_expired_background_post_active(self, session_key: str) -> int:
-        return self._background_queue.recover_expired_active(session_key)
-
-    def _schedule_background_post_checkpoint(self, session_key: str) -> None:
-        self._background_queue.schedule_checkpoint(session_key)
-
-    async def _drain_background_post_assessments(self, session_key: str) -> None:
-        await self._background_queue.drain_assessments(session_key)
-
-    async def _save_background_post_checkpoint(self, session_key: str) -> None:
-        await self._background_queue.save_checkpoint(session_key)
-
-    async def _recover_background_post_queue(self, session_key: str) -> bool:
-        return await self._background_queue.recover_queue(session_key)
-
-    @filter.on_waiting_llm_request(priority=1000)
+    @_scoped_private_event_hook
     async def on_waiting_llm_request(self, event: Any, **kwargs: Any) -> None:
         """把 AstrBot 没有并入旧任务的补话，提交成一个真正的新轮。
 
@@ -4182,18 +5871,25 @@ class EmotionalStatePlugin(Star):
         return await self._proactive_scheduler.run_once()
 
     def _start_life_simulator(self) -> None:
-        """配置生命模拟器并启动全局自驱心跳（幂等）。
+        """配置生命模拟器并启动当前 Persona 的自驱心跳（幂等）。
 
         CP8-P3b：LifeSimulator 不再自跑 _loop（已纯函数化）。改由 AutonomyScheduler
-        全局心跳驱动 LifeAgent 的 AUTONOMOUS 时点调 simulate_tick。configure 仍需
+        Persona 心跳驱动 LifeAgent 的 AUTONOMOUS 时点调 simulate_tick。configure 仍需
         注入回调（simulate_tick 内部用 llm/outreach/body_delta 等）。
         """
-        if getattr(self, "_life_simulator_started", False):
+        binding = self._bound_runtime()
+        if binding is None:
+            # Autonomous work has no frozen delivery/session target at startup.
+            # It must wait for a scoped scheduler path instead of selecting recent
+            # state or constructing a default Persona runtime.
+            return
+        lifecycle = binding.session_runtime.lifecycle
+        if lifecycle.life_simulator_started:
             return
         life_sim = getattr(self, "_life_simulator", None)
         if life_sim is None:
             return
-        self._life_simulator_started = True
+        lifecycle.life_simulator_started = True
         # issue#43 Wave1：启用了生活模拟却没配 provider_id 是「静默冻结」的配置陷阱根源，
         # 启动时响亮告警一次（_life_sim_llm_call 里还会按 cause 节流告警，但这条最早可见）。
         if life_sim.enabled and not str(
@@ -4205,9 +5901,23 @@ class EmotionalStatePlugin(Star):
                 "（生活状态冻结、主动消息可能复读）。请在插件配置里为它选一个 LLM Provider。"
             )
         pipe = self._llm_request_pipeline
+        scope = binding.scope
+
+        async def scoped_outreach(
+            reason: str,
+            mood: str,
+            intent: dict | None = None,
+        ) -> None:
+            await pipe._life_sim_outreach(
+                reason,
+                mood,
+                intent,
+                scope=scope,
+            )
+
         life_sim.configure(
             llm_caller=pipe._life_sim_llm_call,
-            outreach_callback=pipe._life_sim_outreach,
+            outreach_callback=scoped_outreach,
             emotion_getter=pipe._life_sim_emotion,
             body_delta_callback=pipe._life_sim_body_delta,
             persona_getter=pipe._life_sim_persona_getter,
@@ -4216,16 +5926,26 @@ class EmotionalStatePlugin(Star):
             state_dirty_callback=self._life_sim_throttled_save,
             qzone_candidate_callback=pipe._qzone_candidate_handler,
         )
-        # 启动全局自驱心跳（替代原 life_sim.start() 的后台循环）。
+        # 启动当前 Persona 的自驱心跳（替代原 life_sim.start() 的后台循环）。
         # LifeSim 持久化状态恢复在 async initialize 里 await（KV 读为异步）。
-        self._autonomy_scheduler.start()
+        scheduler = binding.persona_runtime.autonomy_scheduler
+        if scheduler is None:
+            lifecycle.life_simulator_started = False
+            return
+        scheduler.start()
+        binding.persona_runtime.autonomy_scheduler_task = getattr(
+            scheduler,
+            "_task",
+            None,
+        )
         logger.info(
             f"Sylanne autonomy: life_sim enabled={life_sim.enabled}, "
-            f"interval={life_sim.interval_seconds}s, scheduler started at initialize"
+            f"interval={life_sim.interval_seconds}s, scoped scheduler started"
         )
 
     async def initialize(self) -> None:
         """AstrBot 插件生命周期钩子：加载后调用（有 running loop，不依赖用户消息）。"""
+        self._scope_delivery_accepting = True
         # MEM-03 PR-1：把记忆写入咽喉权威绑定到本 running loop——此后 off-loop（stdlib
         # WebUI 工作线程）提交经 call_soon_threadsafe 转入本 loop 串行执行，不再静默丢弃。
         try:
@@ -4245,6 +5965,14 @@ class EmotionalStatePlugin(Star):
             _sylanne_webui_server.set_main_loop(asyncio.get_running_loop())
         except Exception as e:
             logger.debug(f"Sylanne WebUI main loop bind skipped: {e}")
+        # The outbox is process-durable but transport authorization remains
+        # live.  Recover before starting its bounded worker; an unavailable
+        # proof provider leaves the worker idle and fail-closed.
+        try:
+            if self._scope_resolver_instance() is not None:
+                self._start_scope_delivery_worker()
+        except Exception as e:
+            logger.debug(f"Sylanne scope delivery worker init skipped: {e}")
         # MEM-03 PR-4：启动扫描跨重启 pending-delete 索引——完成/驳回上一次进程运行
         # 遗留的删除意图残留（primary 已空则补完；primary 非空绝不重放，交管理员），
         # 并把未决 entry 载入进程内镜像供本次运行期间 hydrate/load-admit 消费
@@ -4257,63 +5985,9 @@ class EmotionalStatePlugin(Star):
                 await scan_fn()
         except Exception as e:
             logger.debug(f"Sylanne memory pending-delete scan skipped: {e}")
-        # 恢复 LifeSim 持久化状态（修复历史「重启丢作息」缺陷）——KV 读为异步，故在此 await
-        try:
-            life_sim = getattr(self, "_life_simulator", None)
-            if life_sim is not None and self._has_kv_api():
-                saved = await self.get_kv_data("sylanne_life_sim_state", None)
-                if saved and isinstance(saved, dict):
-                    life_sim.from_dict(saved)
-        except Exception as e:
-            logger.debug(f"Sylanne life sim state restore skipped: {e}")
-        # T1-04②：恢复 RhythmLearner 持久化状态（重启保节奏画像，不从零重学）。
-        try:
-            if self._has_kv_api():
-                saved_rhythm = await self.get_kv_data(
-                    "sylanne_rhythm_learner_state", None
-                )
-                if saved_rhythm and isinstance(saved_rhythm, dict):
-                    self._rhythm_learner = RhythmLearner.from_dict(
-                        saved_rhythm,
-                        intimacy_threshold=self._rhythm_learner._intimacy_threshold,
-                    )
-        except Exception as e:
-            logger.debug(f"Sylanne rhythm learner state restore skipped: {e}")
-        # T2-06⑤：恢复关系仪式注册表持久化状态（重启不丢已学到的问候/晚安仪式），
-        # 并把已注册的仪式重新接线回 ProactiveScheduler（否则重启后 check_ritual_absence
-        # 读到的调度器仪式表是空的，需要再攒 3 次观测才恢复可达）。
-        try:
-            if self._has_kv_api():
-                from sylanne_alpha.session_context import _RITUAL_REGISTRY_KV_KEY
-
-                saved_rituals = await self.get_kv_data(_RITUAL_REGISTRY_KV_KEY, None)
-                if saved_rituals and isinstance(saved_rituals, dict):
-                    registry = RitualRegistry.from_dict(saved_rituals)
-                    self._session_ctx._ritual_registry = registry
-                    scheduler = getattr(self, "_proactive_scheduler", None)
-                    register = getattr(scheduler, "register_ritual", None)
-                    if callable(register):
-                        for key, ritual in registry._rituals.items():
-                            key_session, _, _pattern_key = key.rpartition(":")
-                            if not key_session:
-                                continue
-                            register(
-                                key_session,
-                                str(ritual.get("pattern", _pattern_key)),
-                                int(ritual.get("hour_start", 0)),
-                                int(ritual.get("hour_end", 1)),
-                            )
-        except Exception as e:
-            logger.debug(f"Sylanne ritual registry state restore skipped: {e}")
-        # Phase 2B / PR-H：恢复关系层状态（register_state + override，独立 KV key）
-        try:
-            if self._has_kv_api():
-                from sylanne_alpha import relationship_layer as _rl
-                rel_saved = await self.get_kv_data(_rl._KV_KEY, None)
-                if rel_saved and isinstance(rel_saved, dict):
-                    _rl.restore(self, rel_saved)
-        except Exception as e:
-            logger.debug(f"Sylanne relationship state restore skipped: {e}")
+        # Persona/Relation state is deliberately not restored into a plugin-global
+        # owner.  A future scoped persistence reader must resolve its exact owner
+        # first; until then startup performs zero private state writes/selection.
         # PR-Qzone：恢复说说功能审计/频率闸状态（独立 KV key，重启不丢当日/当周计数，
         # 否则重启即可绕过频率闸上限）。
         try:
@@ -4365,6 +6039,8 @@ class EmotionalStatePlugin(Star):
                     )
         except Exception as e:
             logger.debug(f"Sylanne emotion_spirit bridge activation skipped: {e}")
+        # No frozen scope exists during initialize.  The first successful
+        # request freeze starts the matching Persona scheduler idempotently.
         try:
             self._start_life_simulator()
         except Exception as e:
@@ -4388,11 +6064,11 @@ class EmotionalStatePlugin(Star):
             return
         if not bridge.available():
             return
-        session_key = self._llm_request_pipeline._most_recent_host_key()
-        if not session_key:
+        binding = self._bound_runtime()
+        if binding is None:
             return
         try:
-            await bridge.adjust_countdown(session_key)
+            await bridge.adjust_countdown(binding.scope.storage_token)
         except Exception as e:
             logger.warning(f"Sylanne adjust_countdown callback: {e}", exc_info=True)
 
@@ -4405,24 +6081,23 @@ class EmotionalStatePlugin(Star):
         - 无 KV API 则跳过（与 initialize/terminate 的 _has_kv_api 一致）。
         - 失败静默（不阻断演化心跳），最后一次仍由 terminate 兜底。
         """
+        binding = self._bound_runtime()
+        if binding is None:
+            return
+        runtime = binding.session_runtime.lifecycle
         now = time.time()
-        if self._life_sim_dirty_in_flight:
+        if runtime.life_sim_dirty_in_flight:
             return
-        if (now - self._life_sim_last_save_ts) < _LIFE_SIM_SAVE_MIN_GAP_SECONDS:
+        if (now - runtime.life_sim_last_save_ts) < _LIFE_SIM_SAVE_MIN_GAP_SECONDS:
             return
-        if not self._has_kv_api():
-            return
-        life_sim = getattr(self, "_life_simulator", None)
-        if life_sim is None:
-            return
-        self._life_sim_dirty_in_flight = True
-        self._life_sim_last_save_ts = now
+        # The old global KV key has no Bot/Persona namespace.  Keep the scoped
+        # owner dirty marker only; Task 6 supplies the scoped persistence writer.
+        runtime.life_sim_dirty_in_flight = True
+        runtime.life_sim_last_save_ts = now
         try:
-            await self.put_kv_data("sylanne_life_sim_state", life_sim.to_dict())
-        except Exception as e:
-            logger.debug(f"Sylanne life sim throttled save skipped: {e}")
+            self._life_simulator.flush_scoped_state()
         finally:
-            self._life_sim_dirty_in_flight = False
+            runtime.life_sim_dirty_in_flight = False
 
     async def _qzone_audit_throttled_save(self) -> None:
         """PR-Qzone：节流落盘说说审计/频率闸状态（镜像 _life_sim_throttled_save）。
@@ -4458,23 +6133,21 @@ class EmotionalStatePlugin(Star):
         写 KV 频率与 life_sim 同量级。失败静默（不阻断消息处理），最后一次仍由
         terminate 兜底。
         """
+        binding = self._bound_runtime()
+        if binding is None:
+            return
+        runtime = binding.persona_runtime
         now = time.time()
-        if self._rhythm_learner_dirty_in_flight:
+        if runtime.rhythm_learner_dirty_in_flight:
             return
-        if (now - self._rhythm_learner_last_save_ts) < _RHYTHM_LEARNER_SAVE_MIN_GAP_SECONDS:
+        if (now - runtime.rhythm_learner_last_save_ts) < _RHYTHM_LEARNER_SAVE_MIN_GAP_SECONDS:
             return
-        if not self._has_kv_api():
-            return
-        self._rhythm_learner_dirty_in_flight = True
-        self._rhythm_learner_last_save_ts = now
+        runtime.rhythm_learner_dirty_in_flight = True
+        runtime.rhythm_learner_last_save_ts = now
         try:
-            await self.put_kv_data(
-                "sylanne_rhythm_learner_state", self._rhythm_learner.to_dict()
-            )
-        except Exception as e:
-            logger.debug(f"Sylanne rhythm learner throttled save skipped: {e}")
+            self._rhythm_learner.flush_scoped_state()
         finally:
-            self._rhythm_learner_dirty_in_flight = False
+            runtime.rhythm_learner_dirty_in_flight = False
 
     async def _rel_state_throttled_save(self) -> None:
         """PR-H 解耦：关系层状态独立节流落盘到 KV（独立 KV key）。
@@ -4544,10 +6217,41 @@ class EmotionalStatePlugin(Star):
 
     async def terminate(self) -> None:
         """插件卸载/更新前的清理：停止所有后台任务、关闭 WebUI、持久化状态。"""
+        # Close the producer boundary before cancelling the worker.  Durable
+        # DISPATCHING records remain for restart classification.
+        self._scope_delivery_accepting = False
+        worker = getattr(self, "_scope_delivery_worker", None)
+        if type(worker) is DeliveryOutboxWorker:
+            try:
+                await worker.stop()
+            except Exception as e:
+                logger.debug(f"Sylanne scope delivery worker stop skipped: {e}")
         # v3 shadow（plan Task 13）：先【同步】关闸，让接下来的 v2 收尾 save 排干期间
         # 不再有新的影子轮进来。同步是关键——这里不能 await，否则 drain 之前就出让了
         # 事件循环，还能被塞进新的 capture/settle。
         self._v3_shadow.begin_shutdown()
+        # Genesis has to be fenced before the first await below.  Otherwise a
+        # concurrent request can create a fresh PersonaRuntime while v2 drains
+        # and let a late paid result commit during plugin teardown.
+        self._persona_genesis_shutting_down = True
+        persona_runtimes = self._scope_runtime_registry.live_persona_runtimes()
+        persona_genesis_tasks: list[Any] = []
+        for runtime in persona_runtimes:
+            owner = runtime.persona_genesis
+            retire = getattr(owner, "retire", None)
+            if callable(retire):
+                try:
+                    retire()
+                except Exception:
+                    pass
+            for task in list(runtime.background_tasks):
+                if not task.done():
+                    task.cancel()
+                    persona_genesis_tasks.append(task)
+        if persona_genesis_tasks:
+            await asyncio.wait(persona_genesis_tasks, timeout=10)
+        for runtime in persona_runtimes:
+            runtime.background_tasks.clear()
         # v2core：先排干在途域状态落盘 + 终扫一遍（必须在 cancel 后台任务【之前】，
         # 否则最后一轮 fire-and-forget 存档会被反手 cancel——她的最近成长就丢了）
         try:
@@ -4556,7 +6260,7 @@ class EmotionalStatePlugin(Star):
                 save_all_domains,
             )
 
-            await drain_pending_saves(timeout=5)
+            await drain_pending_saves(self, timeout=5)
             await save_all_domains(self)
         except Exception as e:
             logger.warning(
@@ -4564,6 +6268,7 @@ class EmotionalStatePlugin(Star):
                 e,
                 exc_info=True,
             )
+        await self._save_live_scoped_queue_checkpoints()
         # emotion_spirit 桥：卸载前还原它的 persona_mode（接管时我们把它设成了 disabled，不还原
         # 会把人家插件永久静音、需重启才恢复，红队 lifecycle MAJOR）。cheap getattr/setattr、吞错。
         try:
@@ -4576,83 +6281,69 @@ class EmotionalStatePlugin(Star):
         # 它仍在下面那轮【通用 task 取消】之前完成；若 commit/fsync/线程退出永久卡住，facade
         # 会保留清理 task 但按上限返回，绝不能把 v2 与整个插件退出一起拖死。
         await self._v3_shadow.terminate()
-        # 收集所有需要取消的任务
+        # 收集所有需要取消的任务。Persona-owned heartbeat must be captured
+        # before stop() clears its task pointer, and every Persona is handled
+        # independently instead of consulting an unbound plugin-global owner.
+        persona_runtimes = self._scope_runtime_registry.live_persona_runtimes()
+        session_runtimes = self._scope_runtime_registry.live_session_runtimes()
         tasks_to_cancel: list = []
         for task in list(self._background_tasks):
             if not task.done():
                 task.cancel()
                 tasks_to_cancel.append(task)
         self._background_tasks.clear()
-        for task in list(self._store.background_post_checkpoint_tasks.values()):
-            if not task.done():
-                task.cancel()
-                tasks_to_cancel.append(task)
-        self._store.background_post_checkpoint_tasks.clear()
-        sched_task = getattr(self, "_proactive_scheduler_task", None)
-        if sched_task and not sched_task.done():
-            sched_task.cancel()
-            tasks_to_cancel.append(sched_task)
+        for session_runtime in session_runtimes:
+            sched_task = session_runtime.lifecycle.proactive_scheduler_task
+            if sched_task and not sched_task.done():
+                sched_task.cancel()
+                tasks_to_cancel.append(sched_task)
+            session_runtime.lifecycle.proactive_scheduler_task = None
+        for runtime in persona_runtimes:
+            for task in list(runtime.store.background_post_checkpoint_tasks.values()):
+                if not task.done():
+                    task.cancel()
+                    tasks_to_cancel.append(task)
+            runtime.store.background_post_checkpoint_tasks.clear()
+            autonomy = runtime.autonomy_scheduler
+            autonomy_task = runtime.autonomy_scheduler_task
+            if autonomy_task is None and autonomy is not None:
+                autonomy_task = getattr(autonomy, "_task", None)
+            if autonomy_task is not None and not autonomy_task.done():
+                autonomy_task.cancel()
+                tasks_to_cancel.append(autonomy_task)
+            stop_autonomy = getattr(autonomy, "stop", None)
+            if callable(stop_autonomy):
+                stop_autonomy()
+            runtime.autonomy_scheduler_task = None
         # 等待所有取消的任务完成（带超时保护）
         if tasks_to_cancel:
             await asyncio.wait(tasks_to_cancel, timeout=10)
-        # 停止全局自驱心跳（CP8-P3b：替代原 life_simulator.stop）
-        sched = getattr(self, "_autonomy_scheduler", None)
-        if sched is not None:
-            sched_self_task = sched._task
-            sched.stop()
-            # 等自驱 task 真正收尾，消除「stop 仅 cancel 未 await」与下方
-            # 退出巩固之间的并发窗口（避免重入 session_lock 的潜在竞态）。
-            if sched_self_task is not None and not sched_self_task.done():
+        # CP8-P4-D：每个 Persona 的 scheduler 独立终扫自己的活跃会话。
+        # 绑定精确 SessionScope 仅为兼容仍需插件 host API 的持久化调用；
+        # mutable engine/store owner 始终来自 scheduler 捕获的 PersonaRuntime。
+        session_runtimes = self._scope_runtime_registry.live_session_runtimes()
+        now = time.time()
+        for runtime in persona_runtimes:
+            consol = getattr(runtime.autonomy_scheduler, "_consolidation", None)
+            if consol is None:
+                continue
+            for session_runtime in session_runtimes:
+                if session_runtime.scope.persona_ref != runtime.persona_ref:
+                    continue
                 try:
-                    await asyncio.wait_for(
-                        asyncio.shield(sched_self_task), timeout=5
+                    with self._bind_runtime_for_scope(session_runtime.scope):
+                        await consol.consolidate(
+                            session_runtime.storage_token,
+                            now,
+                        )
+                except Exception as e:
+                    logger.debug(
+                        "Sylanne terminate consolidate skipped [%s]: %s",
+                        session_runtime.storage_token,
+                        e,
                     )
-                except (asyncio.CancelledError, asyncio.TimeoutError):
-                    pass
-                except Exception as e:
-                    logger.debug(f"Sylanne autonomy task drain: {e}")
-            # CP8-P4-D：退出前对活跃会话做一次最终巩固（tick_decay + 进化档案落盘），
-            # 保证反应式学习累积的门控偏置不随关机丢失。零 LLM、绕 needs 守卫强制落盘。
-            consol = getattr(sched, "_consolidation", None)
-            if consol is not None:
-                try:
-                    now = time.time()
-                    for sk, _host in self._store.hosts.snapshot_items():
-                        await consol.consolidate(sk, now)
-                except Exception as e:
-                    logger.debug(f"Sylanne terminate consolidate skipped: {e}")
-        # 持久化 LifeSim 状态（修复历史「重启丢作息」缺陷）
-        try:
-            life_sim = getattr(self, "_life_simulator", None)
-            if life_sim is not None and self._has_kv_api():
-                await self.put_kv_data("sylanne_life_sim_state", life_sim.to_dict())
-        except Exception as e:
-            logger.debug(f"Sylanne life sim state persist skipped: {e}")
-        # T1-04②：持久化 RhythmLearner 状态（终扫落盘，兜底 throttled save 漏窗）
-        try:
-            if self._has_kv_api():
-                await self.put_kv_data(
-                    "sylanne_rhythm_learner_state", self._rhythm_learner.to_dict()
-                )
-        except Exception as e:
-            logger.debug(f"Sylanne rhythm learner state persist skipped: {e}")
-        # T2-06⑤：持久化 RitualRegistry 状态（终扫落盘，兜底命中即存漏窗）
-        try:
-            if self._has_kv_api():
-                from sylanne_alpha.session_context import _RITUAL_REGISTRY_KV_KEY
-
-                await self.put_kv_data(
-                    _RITUAL_REGISTRY_KV_KEY, self._session_ctx._ritual_registry.to_dict()
-                )
-        except Exception as e:
-            logger.debug(f"Sylanne ritual registry state persist skipped: {e}")
-        # Phase 2B / PR-H：关系层状态终扫落盘（独立 KV key）
-        try:
-            if self._has_kv_api():
-                from sylanne_alpha import relationship_layer as _rl
-                await self.put_kv_data(_rl._KV_KEY, _rl.snapshot(self))
-        except Exception as e:
-            logger.debug(f"Sylanne relationship state persist skipped: {e}")
+        # Do not serialize Persona/Relation mutable state through old process-wide
+        # keys during shutdown.  A scoped persistence gateway owns that work.
         # PR-Qzone：说说审计/频率闸状态终扫落盘（独立 KV key，兜底节流漏窗）
         try:
             audit = getattr(self, "_qzone_audit", None)

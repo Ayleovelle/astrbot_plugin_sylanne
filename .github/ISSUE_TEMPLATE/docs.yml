@@ -1,0 +1,53 @@
+name: '📚 文档改进建议'
+description: 提交 README / 配置说明 / 文档的错误、缺失或改进建议。
+title: '[Docs] '
+labels: ['type/docs']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你帮忙改进文档！README 很长、公式很多，难免有讲不清或过时的地方，欢迎指出。
+
+  - type: textarea
+    attributes:
+      label: 文档问题描述
+      description: 你发现了什么问题？
+      placeholder: >
+        如：自我进化章节里「三道闸」的预算池说明不够清楚，不知道默认配额是多少。
+    validations:
+      required: true
+
+  - type: input
+    attributes:
+      label: 涉及的文档位置
+      description: 文档名 / 章节 / 链接 / 文件路径。
+      placeholder: '如：README.md 的「自我进化」章节'
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: 你期望如何改进
+      description: 更清晰的写法、该补的信息、希望看到的示例。
+    validations:
+      required: true
+
+  - type: dropdown
+    attributes:
+      label: 问题类型
+      options:
+        - '内容错误或过期'
+        - '说明缺失或不完整'
+        - '示例不足或难以复现'
+        - '表述不清晰，容易误解'
+        - '排版、格式或链接问题'
+        - '其他'
+    validations:
+      required: true
+
+  - type: checkboxes
+    attributes:
+      label: 确认
+      options:
+        - label: 我已搜索过现有 Issues，确认没有重复提交。
+          required: true
