@@ -14,6 +14,7 @@ from .legacy_scope_claim import (
     LegacyScopeClaimService,
 )
 from .scope_contracts import RelationScope, ScopeApiPathEcho, ScopedPrincipal, SessionScope
+from .scoped_api import ScopedApiRuntimeUnavailable
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,9 +95,10 @@ class LegacyClaimApi:
             return LegacyClaimApiError(403, "scope_principal_forbidden")
         destination = self.claims.issue_destination(scope, actor_id=source.actor_id)
         runtime_stale = False
+        runtime_unavailable = False
 
         def guard() -> bool:
-            nonlocal runtime_stale
+            nonlocal runtime_stale, runtime_unavailable
             try:
                 if runtime_fence() is not True:
                     runtime_stale = True
@@ -105,6 +107,9 @@ class LegacyClaimApi:
                     intent, principal=principal, record_id=record_id, scope=scope,
                     relation_scope=relation_scope, action=LEGACY_CLAIM_ACTION, actor_id=source.actor_id,
                 )
+            except ScopedApiRuntimeUnavailable:
+                runtime_unavailable = True
+                return False
             except Exception:  # noqa: BLE001 - final authorization fence fails closed
                 runtime_stale = True
                 return False
@@ -112,6 +117,8 @@ class LegacyClaimApi:
         try:
             result = self.claims.claim_memory(destination, source, authorization_guard=guard)
         except LegacyClaimAuthorizationDenied:
+            if runtime_unavailable:
+                return LegacyClaimApiError(503, "scope_repository_unavailable")
             return LegacyClaimApiError(
                 409 if runtime_stale else 403,
                 "scope_stale" if runtime_stale else "scope_principal_forbidden",

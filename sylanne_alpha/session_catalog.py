@@ -497,6 +497,8 @@ class SessionCatalog:
     def _load_binding_locked(
         self,
         turn: TransportTurn,
+        *,
+        strict: bool = False,
     ) -> ProtectedDeliveryBinding | None:
         path = self.repository.transport_delivery_binding_path(
             turn.bot_ref,
@@ -512,7 +514,9 @@ class SessionCatalog:
                     error_label="delivery binding",
                 )
                 if not stat.S_ISREG(info.st_mode):
-                    return False
+                    if strict:
+                        raise RepositoryCorruptionError("delivery binding is not a regular file")
+                    return None
             raw = path.read_bytes()
             document = json.loads(raw.decode("utf-8"))
             if (
@@ -532,6 +536,8 @@ class SessionCatalog:
                     "binding_generation",
                 }
             ):
+                if strict:
+                    raise RepositoryCorruptionError("delivery binding is invalid")
                 return None
             binding = ProtectedDeliveryBinding(
                 platform_id=document["platform_id"],
@@ -555,9 +561,23 @@ class SessionCatalog:
                     turn.binding_digest,
                 )
             ):
+                if strict:
+                    raise RepositoryCorruptionError("delivery binding does not match turn")
                 return None
             return binding
-        except (KeyError, OSError, TypeError, UnicodeDecodeError, ValueError):
+        except FileNotFoundError:
+            return None
+        except RepositoryCorruptionError:
+            if strict:
+                raise
+            return None
+        except OSError:
+            if strict:
+                raise
+            return None
+        except (KeyError, TypeError, UnicodeDecodeError, ValueError) as exc:
+            if strict:
+                raise RepositoryCorruptionError("delivery binding is malformed") from exc
             return None
 
     def _validate_binding_locked(self, turn: TransportTurn) -> bool:
@@ -886,13 +906,70 @@ class SessionCatalog:
     def current_exact(self, bot_ref_token: str, session_ref_token: str) -> TransportTurn:
         """Return one direct Bot-owned turn without searching sibling namespaces."""
 
+        with self.repository.transaction():
+            return self.current_exact_locked(bot_ref_token, session_ref_token)
+
+    def current_exact_locked(
+        self,
+        bot_ref_token: str,
+        session_ref_token: str,
+    ) -> TransportTurn:
+        """Read one exact turn while the caller already owns the repository lock.
+
+        This is intentionally narrow: final authorization fences use it from
+        inside the destination claim transaction, so acquiring the same
+        cross-process lock again would deadlock.  Callers must not use this as
+        a general unlocked catalog read.
+        """
+
         bot_token = _require_token(bot_ref_token, "bot_v1_")
         session_token = _require_token(session_ref_token, "session_v1_")
-        with self.repository.transaction():
-            turn = self._load_turn_locked(bot_token, session_token)
-            if turn is None:
-                raise KeyError("transport session not found")
-            return turn
+        turn = self._load_turn_locked(bot_token, session_token)
+        if turn is None:
+            raise KeyError("transport session not found")
+        return turn
+
+    def turn_fence_locked(
+        self,
+        scope: SessionScope,
+        expected_turn_generation: int,
+    ) -> bool:
+        """Validate one frozen bound turn while the caller owns repository lock.
+
+        The final legacy-claim guard needs more than matching tokens: the
+        catalog's current turn must still be frozen for this exact active scope
+        and carry a valid protected delivery binding.  This method performs no
+        lock acquisition, so it remains safe inside the claim transaction.
+        """
+
+        if (
+            type(scope) is not SessionScope
+            or type(expected_turn_generation) is not int
+            or expected_turn_generation < 1
+        ):
+            return False
+        try:
+            if self.repository._require_active_scope_locked(scope) != scope:
+                return False
+            turn = self.current_exact_locked(
+                scope.bot_ref.token,
+                scope.session_ref.token,
+            )
+        except (KeyError, StaleScopeWrite, ValueError):
+            return False
+        return bool(
+            turn.turn_generation == expected_turn_generation
+            and turn.turn_state == "frozen"
+            and turn.bot_ref == scope.bot_ref.token
+            and turn.session_ref == scope.session_ref.token
+            and turn.session_generation == scope.session_ref.generation
+            and turn.active_persona_ref == scope.persona_ref.token
+            and turn.persona_lifecycle_generation
+            == scope.persona_ref.lifecycle_generation
+            and turn.active_scope_token == scope.storage_token
+            and turn.scope_generation == scope.scope_generation
+            and self._load_binding_locked(turn, strict=True) is not None
+        )
 
     @staticmethod
     def _proactive_intent_payload(draft: ProactiveIntentDraft) -> dict[str, object]:

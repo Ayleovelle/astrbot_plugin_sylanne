@@ -119,6 +119,9 @@ def _service(tmp_path):
         repository,
         registry,
         turn_lookup=lambda candidate: turn if candidate == scope else None,
+        turn_fence_locked=lambda candidate, generation: (
+            candidate == scope and generation == 7
+        ),
         clock_ms=lambda: 1_000,
         principal_scope_grant=test_grant,
         principal_persona_grant=test_persona_grant,
@@ -180,7 +183,9 @@ def test_scoped_method_and_route_contracts_cannot_mutate_at_runtime() -> None:
     assert SCOPED_API_METHODS["legacy-claim"] == "POST"
 
 
-def test_runtime_fence_rejects_a_retired_session_without_repository_access(tmp_path) -> None:
+def test_runtime_fence_rejects_a_retired_session_without_reentering_repository(
+    tmp_path,
+) -> None:
     service, _repository, registry, scope, relation = _service(tmp_path)
     nonce = service.issue_nonce(
         scope,
@@ -203,9 +208,11 @@ def test_runtime_fence_rejects_a_retired_session_without_repository_access(tmp_p
     )
 
     assert isinstance(authorized, ScopedApiAuthorization)
-    assert service.runtime_fence(authorized)
+    with _repository.transaction():
+        assert service.runtime_fence(authorized)
     registry.release_session(scope)
-    assert not service.runtime_fence(authorized)
+    with _repository.transaction():
+        assert not service.runtime_fence(authorized)
 
 
 def test_runtime_fence_uses_a_published_turn_without_reentering_repository(
@@ -254,6 +261,9 @@ def test_runtime_fence_uses_a_published_turn_without_reentering_repository(
         repository,
         registry,
         turn_lookup=production_turn_lookup,
+        turn_fence_locked=lambda candidate, generation: (
+            candidate == scope and generation == 7
+        ),
         clock_ms=lambda: 1_000,
         principal_scope_grant=grant,
         principal_persona_grant=lambda *_args: None,
@@ -332,7 +342,8 @@ def test_new_resolving_transport_turn_advances_and_clears_the_final_fence(tmp_pa
             turn_state="resolving",
         ),
     )
-    assert not service.runtime_fence(authorized)
+    with _repository.transaction():
+        assert not service.runtime_fence(authorized)
     registry.release_session(scope)
     assert not registry.matches_published_turn(scope, 8)
 

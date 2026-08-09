@@ -272,6 +272,10 @@ class ScopedApiError:
         return {"error": self.code}
 
 
+class ScopedApiRuntimeUnavailable(RuntimeError):
+    """A final locked catalog fence could not read trusted durable state."""
+
+
 @dataclass(frozen=True, slots=True)
 class ScopedApiAuthorization:
     """A consumed scope nonce bound to one redacted path and generation tuple."""
@@ -348,9 +352,10 @@ class _NonceRecord:
 class ScopedApiService:
     """One shared exact resolver, nonce issuer, and generation fence.
 
-    ``turn_lookup`` is deliberately supplied by the host.  Production passes a
-    direct ``SessionCatalog.current_exact`` lookup; the service never scans a
-    catalog or invents a transport owner itself.
+    ``turn_lookup`` and the locked turn fence are deliberately supplied by the
+    host.  Production passes ``SessionCatalog.current_exact`` for normal
+    checks and ``turn_fence_locked`` for the final claim transaction; the
+    service never scans a catalog or invents a transport owner itself.
     """
 
     def __init__(
@@ -359,6 +364,7 @@ class ScopedApiService:
         registry: ScopeRuntimeRegistry,
         *,
         turn_lookup: Callable[[SessionScope], object | None],
+        turn_fence_locked: Callable[[SessionScope, int], bool] | None = None,
         clock_ms: Callable[[], int] | None = None,
         nonce_ttl_ms: int = _NONCE_TTL_MS,
         principal_scope_grant: PrincipalScopeGrant | None = None,
@@ -370,6 +376,8 @@ class ScopedApiService:
             raise ValueError("registry must be a ScopeRuntimeRegistry")
         if not callable(turn_lookup):
             raise ValueError("turn_lookup must be callable")
+        if turn_fence_locked is not None and not callable(turn_fence_locked):
+            raise ValueError("turn_fence_locked must be callable or None")
         if type(nonce_ttl_ms) is not int or nonce_ttl_ms <= 0:
             raise ValueError("nonce_ttl_ms must be a positive int")
         if principal_scope_grant is not None and not callable(principal_scope_grant):
@@ -379,6 +387,7 @@ class ScopedApiService:
         self._repository = repository
         self._registry = registry
         self._turn_lookup = turn_lookup
+        self._turn_fence_locked = turn_fence_locked
         self._clock_ms = clock_ms or _now_ms
         self._nonce_ttl_ms = nonce_ttl_ms
         self._principal_scope_grant = principal_scope_grant
@@ -700,11 +709,12 @@ class ScopedApiService:
         return authorization if isinstance(result, ScopedApiAuthorization) else result
 
     def runtime_fence(self, authorization: ScopedApiAuthorization) -> bool:
-        """Check only live runtime/turn state without repository or nonce access.
+        """Check final runtime state while the caller already owns repository lock.
 
-        This is deliberately safe to invoke from a repository transaction's
-        authorization guard: the durable scope/relation fence is owned by that
-        transaction, while this method supplies the non-durable runtime fence.
+        ``LegacyScopeClaimService.claim_memory`` invokes this from its existing
+        repository transaction.  The runtime registry is an in-process fast
+        fence only; the locked catalog fence validates frozen active scope and
+        protected binding, including a newer turn committed by another process.
         """
 
         if type(authorization) is not ScopedApiAuthorization:
@@ -716,10 +726,20 @@ class ScopedApiService:
                 return False
             if self._registry.relation_or_none(authorization.relation_scope) is None:
                 return False
-            return self._registry.matches_published_turn(
+            if not self._registry.matches_published_turn(
                 authorization.scope,
                 authorization.turn_generation,
-            )
+            ):
+                return False
+            fence_locked = self._turn_fence_locked
+            if not callable(fence_locked):
+                return False
+            return fence_locked(
+                authorization.scope,
+                authorization.turn_generation,
+            ) is True
+        except (RepositoryCorruptionError, OSError) as exc:
+            raise ScopedApiRuntimeUnavailable("locked runtime authority unavailable") from exc
         except Exception:  # noqa: BLE001 - runtime authority must fail closed
             return False
 
@@ -1027,6 +1047,7 @@ def scoped_api_service_for_plugin(plugin: object) -> ScopedApiService | None:
     repository = getattr(resolver, "_repository", None)
     catalog = getattr(resolver, "catalog", None)
     current_exact = getattr(catalog, "current_exact", None)
+    catalog_turn_fence_locked = getattr(catalog, "turn_fence_locked", None)
     principal_scope_grant = getattr(plugin, "_scoped_api_principal_scope_grant", None)
     principal_persona_grant = getattr(plugin, "_scoped_api_principal_persona_grant", None)
     if (
@@ -1042,10 +1063,19 @@ def scoped_api_service_for_plugin(plugin: object) -> ScopedApiService | None:
     def turn_lookup(scope: SessionScope) -> object | None:
         return current_exact(scope.bot_ref.token, scope.session_ref.token)
 
+    turn_fence_locked: Callable[[SessionScope, int], bool] | None = None
+    if (
+        getattr(catalog, "repository", None) is repository
+        and callable(catalog_turn_fence_locked)
+    ):
+        def turn_fence_locked(scope: SessionScope, generation: int) -> bool:
+            return catalog_turn_fence_locked(scope, generation) is True
+
     service = ScopedApiService(
         repository,
         registry,
         turn_lookup=turn_lookup,
+        turn_fence_locked=turn_fence_locked,
         principal_scope_grant=principal_scope_grant,
         principal_persona_grant=principal_persona_grant,
     )
@@ -1106,6 +1136,7 @@ __all__ = [
     "ScopedApiAuthorization",
     "ScopedApiError",
     "ScopedApiRequest",
+    "ScopedApiRuntimeUnavailable",
     "ScopedApiService",
     "issue_scoped_api_nonce_for_binding",
     "scoped_api_service_for_plugin",

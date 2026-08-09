@@ -10,6 +10,7 @@ from sylanne_alpha.scope_contracts import (
     PersonaRevisionRef,
     RelationRef,
     RelationScope,
+    ResolvedTransportScope,
     ScopeApiPathEcho,
     ScopedPrincipal,
     SessionRef,
@@ -40,20 +41,6 @@ def _relation(scope: SessionScope) -> RelationScope:
     )
 
 
-def _frozen_turn(scope: SessionScope, *, generation: int = 7) -> object:
-    return SimpleNamespace(
-        bot_ref=scope.bot_ref.token,
-        session_ref=scope.session_ref.token,
-        session_generation=scope.session_ref.generation,
-        turn_generation=generation,
-        turn_state="frozen",
-        active_persona_ref=scope.persona_ref.token,
-        persona_lifecycle_generation=scope.persona_ref.lifecycle_generation,
-        active_scope_token=scope.storage_token,
-        scope_generation=scope.scope_generation,
-    )
-
-
 def _runtime_fenced_claim_stack(tmp_path):
     """Build real copy services around a SessionCatalog-shaped turn lookup."""
 
@@ -61,14 +48,69 @@ def _runtime_fenced_claim_stack(tmp_path):
     from sylanne_alpha.legacy_claim_authority import LegacyClaimAuthority
     from sylanne_alpha.legacy_scope_claim import LegacyScopeClaimService
     from sylanne_alpha.memory_system import MemorySystem
+    from sylanne_alpha.scope_identity import BotBinding, load_or_create_scope_identity_key
     from sylanne_alpha.scoped_api import (
         ScopedApiAuthorization,
         ScopedApiRequest,
         ScopedApiService,
     )
+    from sylanne_alpha.session_catalog import ProtectedDeliveryBinding, SessionCatalog
 
     repository = ScopeRepository(tmp_path)
-    scope = repository.create_scope(_scope(), expected_absent=True)
+    catalog = SessionCatalog(repository)
+    binding_generation = catalog.binding_generation(
+        "private-platform-id",
+        "private-self-id",
+    )
+    identity = load_or_create_scope_identity_key(repository.root / "identity.key")
+    bot = identity.bot_ref(
+        BotBinding(
+            platform_id="private-platform-id",
+            self_id="private-self-id",
+        ),
+        binding_generation,
+    )
+    template = _scope()
+    scope = repository.create_scope(
+        SessionScope(
+            bot_ref=bot,
+            persona_ref=PersonaRevisionRef(
+                token=template.persona_ref.token,
+                bot_ref=bot,
+                persona_id_digest=template.persona_ref.persona_id_digest,
+                source_fingerprint=template.persona_ref.source_fingerprint,
+                lifecycle_generation=template.persona_ref.lifecycle_generation,
+            ),
+            session_ref=SessionRef(
+                token=template.session_ref.token,
+                bot_ref=bot,
+                generation=template.session_ref.generation,
+            ),
+            storage_token=template.storage_token,
+            scope_generation=template.scope_generation,
+        ),
+        expected_absent=True,
+    )
+    transport = ResolvedTransportScope(
+        bot_ref=scope.bot_ref,
+        session_ref=scope.session_ref,
+        identity_quality="event_get_sender_id",
+        private_scope_enabled=True,
+        disabled_reason=None,
+    )
+    binding = ProtectedDeliveryBinding(
+        platform_id="private-platform-id",
+        self_id="private-self-id",
+        message_session="private:FriendMessage:42",
+        target_address="private-target-address",
+        adapter_capability="reactive_only",
+        account_proof_digest="proof-v1",
+        account_proof_generation=0,
+        account_proof_expires_at_ms=100_000,
+        binding_generation=binding_generation,
+    )
+    frozen = catalog.freeze_persona(catalog.begin_turn(transport, binding), scope)
+    assert frozen.turn_generation == 1
     registry = ScopeRuntimeRegistry.for_test(repository=repository)
     registry.exact_session(scope)
     relation_runtime = registry.relation_for(
@@ -82,16 +124,26 @@ def _runtime_fenced_claim_stack(tmp_path):
         ),
     )
     assert relation_runtime is not None
-    state = {"inside_final_guard": False, "reentrant_lookup": False}
-    turns = {"current": _frozen_turn(scope)}
+    state = {
+        "inside_final_guard": False,
+        "reentrant_lookup": False,
+        "locked_fence_calls": 0,
+    }
 
     def session_catalog_current_exact(candidate: SessionScope) -> object | None:
         assert candidate == scope
         if state["inside_final_guard"]:
             state["reentrant_lookup"] = True
             raise AssertionError("SessionCatalog.current_exact re-entered its repository")
-        with repository.transaction():
-            return turns["current"]
+        return catalog.current_exact(candidate.bot_ref.token, candidate.session_ref.token)
+
+    def session_catalog_turn_fence_locked(
+        candidate: SessionScope,
+        generation: int,
+    ) -> bool:
+        assert candidate == scope
+        state["locked_fence_calls"] += 1
+        return catalog.turn_fence_locked(candidate, generation)
 
     principal = ScopedPrincipal("principal_v1_final_turn_fence")
 
@@ -112,6 +164,7 @@ def _runtime_fenced_claim_stack(tmp_path):
         repository,
         registry,
         turn_lookup=session_catalog_current_exact,
+        turn_fence_locked=session_catalog_turn_fence_locked,
         clock_ms=lambda: 1_000,
         principal_scope_grant=grant,
         principal_persona_grant=lambda *_args: None,
@@ -142,7 +195,7 @@ def _runtime_fenced_claim_stack(tmp_path):
     nonce = gate.issue_nonce(
         scope,
         relation_runtime.scope,
-        turn_generation=7,
+        turn_generation=1,
         principal=principal,
         endpoint="legacy-claim",
         method="POST",
@@ -172,7 +225,9 @@ def _runtime_fenced_claim_stack(tmp_path):
         scope=scope,
         source=source,
         state=state,
-        turns=turns,
+        catalog=catalog,
+        transport=transport,
+        binding=binding,
         registry=registry,
     )
 
@@ -416,6 +471,155 @@ def test_new_published_turn_after_lookup_blocks_the_final_target_write(tmp_path)
     assert isinstance(result, LegacyClaimApiError)
     assert (result.status, result.code) == (409, "scope_stale")
     assert stack.state["reentrant_lookup"] is False
+    assert stack.repository.read_component(stack.scope, "memory") is None
+
+
+def test_new_durable_turn_after_lookup_blocks_target_without_local_snapshot_update(
+    tmp_path,
+) -> None:
+    """A different process can advance the durable catalog after local revalidation."""
+
+    from sylanne_alpha.legacy_claim_api import LegacyClaimApiError
+    from sylanne_alpha.scoped_api import ScopedApiAuthorization
+    from sylanne_alpha.session_catalog import SessionCatalog
+
+    stack = _runtime_fenced_claim_stack(tmp_path)
+    remote_repository = ScopeRepository(stack.repository.root)
+    remote_catalog = SessionCatalog(remote_repository)
+
+    def post_lookup_revalidate_then_other_process_writes_turn() -> bool:
+        if not isinstance(stack.gate.revalidate(stack.authorization), ScopedApiAuthorization):
+            return False
+        # This deliberately bypasses the local runtime registry, as a separate
+        # process would.  Only the shared owner-only catalog can see it.
+        newer = remote_catalog.begin_turn(stack.transport, stack.binding)
+        assert newer.turn_generation == 2 and newer.turn_state == "resolving"
+        return True
+
+    def final_runtime_fence() -> bool:
+        stack.state["inside_final_guard"] = True
+        try:
+            return stack.gate.runtime_fence(stack.authorization)
+        finally:
+            stack.state["inside_final_guard"] = False
+
+    result = stack.api.claim_after_authorization(
+        stack.api.preflight(
+            stack.principal,
+            stack.source.source_fingerprint,
+            ScopeApiPathEcho(
+                stack.scope.bot_ref.token,
+                stack.scope.persona_ref.token,
+                stack.scope.session_ref.token,
+            ),
+        ),
+        principal=stack.principal,
+        record_id=stack.source.source_fingerprint,
+        scope=stack.scope,
+        relation_scope=stack.relation_scope,
+        post_lookup_revalidate=post_lookup_revalidate_then_other_process_writes_turn,
+        runtime_fence=final_runtime_fence,
+    )
+
+    assert isinstance(result, LegacyClaimApiError)
+    assert (result.status, result.code) == (409, "scope_stale")
+    assert stack.state["locked_fence_calls"] >= 1
+    assert stack.state["reentrant_lookup"] is False
+    assert stack.repository.read_component(stack.scope, "memory") is None
+
+
+def test_missing_durable_delivery_binding_blocks_the_final_target_write(tmp_path) -> None:
+    """The final catalog fence requires the current protected binding as well."""
+
+    from sylanne_alpha.legacy_claim_api import LegacyClaimApiError
+    from sylanne_alpha.scoped_api import ScopedApiAuthorization
+
+    stack = _runtime_fenced_claim_stack(tmp_path)
+
+    def post_lookup_revalidate_then_remove_binding() -> bool:
+        if not isinstance(stack.gate.revalidate(stack.authorization), ScopedApiAuthorization):
+            return False
+        stack.repository.transport_delivery_binding_path(
+            stack.scope.bot_ref.token,
+            stack.scope.session_ref.token,
+        ).unlink()
+        return True
+
+    def final_runtime_fence() -> bool:
+        stack.state["inside_final_guard"] = True
+        try:
+            return stack.gate.runtime_fence(stack.authorization)
+        finally:
+            stack.state["inside_final_guard"] = False
+
+    result = stack.api.claim_after_authorization(
+        stack.api.preflight(
+            stack.principal,
+            stack.source.source_fingerprint,
+            ScopeApiPathEcho(
+                stack.scope.bot_ref.token,
+                stack.scope.persona_ref.token,
+                stack.scope.session_ref.token,
+            ),
+        ),
+        principal=stack.principal,
+        record_id=stack.source.source_fingerprint,
+        scope=stack.scope,
+        relation_scope=stack.relation_scope,
+        post_lookup_revalidate=post_lookup_revalidate_then_remove_binding,
+        runtime_fence=final_runtime_fence,
+    )
+
+    assert isinstance(result, LegacyClaimApiError)
+    assert (result.status, result.code) == (409, "scope_stale")
+    assert stack.state["locked_fence_calls"] >= 1
+    assert stack.repository.read_component(stack.scope, "memory") is None
+
+
+def test_corrupt_durable_binding_returns_unavailable_without_target_write(tmp_path) -> None:
+    """A malformed persisted binding is unavailable, not merely a stale turn."""
+
+    from sylanne_alpha.legacy_claim_api import LegacyClaimApiError
+    from sylanne_alpha.scoped_api import ScopedApiAuthorization
+
+    stack = _runtime_fenced_claim_stack(tmp_path)
+
+    def post_lookup_revalidate_then_corrupt_binding() -> bool:
+        if not isinstance(stack.gate.revalidate(stack.authorization), ScopedApiAuthorization):
+            return False
+        stack.repository.transport_delivery_binding_path(
+            stack.scope.bot_ref.token,
+            stack.scope.session_ref.token,
+        ).write_text("{", encoding="utf-8")
+        return True
+
+    def final_runtime_fence() -> bool:
+        stack.state["inside_final_guard"] = True
+        try:
+            return stack.gate.runtime_fence(stack.authorization)
+        finally:
+            stack.state["inside_final_guard"] = False
+
+    result = stack.api.claim_after_authorization(
+        stack.api.preflight(
+            stack.principal,
+            stack.source.source_fingerprint,
+            ScopeApiPathEcho(
+                stack.scope.bot_ref.token,
+                stack.scope.persona_ref.token,
+                stack.scope.session_ref.token,
+            ),
+        ),
+        principal=stack.principal,
+        record_id=stack.source.source_fingerprint,
+        scope=stack.scope,
+        relation_scope=stack.relation_scope,
+        post_lookup_revalidate=post_lookup_revalidate_then_corrupt_binding,
+        runtime_fence=final_runtime_fence,
+    )
+
+    assert isinstance(result, LegacyClaimApiError)
+    assert (result.status, result.code) == (503, "scope_repository_unavailable")
     assert stack.repository.read_component(stack.scope, "memory") is None
 
 
