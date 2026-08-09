@@ -1568,6 +1568,12 @@ class EmotionalStatePlugin(Star):
             "Sylanne scoped API catalog",
         )
         context.register_web_api(
+            f"/{P}/api/v1/bots/<bot_ref>/personas/<persona_ref>/dossier",
+            wr.persona_dossier_handler,
+            ["GET"],
+            "Sylanne Persona dossier",
+        )
+        context.register_web_api(
             f"/{P}/api/scopes/<bot_ref>/personas/<persona_ref>/sessions/<session_ref>/nonce",
             wr.scope_bootstrap_handler,
             ["POST"],

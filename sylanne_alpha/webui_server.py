@@ -351,6 +351,22 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         # POST an exact-scope nonce bootstrap; no session payload is exposed here.
         return web.json_response({**result, "csrf_token": _csrf_token})
 
+    async def handle_persona_dossier(request: web.Request) -> web.Response:
+        """Serve one Persona-owned public projection without a Session selector."""
+
+        service = scoped_api_service_for_plugin(_plugin(plugin))
+        if service is None:
+            return scoped_error(ScopedApiError(410, "scope_required"))
+        if "session" in request.query:
+            return scoped_error(ScopedApiError(400, "legacy_session_selector_forbidden"))
+        result = service.persona_dossier_payload(
+            request.match_info.get("bot_ref"),
+            request.match_info.get("persona_ref"),
+        )
+        if isinstance(result, ScopedApiError):
+            return scoped_error(result)
+        return web.json_response(result)
+
     async def handle_scope_bootstrap(request: web.Request) -> web.Response:
         service = scoped_api_service_for_plugin(_plugin(plugin))
         if service is None:
@@ -1802,10 +1818,12 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
     app.router.add_get("/health", handle_health)
     app.router.add_get("/metrics", handle_metrics)
     scope_catalog_root = "/api/scopes"
+    persona_dossier_root = "/api/v1/bots/{bot_ref}/personas/{persona_ref}/dossier"
     scope_bootstrap_root = (
         "/api/scopes/{bot_ref}/personas/{persona_ref}/sessions/{session_ref}/nonce"
     )
     app.router.add_get(scope_catalog_root, handle_scope_catalog)
+    app.router.add_get(persona_dossier_root, handle_persona_dossier)
     app.router.add_post(scope_bootstrap_root, handle_scope_bootstrap)
     scoped_root = "/api/v1/bots/{bot_ref}/personas/{persona_ref}/sessions/{session_ref}"
     app.router.add_route("*", scoped_root, handle_scoped_api)

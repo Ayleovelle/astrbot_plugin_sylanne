@@ -509,6 +509,43 @@ async def test_astrbot_scoped_handler_delegates_to_the_shared_service(
 
 
 @pytest.mark.asyncio
+async def test_astrbot_persona_dossier_handler_uses_no_session_nonce(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sylanne_alpha.webui_routes import WebUIRoutes
+
+    service, _repository, _registry, scope, _relation = _service(tmp_path)
+    web = ModuleType("astrbot.api.web")
+    web.request = SimpleNamespace(
+        headers={},
+        path_params={
+            "bot_ref": scope.bot_ref.token,
+            "persona_ref": scope.persona_ref.token,
+        },
+        query={},
+        method="GET",
+    )
+    monkeypatch.setitem(sys.modules, "astrbot.api.web", web)
+    routes = WebUIRoutes(SimpleNamespace(_scoped_api_service=service))
+
+    payload = await routes.persona_dossier_handler()
+
+    assert payload["ok"] is True
+    assert payload["persona_scope"] == {
+        "bot_ref": scope.bot_ref.token,
+        "persona_ref": scope.persona_ref.token,
+    }
+
+    web.request.query = {"session": scope.session_ref.token}
+    rejected = await routes.persona_dossier_handler()
+    assert rejected == {
+        "error": "legacy_session_selector_forbidden",
+        "status": 400,
+    }
+
+
+@pytest.mark.asyncio
 async def test_scoped_read_dtos_are_real_and_strictly_redacted(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -793,6 +830,56 @@ async def test_aiohttp_scope_catalog_and_bootstrap_issue_exact_nonce(tmp_path) -
 
 
 @pytest.mark.asyncio
+async def test_aiohttp_persona_dossier_is_two_level_and_rejects_session_selector(tmp_path) -> None:
+    from aiohttp import ClientSession
+
+    from sylanne_alpha import webui_server
+
+    service, _repository, registry, scope, _relation = _service(tmp_path)
+    plugin = SimpleNamespace(
+        _scoped_api_service=service,
+        _scope_runtime_registry=registry,
+    )
+    token = "persona-dossier-test-token"
+    port = _unused_local_port()
+    previous_token = webui_server._active_token
+    webui_server._active_token = token
+    task = asyncio.create_task(
+        webui_server.start_webui_server(plugin, host="127.0.0.1", port=port)
+    )
+    path = (
+        f"/api/v1/bots/{scope.bot_ref.token}/personas/{scope.persona_ref.token}/dossier"
+    )
+    try:
+        async with ClientSession(headers={"Authorization": f"Bearer {token}"}) as client:
+            response = None
+            for _ in range(100):
+                try:
+                    response = await client.get(f"http://127.0.0.1:{port}{path}")
+                    break
+                except OSError:
+                    await asyncio.sleep(0.01)
+            assert response is not None
+            async with response:
+                assert response.status == 200
+                payload = await response.json()
+            assert payload["persona_scope"] == {
+                "bot_ref": scope.bot_ref.token,
+                "persona_ref": scope.persona_ref.token,
+            }
+
+            async with client.get(f"http://127.0.0.1:{port}{path}?session=default") as rejected:
+                assert rejected.status == 400
+                assert await rejected.json() == {
+                    "error": "legacy_session_selector_forbidden"
+                }
+    finally:
+        task.cancel()
+        await task
+        webui_server._active_token = previous_token
+
+
+@pytest.mark.asyncio
 async def test_scoped_websocket_emits_one_stale_marker_then_closes(tmp_path) -> None:
     from aiohttp import ClientSession, WSMsgType
 
@@ -938,3 +1025,5 @@ def test_astrbot_registers_only_the_exact_scoped_root() -> None:
     assert "scoped_api_handler" in source
     assert "/api/scopes" in source
     assert "scope_catalog_handler" in source
+    assert "/api/v1/bots/<bot_ref>/personas/<persona_ref>/dossier" in source
+    assert "persona_dossier_handler" in source

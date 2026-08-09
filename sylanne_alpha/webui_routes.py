@@ -776,6 +776,31 @@ class WebUIRoutes:
             return self._scoped_native_error(result)
         return result
 
+    async def persona_dossier_handler(self) -> Any:
+        """Read one durable Persona projection without accepting a Session selector."""
+
+        from astrbot.api.web import request
+
+        service = self._scoped_api_service()
+        if service is None:
+            return self._scoped_native_error(ScopedApiError(410, "scope_required"))
+        query = getattr(request, "query", {})
+        if isinstance(query, Mapping) and "session" in query:
+            return self._scoped_native_error(
+                ScopedApiError(400, "legacy_session_selector_forbidden")
+            )
+        params = getattr(request, "path_params", {})
+        try:
+            result = service.persona_dossier_payload(
+                params.get("bot_ref"),
+                params.get("persona_ref"),
+            )
+        except AttributeError:
+            return self._scoped_native_error(ScopedApiError(400, "invalid_persona_request"))
+        if isinstance(result, ScopedApiError):
+            return self._scoped_native_error(result)
+        return result
+
     async def scope_bootstrap_handler(self) -> Any:
         """Mint a fresh one-use nonce for one live exact catalog entry."""
 
