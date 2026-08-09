@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from sylanne_alpha.scope_contracts import (
     BotRef,
     PersonaRevisionRef,
@@ -222,3 +224,39 @@ def test_malformed_or_noncanonical_authority_document_never_grants(tmp_path) -> 
     )
 
     assert authority.inventory_view_allowed(principal) is False
+
+
+def test_revalidation_rejects_forged_intent_audit_or_action_binding(tmp_path) -> None:
+    from sylanne_alpha.legacy_claim_authority import LegacyClaimAuthority, LegacyClaimIntent
+
+    authority = LegacyClaimAuthority(ScopeRepository(tmp_path), clock_ms=lambda: 1_000)
+    scope = _scope()
+    relation = _relation(scope)
+    principal = ScopedPrincipal("principal_v1_admin")
+    grant = _claim_grant(authority, principal, scope, relation)
+    authority.replace_grants(inventory_grants=(), claim_grants=(grant,))
+    intent = authority.preflight_claim(principal, "c" * 64, _path(scope))
+    assert intent is not None
+
+    forged_audit = replace(intent, audit_id="audit_v1_forged")
+    assert authority.revalidate_claim(
+        forged_audit,
+        principal=principal,
+        record_id="c" * 64,
+        scope=scope,
+        relation_scope=relation,
+        action="POST:legacy-claim",
+        actor_id="actor-1",
+    ) is False
+    with pytest.raises(ValueError, match="intent action"):
+        LegacyClaimIntent(
+            document_revision=intent.document_revision,
+            grant_id=intent.grant_id,
+            grant_revision=intent.grant_revision,
+            audit_id=intent.audit_id,
+            principal=intent.principal,
+            record_id=intent.record_id,
+            scope=intent.scope,
+            relation_scope=intent.relation_scope,
+            action="GET:legacy-claim",
+        )

@@ -14,6 +14,7 @@ from sylanne_alpha.scope_contracts import (
     RelationRef,
     SessionRef,
     SessionScope,
+    ScopedPrincipal,
 )
 from sylanne_alpha.scope_identity import load_or_create_scope_identity_key
 from sylanne_alpha.scope_repository import (
@@ -94,6 +95,27 @@ def test_webui_principal_issuer_is_stable_domain_separated_and_never_request_cre
     assert "operator" not in pages
     first._webui_principal_secret = None
     assert first.derive_webui_principal_token("pages", "operator") is None
+
+
+def test_published_repository_preinitializes_actor_key_and_authority_never_creates_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sylanne_alpha.scope_repository as repository_module
+    from sylanne_alpha.legacy_claim_authority import LegacyClaimAuthority
+
+    repository = ScopeRepository(tmp_path)
+    assert repository.legacy_claim_actor_key_path.exists()
+    before = repository.legacy_claim_actor_key_path.read_bytes()
+
+    def creator_must_not_run(*_args, **_kwargs):
+        raise AssertionError("request-side authority construction must not create a key")
+
+    monkeypatch.setattr(repository_module, "load_or_create_owner_only_secret", creator_must_not_run)
+    authority = LegacyClaimAuthority(repository)
+
+    assert authority.inventory_view_allowed(ScopedPrincipal("principal_v1_admin")) is False
+    assert repository.legacy_claim_actor_key_path.read_bytes() == before
 
 
 def test_scope_lifecycle_generation_is_not_component_generation(tmp_path: Path) -> None:

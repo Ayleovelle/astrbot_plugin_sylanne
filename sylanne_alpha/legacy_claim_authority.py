@@ -216,6 +216,24 @@ class LegacyClaimIntent:
     relation_scope: RelationScope = field(repr=False)
     action: str = LEGACY_CLAIM_ACTION
 
+    def __post_init__(self) -> None:
+        _revision(self.document_revision, "document_revision")
+        _token(self.grant_id, "grant_v1_")
+        _revision(self.grant_revision, "grant_revision")
+        _token(self.audit_id, "audit_v1_")
+        if type(self.principal) is not ScopedPrincipal:
+            raise ValueError("intent principal must be a ScopedPrincipal")
+        _record_id(self.record_id)
+        if type(self.scope) is not SessionScope or type(self.relation_scope) is not RelationScope:
+            raise ValueError("intent scope and relation scope are required")
+        if (
+            self.relation_scope.bot_ref != self.scope.bot_ref
+            or self.relation_scope.persona_ref != self.scope.persona_ref
+        ):
+            raise ValueError("intent relation does not belong to scope")
+        if self.action != LEGACY_CLAIM_ACTION:
+            raise ValueError("intent action must be canonical")
+
 
 class LegacyClaimAuthority:
     """One repository-owned, offline-replaceable legacy migration ACL."""
@@ -227,7 +245,7 @@ class LegacyClaimAuthority:
         self._clock_ms = _now_ms if clock_ms is None else clock_ms
         if not callable(self._clock_ms):
             raise ValueError("clock_ms must be callable")
-        self._actor_secret = repository.load_or_create_legacy_claim_actor_secret()
+        self._actor_secret = repository.legacy_claim_actor_secret()
 
     def _actor_binding(self, actor_id: object) -> str:
         raw = _actor_id(actor_id).encode("utf-8")
@@ -432,12 +450,16 @@ class LegacyClaimAuthority:
     ) -> bool:
         """Fence a prior preflight against ACL replacement, scope drift, and actor drift."""
 
-        if (
-            type(intent) is not LegacyClaimIntent or type(principal) is not ScopedPrincipal
-            or type(scope) is not SessionScope or type(relation_scope) is not RelationScope
-            or action != LEGACY_CLAIM_ACTION or principal != intent.principal or record_id != intent.record_id
-            or scope != intent.scope or relation_scope != intent.relation_scope
-        ):
+        try:
+            if (
+                type(intent) is not LegacyClaimIntent or type(principal) is not ScopedPrincipal
+                or type(scope) is not SessionScope or type(relation_scope) is not RelationScope
+                or action != LEGACY_CLAIM_ACTION or intent.action != LEGACY_CLAIM_ACTION
+                or principal != intent.principal or record_id != intent.record_id
+                or scope != intent.scope or relation_scope != intent.relation_scope
+            ):
+                return False
+        except (AttributeError, TypeError, ValueError):
             return False
         loaded = self._load()
         if loaded is None:
@@ -454,6 +476,7 @@ class LegacyClaimAuthority:
         if (
             not self._active(grant, self._clock_ms()) or grant.principal != principal or grant.record_id != record_id
             or grant.scope != scope or grant.relation_scope != relation_scope or grant.action != action
+            or grant.audit_id != intent.audit_id
         ):
             return False
         try:

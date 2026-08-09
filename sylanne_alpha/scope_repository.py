@@ -272,6 +272,7 @@ class ScopeRepository:
         self._replace_attempts = max(1, int(replace_attempts))
         self._replace_retry_seconds = max(0.0, float(replace_retry_seconds))
         self._webui_principal_secret: bytes | None = None
+        self._legacy_claim_actor_secret: bytes | None = None
         self.root.mkdir(parents=True, exist_ok=True)
         if os.name == "nt":
             infra._secure_windows_parent(
@@ -292,7 +293,7 @@ class ScopeRepository:
         self.initialize_webui_principal_key()
 
     def initialize_webui_principal_key(self) -> None:
-        """Initialize the one repository-owned WebUI principal key.
+        """Initialize both request-adjacent owner-only WebUI authority keys.
 
         ScopeResolver calls this during construction.  HTTP request paths only
         consume its already-published in-memory copy, so a missing or corrupt
@@ -305,6 +306,12 @@ class ScopeRepository:
                 magic=_WEBUI_PRINCIPAL_KEY_MAGIC,
                 secret_bytes=_OWNER_ONLY_SECRET_BYTES,
                 error_label="WebUI principal key",
+            )
+            self._legacy_claim_actor_secret = load_or_create_owner_only_secret(
+                self.legacy_claim_actor_key_path,
+                magic=_LEGACY_CLAIM_ACTOR_KEY_MAGIC,
+                secret_bytes=_OWNER_ONLY_SECRET_BYTES,
+                error_label="legacy claim actor binding key",
             )
 
     def derive_webui_principal_token(self, host: object, identity: object) -> str | None:
@@ -331,16 +338,13 @@ class ScopeRepository:
             return None
         return "principal_v1_" + hmac.new(secret, payload, hashlib.sha256).hexdigest()
 
-    def load_or_create_legacy_claim_actor_secret(self) -> bytes:
-        """Return the separate keyed actor-binding secret for offline ACL work."""
+    def legacy_claim_actor_secret(self) -> bytes:
+        """Return only the startup-published actor-binding key; never create it."""
 
-        with self._repository_lock():
-            return load_or_create_owner_only_secret(
-                self.legacy_claim_actor_key_path,
-                magic=_LEGACY_CLAIM_ACTOR_KEY_MAGIC,
-                secret_bytes=_OWNER_ONLY_SECRET_BYTES,
-                error_label="legacy claim actor binding key",
-            )
+        secret = self._legacy_claim_actor_secret
+        if type(secret) is not bytes or len(secret) != _OWNER_ONLY_SECRET_BYTES:
+            raise RepositoryCorruptionError("legacy claim actor binding key is unavailable")
+        return secret
 
     def _observation_scope_dir_locked(self, scope: SessionScope) -> Path:
         if type(scope) is not SessionScope:
