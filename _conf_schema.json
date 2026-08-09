@@ -48,7 +48,7 @@
     "hint": "首次启动自动生成。复制此 token 到浏览器访问 WebUI。"
   },
   "sylanne_webui_history_storage_limit_mb": {
-    "description": "观测历史存储上限（MiB，0 表示不设上限）",
+    "description": "全局观测历史容量上限（MB）；0 表示无限制，不按天过期。",
     "type": "int",
     "default": 128,
     "hint": "记录长期保留；超过上限后按最旧已封闭分段逐步清理。"

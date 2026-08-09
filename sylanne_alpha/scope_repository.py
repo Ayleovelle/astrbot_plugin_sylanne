@@ -26,6 +26,7 @@ from .scope_contracts import (
     RelationRef,
     RelationScope,
     SessionRef,
+    ScopeDiagnosticEcho,
     SessionScope,
 )
 
@@ -282,6 +283,47 @@ class ScopeRepository:
 
         with self._repository_lock():
             return self._observation_scope_dir_locked(scope)
+
+    def _observation_cleanup_diagnostic_echo_locked(
+        self,
+        storage_token: str,
+    ) -> ScopeDiagnosticEcho | None:
+        """Project one registered observation owner without requiring activity.
+
+        Cleanup can legitimately outlive a Session reset or Persona retirement.
+        The catalog and persisted scope metadata still have to agree, but this
+        diagnostic-only projection must not call the active-scope fence.
+        """
+
+        token = _require_token(storage_token, "scope_v1_")
+        parent = self._read_catalog_locked()["scopes"].get(token)
+        if parent is None:
+            return None
+        if type(parent) is not dict:
+            raise RepositoryCorruptionError("scope catalog parent is invalid")
+        bot_token = _require_token(parent["bot_ref"], "bot_v1_")
+        persona_token = _require_token(parent["persona_ref"], "persona_v1_")
+        session_token = _require_token(parent["session_ref"], "session_v1_")
+        metadata = self._load_scope_meta_locked(
+            self._scope_directory(bot_token, persona_token, session_token)
+            / "scope-meta.json"
+        )
+        if metadata is None:
+            return None
+        if (
+            metadata["storage_token"] != token
+            or metadata["bot_ref"] != bot_token
+            or metadata["persona_ref"] != persona_token
+            or metadata["session_ref"] != session_token
+        ):
+            raise RepositoryCorruptionError("scope catalog parent is invalid")
+        return ScopeDiagnosticEcho(
+            bot_ref=bot_token,
+            persona_ref=persona_token,
+            session_ref=session_token,
+            scope_generation=int(metadata["scope_generation"]),
+            resolved_at_ms=self._now_ms(),
+        )
 
     def _repository_lock(self) -> _InterProcessLock:
         return _InterProcessLock(

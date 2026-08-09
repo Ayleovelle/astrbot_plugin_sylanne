@@ -75,6 +75,10 @@ _HEX_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _SEGMENT_NAME_RE = re.compile(r"segment-(\d{8})\.jsonl")
 _SHORT_ENUM_RE = re.compile(r"[A-Za-z0-9_.-]{1,32}")
 _SCOPE_TOKEN_RE = re.compile(r"scope_v1_[A-Za-z0-9_-]+\Z")
+_TOKEN_PAYLOAD_RE = re.compile(r"[A-Za-z0-9_-]+\Z")
+_CLEANUP_DIAGNOSTIC_LIMIT = 64
+_CLEANUP_TRIGGERS = frozenset({"append", "duplicate", "maintenance", "regression"})
+_UNFINISHED_CLEANUP_REASONS = frozenset({"budget_unsatisfiable", "cleanup_active"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +171,14 @@ def _short_enum(value: Any) -> str | None:
     if not _SHORT_ENUM_RE.fullmatch(candidate):
         return None
     return candidate
+
+
+def _opaque_diagnostic_token(value: Any, prefix: str) -> bool:
+    return (
+        isinstance(value, str)
+        and value.startswith(prefix)
+        and _TOKEN_PAYLOAD_RE.fullmatch(value[len(prefix) :]) is not None
+    )
 
 
 def _captured_at_ms(value: Any) -> int:
@@ -451,7 +463,7 @@ class ObservationHistoryStore:
                 for segment in scope_meta.get("segments", [])
             )
             scope_meta["last_digest"] = row["digest"]
-            self._scoped_cleanup_once_locked(trigger="append")
+            self._scoped_cleanup_once_locked(trigger="append", persist=False)
             self._write_scoped_manifest_locked()
             return True
 
@@ -690,6 +702,7 @@ class ObservationHistoryStore:
             "cleanup_cursor": None,
             "budget_unsatisfiable": False,
             "orphaned_bytes": 0,
+            "cleanup_diagnostics": [],
             "scopes": {},
         }
 
@@ -715,7 +728,11 @@ class ObservationHistoryStore:
         except Exception:
             candidate = None
         if self._scoped_manifest_valid(candidate):
-            return candidate
+            normalized, diagnostics_corrupt = self._normalize_scoped_manifest(candidate)
+            self._manifest = normalized
+            if diagnostics_corrupt:
+                self._write_scoped_manifest_locked()
+            return normalized
         rebuilt = self._rebuild_scoped_manifest()
         rebuilt["generation"] = self._manifest_generation(candidate)
         self._manifest = rebuilt
@@ -735,7 +752,10 @@ class ObservationHistoryStore:
         except Exception:
             candidate = None
         if self._scoped_manifest_valid(candidate):
-            self._manifest = candidate
+            normalized, diagnostics_corrupt = self._normalize_scoped_manifest(candidate)
+            self._manifest = normalized
+            if diagnostics_corrupt:
+                self._write_scoped_manifest_locked()
             return
         rebuilt = self._rebuild_scoped_manifest()
         rebuilt["generation"] = self._manifest_generation(candidate)
@@ -751,6 +771,87 @@ class ObservationHistoryStore:
             if type(generation) is int and generation >= 0:
                 return generation
         return 0
+
+    @classmethod
+    def _cleanup_diagnostic_valid(cls, candidate: Any) -> bool:
+        if not isinstance(candidate, dict) or set(candidate) != {
+            "scope",
+            "manifest_generation",
+            "segment",
+            "before_bytes",
+            "after_bytes",
+            "cursor",
+            "trigger",
+            "unfinished_reason",
+        }:
+            return False
+        scope = candidate["scope"]
+        if scope is not None:
+            if not isinstance(scope, dict) or set(scope) != {
+                "bot_ref",
+                "persona_ref",
+                "session_ref",
+                "scope_generation",
+                "resolved_at_ms",
+            }:
+                return False
+            if (
+                not _opaque_diagnostic_token(scope["bot_ref"], "bot_v1_")
+                or not _opaque_diagnostic_token(scope["persona_ref"], "persona_v1_")
+                or not _opaque_diagnostic_token(scope["session_ref"], "session_v1_")
+                or type(scope["scope_generation"]) is not int
+                or scope["scope_generation"] < 0
+                or type(scope["resolved_at_ms"]) is not int
+                or scope["resolved_at_ms"] < 0
+            ):
+                return False
+        for field in ("manifest_generation", "before_bytes", "after_bytes"):
+            if type(candidate[field]) is not int or candidate[field] < 0:
+                return False
+        segment = candidate["segment"]
+        if segment is not None and (
+            not isinstance(segment, str) or _SEGMENT_NAME_RE.fullmatch(segment) is None
+        ):
+            return False
+        cursor = candidate["cursor"]
+        if cursor is not None and (
+            not isinstance(cursor, str) or _SCOPE_TOKEN_RE.fullmatch(cursor) is None
+        ):
+            return False
+        if (
+            not isinstance(candidate["trigger"], str)
+            or candidate["trigger"] not in _CLEANUP_TRIGGERS
+        ):
+            return False
+        unfinished_reason = candidate["unfinished_reason"]
+        return unfinished_reason is None or (
+            isinstance(unfinished_reason, str)
+            and unfinished_reason in _UNFINISHED_CLEANUP_REASONS
+        )
+
+    @classmethod
+    def _cleanup_diagnostics_valid(cls, candidate: Any) -> bool:
+        return (
+            isinstance(candidate, list)
+            and len(candidate) <= _CLEANUP_DIAGNOSTIC_LIMIT
+            and all(cls._cleanup_diagnostic_valid(item) for item in candidate)
+        )
+
+    @classmethod
+    def _normalize_scoped_manifest(
+        cls,
+        candidate: dict[str, Any],
+    ) -> tuple[dict[str, Any], bool]:
+        """Keep old v2 manifests readable while isolating diagnostics damage."""
+
+        normalized = dict(candidate)
+        if "cleanup_diagnostics" not in normalized:
+            normalized["cleanup_diagnostics"] = []
+            return normalized, False
+        if not cls._cleanup_diagnostics_valid(normalized["cleanup_diagnostics"]):
+            normalized["cleanup_diagnostics"] = []
+            return normalized, True
+        return normalized, False
 
     def _scoped_manifest_valid(self, candidate: Any) -> bool:
         if (
@@ -1029,31 +1130,141 @@ class ObservationHistoryStore:
             and segment.get("path") != latest
         ]
 
-    def _scoped_cleanup_once_locked(self, *, trigger: str) -> CleanupResult:
+    def _append_cleanup_diagnostic_locked(
+        self,
+        *,
+        deleted_scope: str | None,
+        deleted_segment: str | None,
+        before_bytes: int,
+        after_bytes: int,
+        trigger: str,
+        unfinished_reason: str | None,
+    ) -> None:
+        """Append a bounded, opaque audit record for one cleanup decision."""
+
+        if trigger not in _CLEANUP_TRIGGERS:
+            raise ValueError("unsupported cleanup trigger")
+        if unfinished_reason not in _UNFINISHED_CLEANUP_REASONS | {None}:
+            raise ValueError("unsupported cleanup unfinished reason")
+        if min(before_bytes, after_bytes) < 0:
+            raise ValueError("cleanup byte counts must be non-negative")
+        if deleted_segment is not None and _SEGMENT_NAME_RE.fullmatch(deleted_segment) is None:
+            raise ValueError("cleanup segment must be a filename")
+
+        echo = None
+        if deleted_scope is not None:
+            echo = self._scope_repository._observation_cleanup_diagnostic_echo_locked(
+                deleted_scope
+            )
+        scope: dict[str, Any] | None = None
+        if echo is not None:
+            # This is intentionally explicit rather than dataclasses.asdict():
+            # diagnostics are an allow-list boundary, not a generic serializer.
+            scope = {
+                "bot_ref": echo.bot_ref,
+                "persona_ref": echo.persona_ref,
+                "session_ref": echo.session_ref,
+                "scope_generation": echo.scope_generation,
+                "resolved_at_ms": echo.resolved_at_ms,
+            }
+        diagnostic = {
+            "scope": scope,
+            "manifest_generation": int(self._manifest.get("generation", 0)) + 1,
+            "segment": deleted_segment,
+            "before_bytes": before_bytes,
+            "after_bytes": after_bytes,
+            "cursor": self._manifest.get("cleanup_cursor"),
+            "trigger": trigger,
+            "unfinished_reason": unfinished_reason,
+        }
+        diagnostics = self._manifest.setdefault("cleanup_diagnostics", [])
+        if not isinstance(diagnostics, list):
+            raise ValueError("cleanup diagnostics must be a list")
+        diagnostics.append(diagnostic)
+        if len(diagnostics) > _CLEANUP_DIAGNOSTIC_LIMIT:
+            del diagnostics[:-_CLEANUP_DIAGNOSTIC_LIMIT]
+
+    def _finish_scoped_cleanup_decision_locked(
+        self,
+        *,
+        deleted_scope: str | None,
+        deleted_segment: str | None,
+        budget_unsatisfiable: bool,
+        cleanup_active: bool,
+        before_bytes: int,
+        trigger: str,
+        unfinished_reason: str | None,
+        persist: bool,
+    ) -> CleanupResult:
+        after_bytes = self._scoped_used_bytes()
+        expected_generation = int(self._manifest.get("generation", 0)) + 1
+        self._append_cleanup_diagnostic_locked(
+            deleted_scope=deleted_scope,
+            deleted_segment=deleted_segment,
+            before_bytes=before_bytes,
+            after_bytes=after_bytes,
+            trigger=trigger,
+            unfinished_reason=unfinished_reason,
+        )
+        if persist:
+            self._write_scoped_manifest_locked()
+            expected_generation = int(self._manifest["generation"])
+        return CleanupResult(
+            deleted_scope=deleted_scope,
+            deleted_segment=deleted_segment,
+            budget_unsatisfiable=budget_unsatisfiable,
+            cleanup_active=cleanup_active,
+            manifest_generation=expected_generation,
+        )
+
+    def _scoped_cleanup_once_locked(
+        self,
+        *,
+        trigger: str,
+        persist: bool = True,
+    ) -> CleanupResult:
         limit = self._limit_bytes()
-        generation = int(self._manifest.get("generation", 0))
+        before_bytes = self._scoped_used_bytes()
         if limit == 0:
-            changed = bool(self._manifest.get("cleanup_active")) or bool(self._manifest.get("budget_unsatisfiable"))
             self._manifest["cleanup_active"] = False
             self._manifest["budget_unsatisfiable"] = False
-            if changed:
-                self._write_scoped_manifest_locked()
-            return CleanupResult(cleanup_active=False, manifest_generation=int(self._manifest.get("generation", generation)))
-        used = self._scoped_used_bytes()
+            return self._finish_scoped_cleanup_decision_locked(
+                deleted_scope=None,
+                deleted_segment=None,
+                budget_unsatisfiable=False,
+                cleanup_active=False,
+                before_bytes=before_bytes,
+                trigger=trigger,
+                unfinished_reason=None,
+                persist=persist,
+            )
+        used = before_bytes
         target = math.floor(limit * self._target_ratio)
         if used <= target:
-            changed = bool(self._manifest.get("cleanup_active")) or bool(self._manifest.get("budget_unsatisfiable"))
             self._manifest["cleanup_active"] = False
             self._manifest["budget_unsatisfiable"] = False
-            if changed:
-                self._write_scoped_manifest_locked()
-            return CleanupResult(cleanup_active=False, manifest_generation=int(self._manifest.get("generation", generation)))
+            return self._finish_scoped_cleanup_decision_locked(
+                deleted_scope=None,
+                deleted_segment=None,
+                budget_unsatisfiable=False,
+                cleanup_active=False,
+                before_bytes=before_bytes,
+                trigger=trigger,
+                unfinished_reason=None,
+                persist=persist,
+            )
         if used <= limit and not self._manifest.get("cleanup_active"):
-            changed = bool(self._manifest.get("budget_unsatisfiable"))
             self._manifest["budget_unsatisfiable"] = False
-            if changed:
-                self._write_scoped_manifest_locked()
-            return CleanupResult(cleanup_active=False, manifest_generation=int(self._manifest.get("generation", generation)))
+            return self._finish_scoped_cleanup_decision_locked(
+                deleted_scope=None,
+                deleted_segment=None,
+                budget_unsatisfiable=False,
+                cleanup_active=False,
+                before_bytes=before_bytes,
+                trigger=trigger,
+                unfinished_reason=None,
+                persist=persist,
+            )
 
         self._manifest["cleanup_active"] = True
         scopes = {
@@ -1092,14 +1303,16 @@ class ObservationHistoryStore:
                 )
             )
         if not candidates:
-            changed = not bool(self._manifest.get("budget_unsatisfiable"))
             self._manifest["budget_unsatisfiable"] = True
-            if changed:
-                self._write_scoped_manifest_locked()
-            return CleanupResult(
+            return self._finish_scoped_cleanup_decision_locked(
+                deleted_scope=None,
+                deleted_segment=None,
                 budget_unsatisfiable=True,
                 cleanup_active=True,
-                manifest_generation=int(self._manifest["generation"]),
+                before_bytes=before_bytes,
+                trigger=trigger,
+                unfinished_reason="budget_unsatisfiable",
+                persist=persist,
             )
         token, segment = min(
             candidates,
@@ -1120,13 +1333,17 @@ class ObservationHistoryStore:
         self._manifest["cleanup_cursor"] = token
         self._manifest["budget_unsatisfiable"] = False
         self._manifest["cleanup_active"] = self._scoped_used_bytes() > target
-        self._write_scoped_manifest_locked()
-        return CleanupResult(
+        return self._finish_scoped_cleanup_decision_locked(
             deleted_scope=token,
             deleted_segment=segment["path"],
             budget_unsatisfiable=False,
             cleanup_active=bool(self._manifest["cleanup_active"]),
-            manifest_generation=int(self._manifest["generation"]),
+            before_bytes=before_bytes,
+            trigger=trigger,
+            unfinished_reason=(
+                "cleanup_active" if self._manifest["cleanup_active"] else None
+            ),
+            persist=persist,
         )
 
     def append_snapshot(
