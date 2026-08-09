@@ -2498,7 +2498,8 @@ def start_webui_thread_server(
             )
             self.send_header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
             self.send_header(
-                "Access-Control-Allow-Headers", "Content-Type,Authorization,X-CSRF-Token"
+                "Access-Control-Allow-Headers",
+                f"Content-Type,Authorization,X-CSRF-Token,{SCOPE_NONCE_HEADER}",
             )
             self.end_headers()
 

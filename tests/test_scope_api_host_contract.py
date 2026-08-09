@@ -1153,6 +1153,15 @@ def test_stdlib_scoped_http_uses_bearer_and_header_nonce_only(tmp_path) -> None:
             assert body_nonce.status == 400
             assert json.loads(body_nonce.read()) == {"error": "scope_nonce_required"}
             assert mutation_nonce in service._pending_nonces
+
+            connection.request("OPTIONS", path)
+            options = connection.getresponse()
+            assert options.status == 204
+            assert SCOPE_NONCE_HEADER in {
+                value.strip()
+                for value in options.getheader("Access-Control-Allow-Headers", "").split(",")
+            }
+            assert options.read() == b""
         finally:
             connection.close()
     finally:
