@@ -12,7 +12,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Callable, Final
+from typing import Any, Callable, Final, Mapping, TypeAlias
 
 from .scope_contracts import (
     RelationScope,
@@ -43,7 +43,7 @@ SCOPED_API_ENDPOINTS: Final[frozenset[str]] = frozenset(
         "ws",
     }
 )
-SCOPED_API_METHODS: Final[dict[str, str]] = {
+_SCOPED_API_METHODS: Final[dict[str, str]] = {
     "scope": "GET",
     "state": "GET",
     "observation-history": "GET",
@@ -56,6 +56,10 @@ SCOPED_API_METHODS: Final[dict[str, str]] = {
     "stream": "GET",
     "ws": "GET",
 }
+SCOPED_API_METHODS: Final[Mapping[str, str]] = MappingProxyType(_SCOPED_API_METHODS)
+PrincipalScopeGrant: TypeAlias = Callable[
+    [ScopedPrincipal, SessionScope, str], RelationScope | None
+]
 
 _NONCE_PREFIX: Final[str] = "scope_nonce_v1_"
 _NONCE_TTL_MS: Final[int] = 30_000
@@ -318,6 +322,7 @@ class ScopedApiService:
         turn_lookup: Callable[[SessionScope], object | None],
         clock_ms: Callable[[], int] | None = None,
         nonce_ttl_ms: int = _NONCE_TTL_MS,
+        principal_scope_grant: PrincipalScopeGrant | None = None,
     ) -> None:
         if type(repository) is not ScopeRepository:
             raise ValueError("repository must be a ScopeRepository")
@@ -327,11 +332,14 @@ class ScopedApiService:
             raise ValueError("turn_lookup must be callable")
         if type(nonce_ttl_ms) is not int or nonce_ttl_ms <= 0:
             raise ValueError("nonce_ttl_ms must be a positive int")
+        if principal_scope_grant is not None and not callable(principal_scope_grant):
+            raise ValueError("principal_scope_grant must be callable or None")
         self._repository = repository
         self._registry = registry
         self._turn_lookup = turn_lookup
         self._clock_ms = clock_ms or _now_ms
         self._nonce_ttl_ms = nonce_ttl_ms
+        self._principal_scope_grant = principal_scope_grant
         self._lock = threading.RLock()
         self._pending_nonces: dict[str, _NonceRecord] = {}
         self._retired_nonces: dict[str, tuple[int, str]] = {}
@@ -475,10 +483,14 @@ class ScopedApiService:
         scope = self.resolve(path.bot_ref, path.persona_ref, path.session_ref)
         if isinstance(scope, ScopedApiError):
             return scope
+        relation_scope = self._principal_grant(
+            authenticated_principal,
+            scope,
+            route.action,
+        )
+        if relation_scope is None:
+            return ScopedApiError(403, "scope_principal_forbidden")
         if not self._registry.is_live_session(scope):
-            return ScopedApiError(410, "scope_required")
-        relation = self._registry.unique_relation_for_scope(scope)
-        if relation is None:
             return ScopedApiError(410, "scope_required")
         try:
             turn = self._turn_lookup(scope)
@@ -494,13 +506,15 @@ class ScopedApiService:
         try:
             return self.issue_nonce(
                 scope,
-                relation.scope,
+                relation_scope,
                 turn_generation=turn_generation,
                 principal=authenticated_principal,
                 endpoint=route.endpoint,
                 method=route.method,
             )
-        except RuntimeError:
+        except RuntimeError as exc:
+            if str(exc) == "scope_principal_forbidden":
+                return ScopedApiError(403, "scope_principal_forbidden")
             return ScopedApiError(410, "scope_required")
 
     def issue_nonce(
@@ -620,6 +634,9 @@ class ScopedApiService:
             return ScopedApiError(503, "scope_repository_unavailable")
         if resolved != record.scope:
             return self._stale_error()
+        grant = self._principal_grant(record.principal, resolved, record.action)
+        if grant is None or grant != record.relation_scope:
+            return ScopedApiError(403, "scope_principal_forbidden")
         try:
             self._repository.validate_relation_scope(record.relation_scope)
         except StaleScopeWrite:
@@ -723,6 +740,29 @@ class ScopedApiService:
             and path.session_ref == scope.session_ref.token
         )
 
+    def _principal_grant(
+        self,
+        principal: ScopedPrincipal,
+        scope: SessionScope,
+        action: str,
+    ) -> RelationScope | None:
+        """Return one live-authority candidate, failing closed on every ambiguity."""
+
+        grant_issuer = self._principal_scope_grant
+        if not callable(grant_issuer):
+            return None
+        try:
+            grant = grant_issuer(principal, scope, action)
+        except Exception:  # noqa: BLE001 - external identity proof must fail closed
+            return None
+        if (
+            type(grant) is not RelationScope
+            or grant.bot_ref != scope.bot_ref
+            or grant.persona_ref != scope.persona_ref
+        ):
+            return None
+        return grant
+
     def _missing_parent_error(self, path: ScopeApiPathEcho) -> ScopedApiError:
         """Classify only parent ownership after an exact lookup has missed.
 
@@ -797,24 +837,31 @@ def scoped_api_service_for_plugin(plugin: object) -> ScopedApiService | None:
 
     existing = getattr(plugin, "_scoped_api_service", None)
     if type(existing) is ScopedApiService:
-        return existing
+        return existing if callable(existing._principal_scope_grant) else None
     registry = getattr(plugin, "_scope_runtime_registry", None)
     resolver = getattr(plugin, "_scope_resolver_v1", None)
     repository = getattr(resolver, "_repository", None)
     catalog = getattr(resolver, "catalog", None)
     current_exact = getattr(catalog, "current_exact", None)
+    principal_scope_grant = getattr(plugin, "_scoped_api_principal_scope_grant", None)
     if (
         type(registry) is not ScopeRuntimeRegistry
         or type(repository) is not ScopeRepository
         or registry.repository is not repository
         or not callable(current_exact)
+        or not callable(principal_scope_grant)
     ):
         return None
 
     def turn_lookup(scope: SessionScope) -> object | None:
         return current_exact(scope.bot_ref.token, scope.session_ref.token)
 
-    service = ScopedApiService(repository, registry, turn_lookup=turn_lookup)
+    service = ScopedApiService(
+        repository,
+        registry,
+        turn_lookup=turn_lookup,
+        principal_scope_grant=principal_scope_grant,
+    )
     try:
         setattr(plugin, "_scoped_api_service", service)
     except Exception:  # noqa: BLE001 - immutable test/plugin facades may still use it
@@ -864,6 +911,7 @@ __all__ = [
     "SCOPED_API_ROUTE_SPECS",
     "SCOPED_API_ROOT",
     "SCOPE_NONCE_HEADER",
+    "PrincipalScopeGrant",
     "ScopeRouteSpec",
     "ScopedApiAuthorization",
     "ScopedApiError",

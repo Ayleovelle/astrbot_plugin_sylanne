@@ -16,6 +16,7 @@ from sylanne_alpha.scope_contracts import (
     BotRef,
     PersonaRevisionRef,
     RelationRef,
+    RelationScope,
     ScopeApiPathEcho,
     ScopedPrincipal,
     SessionRef,
@@ -24,6 +25,7 @@ from sylanne_alpha.scope_contracts import (
 from sylanne_alpha.scope_repository import ScopeRepository
 from sylanne_alpha.scope_runtime import ScopeRuntimeRegistry
 from sylanne_alpha.scoped_api import (
+    SCOPED_API_METHODS,
     SCOPED_API_ROUTE_SPECS,
     ScopeRouteSpec,
     ScopedApiAuthorization,
@@ -31,6 +33,7 @@ from sylanne_alpha.scoped_api import (
     ScopedApiRequest,
     ScopedApiService,
     scoped_api_route_spec,
+    scoped_api_service_for_plugin,
 )
 
 
@@ -88,11 +91,20 @@ def _service(tmp_path):
     )
     assert relation is not None
     turn = _frozen_turn(scope)
+
+    def test_grant(
+        _principal: ScopedPrincipal,
+        candidate: SessionScope,
+        _action: str,
+    ) -> RelationScope | None:
+        return relation.scope if candidate == scope else None
+
     service = ScopedApiService(
         repository,
         registry,
         turn_lookup=lambda candidate: turn if candidate == scope else None,
         clock_ms=lambda: 1_000,
+        principal_scope_grant=test_grant,
     )
     return service, repository, registry, scope, relation.scope
 
@@ -121,6 +133,198 @@ def test_scoped_route_specs_are_immutable_and_bind_the_method_to_each_action() -
     assert melt.action == "POST:memory/meltdown"
     with pytest.raises(TypeError):
         SCOPED_API_ROUTE_SPECS["state"] = state  # type: ignore[index]
+
+
+def test_scoped_method_and_route_contracts_cannot_mutate_at_runtime() -> None:
+    original_method = SCOPED_API_METHODS["state"]
+    try:
+        with pytest.raises(TypeError):
+            SCOPED_API_METHODS["state"] = "POST"  # type: ignore[index]
+    finally:
+        if type(SCOPED_API_METHODS) is dict:
+            SCOPED_API_METHODS["state"] = original_method
+    assert scoped_api_route_spec("state").action == "GET:state"
+
+
+def test_principal_scope_grant_is_required_and_revalidated_before_relation_runtime(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = ScopeRepository(tmp_path)
+    scope = repository.create_scope(_scope(), expected_absent=True)
+    registry = ScopeRuntimeRegistry.for_test(repository=repository)
+    registry.exact_session(scope)
+    relation_runtime = registry.relation_for(
+        scope,
+        AuthenticatedSubject(
+            relation_ref=RelationRef(
+                token="relation_v1_grant_owner",
+                bot_ref=scope.bot_ref,
+            ),
+            identity_quality="event_get_sender_id",
+        ),
+    )
+    other_relation_runtime = registry.relation_for(
+        scope,
+        AuthenticatedSubject(
+            relation_ref=RelationRef(
+                token="relation_v1_grant_other",
+                bot_ref=scope.bot_ref,
+            ),
+            identity_quality="event_get_sender_id",
+        ),
+    )
+    assert relation_runtime is not None
+    assert other_relation_runtime is not None
+    owner = _principal("principal_v1_grant_owner")
+    arbitrary = _principal("principal_v1_grant_arbitrary")
+    grant_state = {"allowed": True}
+    grant_calls: list[tuple[ScopedPrincipal, SessionScope, str]] = []
+
+    def grant(
+        principal: ScopedPrincipal,
+        candidate: SessionScope,
+        action: str,
+    ) -> RelationScope | None:
+        grant_calls.append((principal, candidate, action))
+        if (
+            grant_state["allowed"]
+            and principal == owner
+            and candidate == scope
+            and action == "GET:state"
+        ):
+            return relation_runtime.scope
+        return None
+
+    service = ScopedApiService(
+        repository,
+        registry,
+        turn_lookup=lambda candidate: _frozen_turn(scope) if candidate == scope else None,
+        clock_ms=lambda: 1_000,
+        principal_scope_grant=grant,
+    )
+    nonce = service.issue_nonce(
+        scope,
+        relation_runtime.scope,
+        turn_generation=7,
+        principal=owner,
+    )
+    assert grant_calls[-1] == (owner, scope, "GET:state")
+
+    with pytest.raises(RuntimeError, match="scope_principal_forbidden"):
+        service.issue_nonce(
+            scope,
+            relation_runtime.scope,
+            turn_generation=7,
+            principal=arbitrary,
+        )
+    with pytest.raises(RuntimeError, match="scope_principal_forbidden"):
+        service.issue_nonce(
+            scope,
+            other_relation_runtime.scope,
+            turn_generation=7,
+            principal=owner,
+        )
+
+    service._principal_scope_grant = None
+    with pytest.raises(RuntimeError, match="scope_principal_forbidden"):
+        service.issue_nonce(
+            scope,
+            relation_runtime.scope,
+            turn_generation=7,
+            principal=owner,
+        )
+    service._principal_scope_grant = grant
+
+    grant_state["allowed"] = False
+    monkeypatch.setattr(
+        repository,
+        "validate_relation_scope",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("grant denial must precede relation lookup")),
+    )
+    monkeypatch.setattr(
+        registry,
+        "relation_or_none",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("grant denial must precede runtime lookup")),
+    )
+    denied = service.authorize(
+        ScopedApiRequest.from_tokens(
+            bot_ref=scope.bot_ref.token,
+            persona_ref=scope.persona_ref.token,
+            session_ref=scope.session_ref.token,
+            nonce=nonce,
+            endpoint="state",
+            principal=owner,
+        )
+    )
+    assert isinstance(denied, ScopedApiError)
+    assert (denied.status, denied.code) == (403, "scope_principal_forbidden")
+
+
+def test_principal_scope_grant_revocation_blocks_consume_and_revalidate(tmp_path) -> None:
+    service, _repository, _registry, scope, relation = _service(tmp_path)
+    principal = _principal()
+    granted = {"enabled": True}
+
+    def grant(
+        candidate_principal: ScopedPrincipal,
+        candidate_scope: SessionScope,
+        action: str,
+    ) -> RelationScope | None:
+        if granted["enabled"] and candidate_principal == principal and candidate_scope == scope:
+            return relation
+        return None
+
+    service._principal_scope_grant = grant
+    consume_nonce = service.issue_nonce(
+        scope,
+        relation,
+        turn_generation=7,
+        principal=principal,
+    )
+    granted["enabled"] = False
+    denied_consume = service.authorize(_request(scope, consume_nonce))
+    assert isinstance(denied_consume, ScopedApiError)
+    assert (denied_consume.status, denied_consume.code) == (403, "scope_principal_forbidden")
+
+    granted["enabled"] = True
+    stream_nonce = service.issue_nonce(
+        scope,
+        relation,
+        turn_generation=7,
+        principal=principal,
+    )
+    authorization = service.authorize(_request(scope, stream_nonce))
+    assert isinstance(authorization, ScopedApiAuthorization)
+    granted["enabled"] = False
+    denied_stream = service.revalidate(authorization)
+    assert isinstance(denied_stream, ScopedApiError)
+    assert (denied_stream.status, denied_stream.code) == (403, "scope_principal_forbidden")
+
+
+def test_plugin_service_requires_host_principal_scope_grant(tmp_path) -> None:
+    repository = ScopeRepository(tmp_path)
+    scope = repository.create_scope(_scope(), expected_absent=True)
+    registry = ScopeRuntimeRegistry.for_test(repository=repository)
+    registry.exact_session(scope)
+    resolver = SimpleNamespace(
+        _repository=repository,
+        catalog=SimpleNamespace(
+            current_exact=lambda bot_ref, session_ref: (
+                _frozen_turn(scope)
+                if (bot_ref, session_ref) == (scope.bot_ref.token, scope.session_ref.token)
+                else None
+            )
+        ),
+    )
+    plugin = SimpleNamespace(
+        _scope_runtime_registry=registry,
+        _scope_resolver_v1=resolver,
+    )
+
+    assert scoped_api_service_for_plugin(plugin) is None
+    plugin._scoped_api_principal_scope_grant = lambda *_args: None
+    assert isinstance(scoped_api_service_for_plugin(plugin), ScopedApiService)
 
 
 def _safe_genesis_profile() -> dict[str, object]:
@@ -612,7 +816,7 @@ def test_issued_nonce_maps_runtime_loss_to_410_and_repository_failure_to_503(
     assert repository_error.code == "scope_repository_unavailable"
 
 
-def test_scoped_nonce_expiry_and_ambiguous_bootstrap_fail_closed(tmp_path) -> None:
+def test_scoped_nonce_expiry_and_bootstrap_uses_the_principal_grant(tmp_path) -> None:
     service, _repository, registry, scope, relation = _service(tmp_path)
     nonce = service.issue_nonce(scope, relation, turn_generation=7, principal=_principal())
     expiry = service._pending_nonces[nonce].expires_at_ms
@@ -623,7 +827,7 @@ def test_scoped_nonce_expiry_and_ambiguous_bootstrap_fail_closed(tmp_path) -> No
     assert expired.status == 403
     assert expired.code == "scope_nonce_expired"
 
-    service, _repository, registry, scope, _relation = _service(tmp_path / "ambiguous")
+    service, _repository, registry, scope, relation = _service(tmp_path / "ambiguous")
     other = registry.relation_for(
         scope,
         AuthenticatedSubject(
@@ -643,8 +847,8 @@ def test_scoped_nonce_expiry_and_ambiguous_bootstrap_fail_closed(tmp_path) -> No
         ),
         principal=_principal(),
     )
-    assert isinstance(bootstrap, ScopedApiError)
-    assert bootstrap.status == 410
+    assert isinstance(bootstrap, str)
+    assert service._pending_nonces[bootstrap].relation_scope == relation
 
 
 def test_scoped_nonce_path_substitution_fails_without_resolving_sibling(tmp_path, monkeypatch) -> None:
