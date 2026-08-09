@@ -303,23 +303,26 @@ def test_life_controls_unknown_action(loop, monkeypatch):
 
 
 def test_life_routes_registered_in_main():
-    """main._register_web_apis 必须包含 5 个生活观测路径，且 handler 名与 WebUIRoutes 对齐。"""
+    """Scope-less life routes must share the central explicit 410 migration table."""
     import inspect
 
     import main as _main
+    from sylanne_alpha.webui_routes import LEGACY_SCOPED_PRIVATE_ROUTES
 
     plugin_cls = _main.EmotionalStatePlugin
     src = inspect.getsource(plugin_cls._register_web_apis)
-    for handler_name in (
-        "life_status_handler",
-        "life_events_handler",
-        "life_projects_handler",
-        "life_audit_handler",
-        "life_diagnostics_handler",
-        "life_controls_handler",
+    retired = dict(LEGACY_SCOPED_PRIVATE_ROUTES)
+    for path, methods in (
+        ("/api/life/status", ("GET",)),
+        ("/api/life/events", ("GET",)),
+        ("/api/life/projects", ("GET",)),
+        ("/api/life/audit", ("GET",)),
+        ("/api/life/diagnostics", ("GET",)),
+        ("/api/life/controls", ("POST",)),
     ):
-        assert handler_name in src, f"missing route handler reference: {handler_name}"
-        assert hasattr(WebUIRoutes, handler_name), f"WebUIRoutes lacks {handler_name}"
+        assert retired[path] == methods
+    assert "LEGACY_SCOPED_PRIVATE_ROUTES" in src
+    assert "legacy_scope_gone_handler" in src
 
 
 def test_life_routes_registered_in_webui_server():

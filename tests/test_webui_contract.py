@@ -325,13 +325,16 @@ def test_native_observation_history_handler_and_error_dict(
     assert "session" in error["error"]
 
 
-def test_native_observation_history_route_is_registered() -> None:
+def test_native_observation_history_route_is_explicitly_retired() -> None:
     import inspect
     import main
+    from sylanne_alpha.webui_routes import LEGACY_SCOPED_PRIVATE_ROUTES
 
     source = inspect.getsource(main.EmotionalStatePlugin._register_web_apis)
 
-    assert 'api/observation_history", "observation_history_handler", ["GET"]' in source
+    assert ("/api/observation_history", ("GET",)) in LEGACY_SCOPED_PRIVATE_ROUTES
+    assert "LEGACY_SCOPED_PRIVATE_ROUTES" in source
+    assert "legacy_scope_gone_handler" in source
 
 
 def _unused_local_port() -> int:
@@ -340,7 +343,7 @@ def _unused_local_port() -> int:
         return int(stream.getsockname()[1])
 
 
-def test_aiohttp_observation_history_endpoint_uses_shared_payload() -> None:
+def test_aiohttp_observation_history_endpoint_is_retired_before_payload() -> None:
     from aiohttp import ClientSession
     from sylanne_alpha import webui_server
 
@@ -369,17 +372,9 @@ def test_aiohttp_observation_history_endpoint_uses_shared_payload() -> None:
                         await asyncio.sleep(0.01)
                 assert response is not None
                 async with response:
-                    assert response.status == 200
-                    payload = await response.json()
-                assert payload["session"] == "aiohttp"
-                invalid = await client.get(
-                    f"http://127.0.0.1:{port}/api/observation_history",
-                    params={"session": "", "group": "feedback"},
-                )
-                async with invalid:
-                    assert invalid.status == 400
-                    assert "session" in (await invalid.json())["error"]
-            assert store.calls[-1]["group"] == "feedback"
+                    assert response.status == 410
+                    assert await response.json() == {"error": "scope_required"}
+            assert store.calls == []
         finally:
             task.cancel()
             await task
@@ -387,7 +382,7 @@ def test_aiohttp_observation_history_endpoint_uses_shared_payload() -> None:
     asyncio.run(exercise())
 
 
-def test_stdlib_observation_history_endpoint_uses_shared_payload() -> None:
+def test_stdlib_observation_history_endpoint_is_retired_before_payload() -> None:
     from sylanne_alpha import webui_server
 
     token = "observation-test-token"
@@ -403,19 +398,10 @@ def test_stdlib_observation_history_endpoint_uses_shared_payload() -> None:
             "?session=stdlib&group=gate&max_points=2",
             headers={"Authorization": f"Bearer {token}"},
         )
-        with urlopen(request, timeout=2) as response:
-            payload = json.loads(response.read())
-        assert payload["session"] == "stdlib"
-        assert store.calls[-1]["max_points"] == 2
-
-        invalid = Request(
-            f"http://127.0.0.1:{port}/api/observation_history"
-            "?session=stdlib&group=route",
-            headers={"Authorization": f"Bearer {token}"},
-        )
         with pytest.raises(HTTPError) as caught:
-            urlopen(invalid, timeout=2)
-        assert caught.value.code == 400
+            urlopen(request, timeout=2)
+        assert caught.value.code == 410
+        assert store.calls == []
     finally:
         asyncio.run(webui_server.stop_webui_server())
 

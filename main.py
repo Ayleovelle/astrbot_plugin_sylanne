@@ -230,17 +230,23 @@ from sylanne_alpha.background_queue import BackgroundPostQueue  # noqa: E402
 from sylanne_alpha.scoped_host_runtime import ScopedHostRuntime  # noqa: E402
 from sylanne_alpha.v2core.integration import ScopedV2DomainPersistence  # noqa: E402
 from sylanne_alpha.v3bridge.integration import ScopedV3ShadowState  # noqa: E402
-from sylanne_alpha.webui_routes import WebUIRoutes  # noqa: E402
+from sylanne_alpha.webui_routes import (  # noqa: E402
+    LEGACY_SCOPED_PRIVATE_ROUTES,
+    WebUIRoutes,
+)
 from sylanne_alpha.scoped_api import (  # noqa: E402
-    SCOPED_API_METHODS,
+    SCOPED_API_ROUTE_SPECS,
     issue_scoped_api_nonce_for_binding,
     scoped_api_service_for_plugin,
 )
 from sylanne_alpha.scope_contracts import (  # noqa: E402
     BotRef,
+    PersonaScope,
+    RelationScope,
     ResolvedScope,
     ResolvedTransportScope,
     SessionScope,
+    ScopedPrincipal,
     TurnSubjectProof,
     VerifiedSubjectInput,
 )
@@ -1331,6 +1337,10 @@ class _ScopedRuntimeBinding:
     session_runtime: ScopedSessionRuntime
     relation_runtime: Any | None = None
     subject: Any | None = None
+    # HTTP authority is issued only by a verified WebUI host adapter.  An IM
+    # request view deliberately carries no WebUI principal, so the old helper
+    # cannot accidentally mint a browser capability from a chat event.
+    principal: ScopedPrincipal | None = None
     turn_generation: int | None = None
     request_runtime_view: RequestRuntimeView | None = None
 
@@ -1520,44 +1530,18 @@ class EmotionalStatePlugin(Star):
         for path, handler, methods, desc in core_routes:
             context.register_web_api(path, handler, methods, desc)
 
-        # WebUI 路由（跨文件引用，用字符串名 + getattr 防御性解析）
+        # Public shell/static routes stay available.  Every old scope-less route
+        # that could inspect or mutate private state is registered separately as
+        # an unconditional 410 handler below; leaving it unregistered would
+        # turn an explicit migration boundary into an ambiguous 404.
         webui_routes: list[tuple[str, str, list[str]]] = [
             (f"/{P}/webui", "page_handler", ["GET"]),
-            (f"/{P}/api/state", "state_handler", ["GET"]),
-            (f"/{P}/api/observation_history", "observation_history_handler", ["GET"]),
-            (f"/{P}/api/settings", "settings_get_handler", ["GET"]),
-            (f"/{P}/api/settings", "settings_post_handler", ["POST"]),
-            (f"/{P}/api/computation_logs", "computation_logs_handler", ["GET"]),
-            (f"/{P}/api/memory_pools", "memory_pools_handler", ["GET"]),
-            (f"/{P}/api/memory_meltdown", "memory_meltdown_handler", ["POST"]),
-            (f"/{P}/api/meltdown_nonce", "meltdown_nonce_handler", ["GET"]),
-            (f"/{P}/api/memory_sink", "memory_sink_handler", ["GET"]),
-            (f"/{P}/api/memory_consolidate", "memory_consolidate_handler", ["POST"]),
             (f"/{P}/api/webui_probe", "probe_handler", ["GET"]),
             (f"/{P}/assets/logo.png", "logo_handler", ["GET"]),
             (f"/{P}/logo.png", "logo_handler", ["GET"]),
             (f"/{P}/dashboard", "dashboard_handler", ["GET"]),
             (f"/{P}/api/config_presets", "config_presets_handler", ["GET"]),
-            (f"/{P}/api/export_data", "export_data_handler", ["GET"]),
-            (f"/{P}/api/purge_data", "purge_data_handler", ["DELETE"]),
             (f"/{P}/health", "health_handler", ["GET"]),
-            (f"/{P}/api/error_stats", "error_stats_handler", ["GET"]),
-            (f"/{P}/api/config_export", "config_export_handler", ["GET"]),
-            (f"/{P}/api/config_import", "config_import_handler", ["POST"]),
-            (f"/{P}/api/widget-state", "widget_state_handler", ["GET"]),
-            (f"/{P}/api/v2core_state", "v2core_state_handler", ["GET"]),
-            # MEM-03 PR-7：三只读 admin 端点（嵌入式镜像，独立 webui_server 侧见
-            # /api/admin/* 的 aiohttp 注册）。
-            (f"/{P}/api/admin/inspect", "admin_inspect_handler", ["GET"]),
-            (f"/{P}/api/admin/quarantine_view", "admin_quarantine_view_handler", ["GET"]),
-            (f"/{P}/api/admin/pending_deletes", "admin_pending_deletes_handler", ["GET"]),
-            # Phase 4：生活观测面板（与独立 webui_server 镜像）
-            (f"/{P}/api/life/status", "life_status_handler", ["GET"]),
-            (f"/{P}/api/life/events", "life_events_handler", ["GET"]),
-            (f"/{P}/api/life/projects", "life_projects_handler", ["GET"]),
-            (f"/{P}/api/life/audit", "life_audit_handler", ["GET"]),
-            (f"/{P}/api/life/diagnostics", "life_diagnostics_handler", ["GET"]),
-            (f"/{P}/api/life/controls", "life_controls_handler", ["POST"]),
         ]
         for path, handler_name, methods in webui_routes:
             handler = getattr(wr, handler_name, None)
@@ -1569,6 +1553,14 @@ class EmotionalStatePlugin(Star):
                 )
                 continue
             context.register_web_api(path, handler, methods, f"Sylanne {handler_name}")
+
+        for legacy_path, route_methods in LEGACY_SCOPED_PRIVATE_ROUTES:
+            context.register_web_api(
+                f"/{P}{legacy_path}",
+                wr.legacy_scope_gone_handler,
+                list(route_methods),
+                "Sylanne legacy scoped endpoint retired",
+            )
 
         context.register_web_api(
             f"/{P}/api/scopes",
@@ -1592,16 +1584,27 @@ class EmotionalStatePlugin(Star):
         scoped_root = (
             f"/{P}/api/v1/bots/<bot_ref>/personas/<persona_ref>/sessions/<session_ref>"
         )
-        for endpoint, method in SCOPED_API_METHODS.items():
+        # This legacy spelling must be explicit 410 before any host tries a
+        # WebSocket upgrade.  The canonical standalone-only socket endpoint is
+        # ``.../ws`` and Pages never registers it.
+        context.register_web_api(
+            f"{scoped_root}/ws/state",
+            wr.legacy_scope_gone_handler,
+            ["GET"],
+            "Sylanne legacy scoped WebSocket retired",
+        )
+        for endpoint, route in SCOPED_API_ROUTE_SPECS.items():
+            if endpoint == "ws":
+                continue
             path = scoped_root if endpoint == "scope" else f"{scoped_root}/{endpoint}"
 
-            async def scoped_handler(_endpoint: str = endpoint) -> Any:
+            async def scoped_handler(_endpoint: str = route.endpoint) -> Any:
                 return await wr.scoped_api_handler(_endpoint)
 
             context.register_web_api(
                 path,
                 scoped_handler,
-                [method],
+                [route.method],
                 f"Sylanne scoped API {endpoint}",
             )
 
@@ -2167,6 +2170,68 @@ class EmotionalStatePlugin(Star):
             scoped_api_service_for_plugin(self),
             binding,
         )
+
+    def _scoped_api_principal_from_authenticated_host(
+        self,
+        host: object,
+        identity: object,
+    ) -> ScopedPrincipal | None:
+        """Derive an opaque principal from a host-authenticated identity only.
+
+        ``identity`` is supplied exclusively by the Pages ``request.username``
+        carrier or by the standalone server *after* its Bearer comparison.  It
+        is consumed as an HMAC message and is never retained, returned, or
+        logged.  Callers must not use this helper for request headers, query
+        parameters, cookies, or an IM sender identity.
+        """
+
+        if host not in {"pages", "standalone"}:
+            return None
+        if type(identity) is not str or not identity or len(identity) > 512:
+            return None
+        secret = getattr(self, "_correlation_secret", None)
+        if type(secret) is not bytes or len(secret) != 32:
+            return None
+        try:
+            payload = b"sylanne-scoped-api-principal-v1\x00" + host.encode(
+                "ascii"
+            ) + b"\x00" + identity.encode("utf-8")
+        except UnicodeEncodeError:
+            return None
+        digest = hmac.new(secret, payload, "sha256").hexdigest()
+        try:
+            return ScopedPrincipal(token=f"principal_v1_{digest}")
+        except ValueError:
+            return None
+
+    def _scoped_api_principal_scope_grant(
+        self,
+        principal: ScopedPrincipal,
+        scope: SessionScope,
+        action: str,
+    ) -> RelationScope | None:
+        """Fail closed until an audited host-principal relation map exists.
+
+        Pages usernames and the standalone Bearer credential authenticate a
+        WebUI operator, but neither is an AstrBot adapter subject.  The current
+        runtime has no durable, audited operator-to-RelationScope authority
+        mapping; selecting a relation by path, first item, or unique live item
+        would silently grant access.  Keep the shared core gate closed instead.
+        """
+
+        del principal, scope, action
+        return None
+
+    def _scoped_api_principal_persona_grant(
+        self,
+        principal: ScopedPrincipal,
+        persona: PersonaScope,
+        action: str,
+    ) -> RelationScope | None:
+        """Fail closed for Persona reads pending the same authority mapping."""
+
+        del principal, persona, action
+        return None
 
     def _active_scoped_session_runtime(self) -> ScopedSessionRuntime | None:
         binding = self._bound_runtime()

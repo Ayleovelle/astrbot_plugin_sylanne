@@ -31,12 +31,14 @@ from typing import TYPE_CHECKING, Any
 
 from sylanne_alpha.scoped_api import (
     SCOPE_NONCE_HEADER,
+    ScopeRouteSpec,
     ScopedApiAuthorization,
     ScopedApiError,
     ScopedApiRequest,
     scoped_api_service_for_plugin,
+    scoped_api_route_spec,
 )
-from sylanne_alpha.scope_contracts import ScopeApiPathEcho
+from sylanne_alpha.scope_contracts import ScopeApiPathEcho, ScopedPrincipal
 
 if TYPE_CHECKING:
     from sylanne_alpha.protocols import PluginHost
@@ -62,6 +64,98 @@ OBSERVATION_HISTORY_GROUPS = frozenset(
         "feedback",
     }
 )
+
+
+# The retired scope-less surfaces are shared by AstrBot Pages and both
+# standalone servers.  Keep the route/method inventory here so no host can
+# accidentally leave one stateful legacy endpoint behind during a migration.
+# Static reference data (``/api/config_presets`` and ``/api/glossary``) is not
+# relation-owned and intentionally remains outside this table.
+LEGACY_SCOPED_PRIVATE_ROUTES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("/api/state", ("GET",)),
+    ("/api/observation_history", ("GET",)),
+    ("/api/life/status", ("GET",)),
+    ("/api/life/events", ("GET",)),
+    ("/api/life/projects", ("GET",)),
+    ("/api/life/audit", ("GET",)),
+    ("/api/life/diagnostics", ("GET",)),
+    ("/api/life/controls", ("POST",)),
+    ("/api/settings", ("GET", "POST")),
+    ("/api/computation_logs", ("GET",)),
+    ("/api/memory_pools", ("GET",)),
+    ("/api/meltdown_nonce", ("GET",)),
+    ("/api/memory_sink", ("GET",)),
+    ("/api/memory_consolidate", ("POST",)),
+    ("/api/memory_meltdown", ("POST",)),
+    ("/api/export_data", ("GET",)),
+    ("/api/purge_data", ("DELETE",)),
+    ("/api/error_stats", ("GET",)),
+    ("/api/config_export", ("GET",)),
+    ("/api/config_import", ("POST",)),
+    ("/api/widget-state", ("GET",)),
+    ("/api/proactive_feedback", ("POST",)),
+    ("/api/weekly_report", ("GET",)),
+    ("/api/memory/decay_curve", ("GET",)),
+    ("/api/memory/recall_debug", ("GET",)),
+    ("/api/personality/export", ("GET",)),
+    ("/api/personality/import", ("POST",)),
+    ("/api/relationship_temperature", ("GET",)),
+    ("/api/diagnostic_report", ("GET",)),
+    ("/api/personality/drift-map", ("GET",)),
+    ("/api/twin_synchrony_trajectory", ("GET",)),
+    ("/api/v2core_state", ("GET",)),
+    ("/api/quality-trend", ("GET",)),
+    ("/api/theme", ("GET", "POST")),
+    ("/api/rhythm_profile", ("GET",)),
+    ("/api/scar_map", ("GET",)),
+    ("/api/sheaf_topology", ("GET",)),
+    ("/api/topic-gravity", ("GET",)),
+    ("/api/admin/inspect", ("GET",)),
+    ("/api/admin/quarantine_view", ("GET",)),
+    ("/api/admin/pending_deletes", ("GET",)),
+    ("/ws/state", ("GET",)),
+)
+LEGACY_SCOPED_PRIVATE_PATHS = frozenset(path for path, _methods in LEGACY_SCOPED_PRIVATE_ROUTES)
+
+
+def is_legacy_scoped_private_path(path: object) -> bool:
+    """Match only retired private paths; preserve the canonical scoped roots."""
+
+    if type(path) is not str or not path.startswith("/"):
+        return False
+    normalized = path.rstrip("/") or "/"
+    if normalized in LEGACY_SCOPED_PRIVATE_PATHS:
+        return True
+    # ``.../ws/state`` was the old scoped WebSocket spelling.  It is not the
+    # canonical standalone ``.../ws`` endpoint and must never reach an upgrade.
+    pieces = normalized.split("/")
+    return (
+        len(pieces) == 11
+        and pieces[1:4] == ["api", "v1", "bots"]
+        and bool(pieces[4])
+        and pieces[5] == "personas"
+        and bool(pieces[6])
+        and pieces[7] == "sessions"
+        and bool(pieces[8])
+        and pieces[9:] == ["ws", "state"]
+    )
+
+
+def same_scoped_authority_callback(actual: object, expected: object) -> bool:
+    """Compare authority callbacks without accepting merely-callable impostors."""
+
+    if not callable(actual) or not callable(expected):
+        return False
+    if actual is expected:
+        return True
+    actual_func = getattr(actual, "__func__", None)
+    expected_func = getattr(expected, "__func__", None)
+    if actual_func is None or expected_func is None:
+        return False
+    return (
+        actual_func is expected_func
+        and getattr(actual, "__self__", None) is getattr(expected, "__self__", None)
+    )
 
 
 def _observation_query_value(
@@ -687,6 +781,72 @@ class WebUIRoutes:
 
         return scoped_api_service_for_plugin(self._p)
 
+    def _scoped_principal_from_pages_request(
+        self,
+        request: object,
+    ) -> ScopedPrincipal | None:
+        """Use only AstrBot's server-verified Pages username as authority input."""
+
+        try:
+            issuer = getattr(
+                self._p,
+                "_scoped_api_principal_from_authenticated_host",
+                None,
+            )
+            scope_grant = getattr(self._p, "_scoped_api_principal_scope_grant", None)
+            persona_grant = getattr(
+                self._p,
+                "_scoped_api_principal_persona_grant",
+                None,
+            )
+            username = getattr(request, "username", None)
+        except Exception:  # noqa: BLE001 - host carrier inspection fails closed
+            return None
+        if (
+            not callable(issuer)
+            or not callable(scope_grant)
+            or not callable(persona_grant)
+            or type(username) is not str
+            or not username
+        ):
+            return None
+        try:
+            principal = issuer("pages", username)
+        except Exception:  # noqa: BLE001 - untrusted host adapter must fail closed
+            return None
+        return principal if type(principal) is ScopedPrincipal else None
+
+    def _service_uses_plugin_scope_grant(self, service: object) -> bool:
+        """Reject injected services that are not bound to this plugin authority.
+
+        This deliberately does *not* resolve the requested scope.  The shared
+        core must remain the sole owner of nonce shape/binding checks before a
+        repository lookup.  Matching the callback here prevents a permissive
+        test or legacy ``ScopedApiService`` from consuming a nonce before its
+        real plugin authority can participate in that core sequence.
+        """
+
+        return same_scoped_authority_callback(
+            getattr(service, "_principal_scope_grant", None),
+            getattr(self._p, "_scoped_api_principal_scope_grant", None),
+        )
+
+    @staticmethod
+    def _bootstrap_route_spec(query: object) -> ScopeRouteSpec:
+        """Validate an explicit nonce target through the core route table."""
+
+        if not isinstance(query, Mapping):
+            return scoped_api_route_spec("scope")
+        endpoint = query.get("endpoint", "scope")
+        route = scoped_api_route_spec(endpoint)
+        requested_method = query.get("method")
+        if requested_method is not None and (
+            type(requested_method) is not str
+            or requested_method.upper() != route.method
+        ):
+            raise ValueError("scoped bootstrap method does not match endpoint")
+        return route
+
     @staticmethod
     def _scoped_native_error(error: ScopedApiError) -> Any:
         """Preserve exact statuses where the AstrBot host exposes responses."""
@@ -719,13 +879,30 @@ class WebUIRoutes:
         params = getattr(request, "path_params", {})
         headers = getattr(request, "headers", {})
         try:
-            scoped_request = ScopedApiRequest.from_tokens(
+            route = scoped_api_route_spec(endpoint)
+            if getattr(request, "method", None) != route.method:
+                raise ValueError("scoped request method does not match route")
+            path = ScopeApiPathEcho(
                 bot_ref=params.get("bot_ref"),
                 persona_ref=params.get("persona_ref"),
                 session_ref=params.get("session_ref"),
+            )
+        except (AttributeError, TypeError, ValueError):
+            return self._scoped_native_error(ScopedApiError(400, "invalid_scoped_request"))
+        principal = self._scoped_principal_from_pages_request(request)
+        if principal is None:
+            return self._scoped_native_error(ScopedApiError(403, "scope_principal_required"))
+        if not self._service_uses_plugin_scope_grant(service):
+            return self._scoped_native_error(
+                ScopedApiError(403, "scope_principal_forbidden")
+            )
+        try:
+            scoped_request = ScopedApiRequest(
+                path=path,
                 nonce=headers.get(SCOPE_NONCE_HEADER),
-                endpoint=endpoint,
-                method=getattr(request, "method", "GET"),
+                endpoint=route.endpoint,
+                method=route.method,
+                principal=principal,
             )
         except (AttributeError, TypeError, ValueError):
             return self._scoped_native_error(ScopedApiError(400, "invalid_scoped_request"))
@@ -734,8 +911,15 @@ class WebUIRoutes:
             return self._scoped_native_error(authorization)
         if not isinstance(authorization, ScopedApiAuthorization):
             return self._scoped_native_error(ScopedApiError(503, "scope_repository_unavailable"))
-        if scoped_request.endpoint in {"stream", "ws"}:
-            # AstrBot Pages stays serialized/polling; no unowned stream is opened.
+        if scoped_request.endpoint == "stream":
+            from astrbot.api.web import stream_response
+
+            return stream_response(
+                self._scoped_sse_frames(service, authorization),
+                content_type="text/event-stream",
+            )
+        if scoped_request.endpoint == "ws":
+            # AstrBot Pages has no plugin WebSocket registration contract.
             return self._scoped_native_error(ScopedApiError(410, "stream_unavailable"))
         if scoped_request.endpoint == "memory/meltdown-nonce":
             checked = service.revalidate(authorization)
@@ -767,6 +951,39 @@ class WebUIRoutes:
             return await purge_scoped_memory(self._p, checked)
         return await scoped_api_payload(self._p, authorization, scoped_request.endpoint)
 
+    @staticmethod
+    async def _scoped_sse_frames(service: object, authorization: object):
+        """Emit one invalidation marker then stop whenever the fence changes."""
+
+        while True:
+            try:
+                checked = service.revalidate(authorization)
+            except Exception:  # noqa: BLE001 - streaming authority fails closed
+                checked = ScopedApiError(409, "scope_invalidated")
+            if isinstance(checked, ScopedApiError):
+                marker = json.dumps(
+                    {
+                        "event": "scope_invalidated",
+                        "data": {"error": "scope_invalidated"},
+                    },
+                    separators=(",", ":"),
+                )
+                yield f"event: scope_invalidated\ndata: {marker}\n\n"
+                return
+            if not isinstance(checked, ScopedApiAuthorization):
+                marker = json.dumps(
+                    {
+                        "event": "scope_invalidated",
+                        "data": {"error": "scope_invalidated"},
+                    },
+                    separators=(",", ":"),
+                )
+                yield f"event: scope_invalidated\ndata: {marker}\n\n"
+                return
+            payload = json.dumps(checked.public_payload(), separators=(",", ":"))
+            yield f"event: scope_status\ndata: {payload}\n\n"
+            await asyncio.sleep(1)
+
     async def scope_catalog_handler(self) -> Any:
         """Expose the redacted catalog used to choose a private API scope."""
 
@@ -791,17 +1008,13 @@ class WebUIRoutes:
             return self._scoped_native_error(
                 ScopedApiError(400, "legacy_session_selector_forbidden")
             )
-        params = getattr(request, "path_params", {})
-        try:
-            result = service.persona_dossier_payload(
-                params.get("bot_ref"),
-                params.get("persona_ref"),
-            )
-        except AttributeError:
-            return self._scoped_native_error(ScopedApiError(400, "invalid_persona_request"))
-        if isinstance(result, ScopedApiError):
-            return self._scoped_native_error(result)
-        return result
+        principal = self._scoped_principal_from_pages_request(request)
+        if principal is None:
+            return self._scoped_native_error(ScopedApiError(403, "scope_principal_required"))
+        # The core dossier grant becomes available with the typed Persona grant
+        # follow-up.  Until then, a trusted WebUI principal still has no audited
+        # relation mapping, so never perform the repository read.
+        return self._scoped_native_error(ScopedApiError(403, "scope_principal_forbidden"))
 
     async def scope_bootstrap_handler(self) -> Any:
         """Mint a fresh one-use nonce for one live exact catalog entry."""
@@ -825,7 +1038,23 @@ class WebUIRoutes:
             )
         except (AttributeError, TypeError, ValueError):
             return self._scoped_native_error(ScopedApiError(400, "invalid_scoped_request"))
-        nonce = service.bootstrap_nonce(path)
+        principal = self._scoped_principal_from_pages_request(request)
+        if principal is None:
+            return self._scoped_native_error(ScopedApiError(403, "scope_principal_required"))
+        try:
+            route = self._bootstrap_route_spec(query)
+        except (TypeError, ValueError):
+            return self._scoped_native_error(ScopedApiError(400, "invalid_scoped_request"))
+        if not self._service_uses_plugin_scope_grant(service):
+            return self._scoped_native_error(
+                ScopedApiError(403, "scope_principal_forbidden")
+            )
+        nonce = service.bootstrap_nonce(
+            path,
+            principal=principal,
+            endpoint=route.endpoint,
+            method=route.method,
+        )
         if isinstance(nonce, ScopedApiError):
             return self._scoped_native_error(nonce)
         return {
@@ -837,6 +1066,11 @@ class WebUIRoutes:
             },
             "scope_nonce": nonce,
         }
+
+    async def legacy_scope_gone_handler(self) -> Any:
+        """Return 410 without touching request query, body, or private state."""
+
+        return self._scoped_native_error(ScopedApiError(410, "scope_required"))
 
     # ------------------------------------------------------------------
     # Memory settings & lineage observatory

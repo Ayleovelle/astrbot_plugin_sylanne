@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import hmac
 import json
 import logging
 import os
@@ -41,18 +42,22 @@ from sylanne_alpha.webui_routes import (
     build_observation_history_payload,
     build_model_routing_payload,
     consume_scoped_meltdown_nonce,
+    is_legacy_scoped_private_path,
     issue_scoped_meltdown_nonce,
     purge_scoped_memory,
+    same_scoped_authority_callback,
     scoped_api_payload,
 )
 from sylanne_alpha.scoped_api import (
     SCOPE_NONCE_HEADER,
+    ScopeRouteSpec,
     ScopedApiAuthorization,
     ScopedApiError,
     ScopedApiRequest,
     scoped_api_service_for_plugin,
+    scoped_api_route_spec,
 )
-from sylanne_alpha.scope_contracts import ScopeApiPathEcho
+from sylanne_alpha.scope_contracts import ScopeApiPathEcho, ScopedPrincipal
 
 
 def _get_plugin_version() -> str:
@@ -113,24 +118,10 @@ _meltdown_nonces: dict[str, str] = {}
 _csrf_token: str = ""
 # 线程安全锁：stdlib HTTP server 的多线程 handler 访问插件状态时使用
 _plugin_access_lock = threading.Lock()
+_SCOPED_PRINCIPAL_REQUEST_KEY = "sylanne_scoped_principal_v1"
 
 # S1/S2: 敏感配置键保护（子串匹配；"cookie" 覆盖 sylanne_alpha_qzone_cookie 登录凭据）
 _SENSITIVE_KEYS = frozenset({"token", "password", "secret", "api_key", "access_token", "auth_token", "bearer", "credential", "cookie"})
-_LEGACY_SCOPED_PRIVATE_PATHS = frozenset(
-    {
-        "/api/state",
-        "/api/observation_history",
-        "/api/computation_logs",
-        "/api/memory_pools",
-        "/api/meltdown_nonce",
-        "/api/memory_sink",
-        "/api/memory_consolidate",
-        "/api/memory_meltdown",
-        "/ws/state",
-    }
-)
-
-
 def _is_sensitive_key(key: str) -> bool:
     """检查配置键是否包含敏感子串。"""
     lower = key.lower()
@@ -264,6 +255,98 @@ def _plugin(default: Any = None) -> Any:
     return _active_plugin if _active_plugin is not None else default
 
 
+def _scoped_principal_from_verified_standalone_token(
+    plugin: object,
+    token: object,
+) -> ScopedPrincipal | None:
+    """Derive an opaque principal only after the Bearer token is verified.
+
+    The raw token is used only as the HMAC message inside the plugin issuer; it
+    is never persisted, echoed, or put in a request-local value.
+    """
+
+    try:
+        issuer = getattr(plugin, "_scoped_api_principal_from_authenticated_host", None)
+        scope_grant = getattr(plugin, "_scoped_api_principal_scope_grant", None)
+        persona_grant = getattr(plugin, "_scoped_api_principal_persona_grant", None)
+    except Exception:  # noqa: BLE001 - host carrier inspection fails closed
+        return None
+    if (
+        not callable(issuer)
+        or not callable(scope_grant)
+        or not callable(persona_grant)
+        or type(token) is not str
+        or not token
+    ):
+        return None
+    try:
+        principal = issuer("standalone", token)
+    except Exception:  # noqa: BLE001 - authentication adapter fails closed
+        return None
+    return principal if type(principal) is ScopedPrincipal else None
+
+
+def _standalone_service_uses_plugin_scope_grant(
+    plugin: object,
+    service: object,
+) -> bool:
+    """Fence off a permissive service not bound to the plugin authority hook."""
+
+    return same_scoped_authority_callback(
+        getattr(service, "_principal_scope_grant", None),
+        getattr(plugin, "_scoped_api_principal_scope_grant", None),
+    )
+
+
+def _bootstrap_scoped_route_spec(query: object) -> ScopeRouteSpec:
+    """Resolve the nonce target only through the core immutable route table."""
+
+    if not hasattr(query, "get"):
+        return scoped_api_route_spec("scope")
+    endpoint = query.get("endpoint", "scope")
+    route = scoped_api_route_spec(endpoint)
+    requested_method = query.get("method")
+    if requested_method is not None and (
+        type(requested_method) is not str
+        or requested_method.upper() != route.method
+    ):
+        raise ValueError("scoped bootstrap method does not match endpoint")
+    return route
+
+
+def _scope_invalidated_payload() -> dict[str, object]:
+    """Return the sole redacted marker before a scoped stream closes."""
+
+    return {"event": "scope_invalidated", "data": {"error": "scope_invalidated"}}
+
+
+def _parse_scoped_http_path(path: object) -> tuple[ScopeApiPathEcho, str] | None:
+    """Parse only the canonical scoped HTTP root and its immutable endpoints."""
+
+    if type(path) is not str:
+        return None
+    pieces = path.split("/")
+    if (
+        len(pieces) < 9
+        or pieces[1:4] != ["api", "v1", "bots"]
+        or not pieces[4]
+        or pieces[5] != "personas"
+        or not pieces[6]
+        or pieces[7] != "sessions"
+        or not pieces[8]
+    ):
+        return None
+    try:
+        scope_path = ScopeApiPathEcho(
+            bot_ref=pieces[4],
+            persona_ref=pieces[6],
+            session_ref=pieces[8],
+        )
+    except (TypeError, ValueError):
+        return None
+    return scope_path, "/".join(pieces[9:]) or "scope"
+
+
 def _runtime_info(plugin: Any) -> dict[str, Any]:
     return {
         "plugin_name": "astrbot_plugin_sylanne",
@@ -295,26 +378,38 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
 
     @web.middleware
     async def auth_middleware(request: web.Request, handler: Any) -> web.Response:
+        # This is intentionally the first branch: legacy paths must be retired
+        # before auth, CSRF, query/body parsing, plugin access, or a WebSocket
+        # upgrade.  ``request.path`` excludes the untrusted query string.
+        if is_legacy_scoped_private_path(request.path):
+            return web.json_response({"error": "scope_required"}, status=410)
         if request.path in ("/", "/twin", "/favicon.ico", "/health", "/logo.png", "/assets/logo.png"):
             return await handler(request)
         # S9: /metrics requires Bearer token when auth is configured
         if request.path == "/metrics":
             if _active_token:
                 auth = request.headers.get("Authorization", "")
-                if not auth.startswith("Bearer ") or auth[7:] != _active_token:
+                if not auth.startswith("Bearer ") or not hmac.compare_digest(
+                    auth[7:], _active_token
+                ):
                     return web.json_response({"error": "unauthorized"}, status=401)
             return await handler(request)
         auth = request.headers.get("Authorization", "")
         # fail-closed：_active_token 为空（未配置 / setup 未跑）时一律 401，绝不让空 Bearer
         # （Authorization: Bearer ）因 auth[7:]=="" == _active_token=="" 漏进受保护路由。
         # 正常运行 token 必被自动生成（setup 处 secrets.token_urlsafe），故零回归。
-        if not _active_token or not auth.startswith("Bearer ") or auth[7:] != _active_token:
-            return web.json_response({"error": "unauthorized"}, status=401)
         if (
-            request.path in _LEGACY_SCOPED_PRIVATE_PATHS
-            and getattr(_plugin(plugin), "_scope_runtime_registry", None) is not None
+            not _active_token
+            or not auth.startswith("Bearer ")
+            or not hmac.compare_digest(auth[7:], _active_token)
         ):
-            return web.json_response({"error": "scope_required"}, status=410)
+            return web.json_response({"error": "unauthorized"}, status=401)
+        principal = _scoped_principal_from_verified_standalone_token(
+            _plugin(plugin),
+            auth[7:],
+        )
+        if principal is not None:
+            request[_SCOPED_PRINCIPAL_REQUEST_KEY] = principal
         # Item 24: CSRF 防护 — POST/DELETE 需要 X-CSRF-Token header
         if request.method in ("POST", "DELETE"):
             csrf_header = request.headers.get("X-CSRF-Token", "")
@@ -339,6 +434,15 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
     def scoped_error(error: ScopedApiError) -> web.Response:
         return web.json_response(error.public_payload(), status=error.status)
 
+    def scoped_principal(request: web.Request) -> ScopedPrincipal | None:
+        principal = request.get(_SCOPED_PRINCIPAL_REQUEST_KEY)
+        return principal if type(principal) is ScopedPrincipal else None
+
+    async def handle_legacy_scoped_gone(_request: web.Request) -> web.Response:
+        """Defense in depth for a retired route that reached the router."""
+
+        return web.json_response({"error": "scope_required"}, status=410)
+
     async def handle_scope_catalog(request: web.Request) -> web.Response:
         service = scoped_api_service_for_plugin(_plugin(plugin))
         if service is None:
@@ -359,29 +463,40 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
             return scoped_error(ScopedApiError(410, "scope_required"))
         if "session" in request.query:
             return scoped_error(ScopedApiError(400, "legacy_session_selector_forbidden"))
-        result = service.persona_dossier_payload(
-            request.match_info.get("bot_ref"),
-            request.match_info.get("persona_ref"),
-        )
-        if isinstance(result, ScopedApiError):
-            return scoped_error(result)
-        return web.json_response(result)
+        if scoped_principal(request) is None:
+            return scoped_error(ScopedApiError(403, "scope_principal_required"))
+        # Persona grants become a core-owned immutable action in the follow-up
+        # contract.  There is no audited standalone principal-to-relation map
+        # yet, so do not perform the repository read through the old dossier API.
+        return scoped_error(ScopedApiError(403, "scope_principal_forbidden"))
 
     async def handle_scope_bootstrap(request: web.Request) -> web.Response:
+        current_plugin = _plugin(plugin)
         service = scoped_api_service_for_plugin(_plugin(plugin))
         if service is None:
             return scoped_error(ScopedApiError(410, "scope_required"))
         if "session" in request.query:
             return scoped_error(ScopedApiError(400, "legacy_session_selector_forbidden"))
+        principal = scoped_principal(request)
+        if principal is None:
+            return scoped_error(ScopedApiError(403, "scope_principal_required"))
+        if not _standalone_service_uses_plugin_scope_grant(current_plugin, service):
+            return scoped_error(ScopedApiError(403, "scope_principal_forbidden"))
         try:
             path = ScopeApiPathEcho(
                 bot_ref=request.match_info.get("bot_ref"),
                 persona_ref=request.match_info.get("persona_ref"),
                 session_ref=request.match_info.get("session_ref"),
             )
+            route = _bootstrap_scoped_route_spec(request.query)
         except (TypeError, ValueError):
             return scoped_error(ScopedApiError(400, "invalid_scoped_request"))
-        nonce = service.bootstrap_nonce(path)
+        nonce = service.bootstrap_nonce(
+            path,
+            principal=principal,
+            endpoint=route.endpoint,
+            method=route.method,
+        )
         if isinstance(nonce, ScopedApiError):
             return scoped_error(nonce)
         return web.json_response(
@@ -399,7 +514,8 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
     async def handle_scoped_api(request: web.Request) -> web.StreamResponse:
         """Serve the sole private root through the host-neutral scope gate."""
 
-        service = scoped_api_service_for_plugin(_plugin(plugin))
+        current_plugin = _plugin(plugin)
+        service = scoped_api_service_for_plugin(current_plugin)
         if service is None:
             return scoped_error(ScopedApiError(410, "scope_required"))
         if "session" in request.query:
@@ -407,13 +523,28 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         endpoint = str(request.match_info.get("endpoint", "") or "scope").strip("/")
         params = request.match_info
         try:
-            scoped_request = ScopedApiRequest.from_tokens(
+            route = scoped_api_route_spec(endpoint)
+            if request.method != route.method:
+                raise ValueError("scoped request method does not match route")
+            path = ScopeApiPathEcho(
                 bot_ref=params.get("bot_ref"),
                 persona_ref=params.get("persona_ref"),
                 session_ref=params.get("session_ref"),
+            )
+        except (TypeError, ValueError):
+            return scoped_error(ScopedApiError(400, "invalid_scoped_request"))
+        principal = scoped_principal(request)
+        if principal is None:
+            return scoped_error(ScopedApiError(403, "scope_principal_required"))
+        if not _standalone_service_uses_plugin_scope_grant(current_plugin, service):
+            return scoped_error(ScopedApiError(403, "scope_principal_forbidden"))
+        try:
+            scoped_request = ScopedApiRequest(
+                path=path,
                 nonce=request.headers.get(SCOPE_NONCE_HEADER),
-                endpoint=endpoint,
-                method=request.method,
+                endpoint=route.endpoint,
+                method=route.method,
+                principal=principal,
             )
         except (TypeError, ValueError):
             return scoped_error(ScopedApiError(400, "invalid_scoped_request"))
@@ -459,17 +590,25 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
                 },
             )
             await response.prepare(request)
-            stale_sent = False
+            invalidated_sent = False
             while True:
                 response_task = response.task
                 if response_task is None or response_task.done():
                     break
-                checked = service.revalidate(authorization)
-                if isinstance(checked, ScopedApiError):
-                    if not stale_sent:
-                        marker = json.dumps(service.stream_stale_payload(), separators=(",", ":"))
-                        await response.write(f"event: scope_stale\ndata: {marker}\n\n".encode())
-                        stale_sent = True
+                try:
+                    checked = service.revalidate(authorization)
+                except Exception:  # noqa: BLE001 - stream authority fails closed
+                    checked = ScopedApiError(409, "scope_invalidated")
+                if not isinstance(checked, ScopedApiAuthorization):
+                    if not invalidated_sent:
+                        marker = json.dumps(
+                            _scope_invalidated_payload(),
+                            separators=(",", ":"),
+                        )
+                        await response.write(
+                            f"event: scope_invalidated\ndata: {marker}\n\n".encode()
+                        )
+                        invalidated_sent = True
                     break
                 heartbeat = json.dumps(checked.public_payload(), separators=(",", ":"))
                 await response.write(f"event: scope_status\ndata: {heartbeat}\n\n".encode())
@@ -479,14 +618,17 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         if scoped_request.endpoint == "ws":
             socket = web.WebSocketResponse(heartbeat=30)
             await socket.prepare(request)
-            stale_sent = False
+            invalidated_sent = False
             while not socket.closed:
-                checked = service.revalidate(authorization)
-                if isinstance(checked, ScopedApiError):
-                    if not stale_sent:
-                        await socket.send_json(service.stream_stale_payload())
-                        stale_sent = True
-                    await socket.close(code=4409, message=b"scope_stale")
+                try:
+                    checked = service.revalidate(authorization)
+                except Exception:  # noqa: BLE001 - stream authority fails closed
+                    checked = ScopedApiError(409, "scope_invalidated")
+                if not isinstance(checked, ScopedApiAuthorization):
+                    if not invalidated_sent:
+                        await socket.send_json(_scope_invalidated_payload())
+                        invalidated_sent = True
+                    await socket.close(code=4409, message=b"scope_invalidated")
                     break
                 await socket.send_json(
                     {"event": "scope_status", "data": checked.public_payload()}
@@ -1826,6 +1968,7 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
     app.router.add_get(persona_dossier_root, handle_persona_dossier)
     app.router.add_post(scope_bootstrap_root, handle_scope_bootstrap)
     scoped_root = "/api/v1/bots/{bot_ref}/personas/{persona_ref}/sessions/{session_ref}"
+    app.router.add_route("*", f"{scoped_root}/ws/state", handle_legacy_scoped_gone)
     app.router.add_route("*", scoped_root, handle_scoped_api)
     app.router.add_route("*", f"{scoped_root}/{{endpoint:.*}}", handle_scoped_api)
     app.router.add_get("/api/state", handle_state)
@@ -1881,38 +2024,10 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
     # Item 16: WebSocket 实时状态推送（/ws/state）
     # ------------------------------------------------------------------
 
-    _ws_connections: set[web.WebSocketResponse] = set()
-    _WS_MAX_CONNECTIONS = 10
+    async def handle_ws_state(_request: web.Request) -> web.Response:
+        """Retire the unauthenticated legacy socket before any WS prepare call."""
 
-    async def handle_ws_state(request: web.Request) -> web.WebSocketResponse:
-        # S3: WebSocket 连接鉴权 — 仅在配置了 token 时校验
-        if _active_token:
-            ws_token = request.query.get("token", "")
-            if not ws_token or ws_token != _active_token:
-                ws = web.WebSocketResponse()
-                await ws.prepare(request)
-                await ws.close(code=4001, message=b"unauthorized")
-                return ws
-        if len(_ws_connections) >= _WS_MAX_CONNECTIONS:
-            ws = web.WebSocketResponse()
-            await ws.prepare(request)
-            await ws.close(code=1013, message=b"too many connections")
-            return ws
-        ws = web.WebSocketResponse(heartbeat=30)
-        await ws.prepare(request)
-        _ws_connections.add(ws)
-        try:
-            while not ws.closed:
-                state = _build_state(_plugin(plugin))
-                await ws.send_json(state)
-                await asyncio.sleep(2)
-        except Exception:
-            pass
-        finally:
-            _ws_connections.discard(ws)
-            if not ws.closed:
-                await ws.close()
-        return ws
+        return web.json_response({"error": "scope_required"}, status=410)
 
     app.router.add_get("/ws/state", handle_ws_state)
 
@@ -2083,7 +2198,257 @@ def start_webui_thread_server(
                 if values
             }
 
+        def _authenticated_scoped_principal(self) -> ScopedPrincipal | None:
+            """Use the already-verified Bearer value only as an HMAC input."""
+
+            auth = self.headers.get("Authorization", "")
+            if (
+                not _active_token
+                or not auth.startswith("Bearer ")
+                or not hmac.compare_digest(auth[7:], _active_token)
+            ):
+                return None
+            return _scoped_principal_from_verified_standalone_token(
+                _plugin(plugin),
+                auth[7:],
+            )
+
+        def _send_scoped_error(self, error: ScopedApiError) -> None:
+            self._send_json(error.public_payload(), status=error.status)
+
+        def _read_scoped_json_body(self) -> object:
+            """Read a scoped mutation body only after the core nonce gate passes."""
+
+            try:
+                length = int(self.headers.get("Content-Length", "0") or "0")
+            except (TypeError, ValueError):
+                return None
+            if length < 0 or length > self._MAX_BODY_SIZE:
+                return None
+            try:
+                raw = self.rfile.read(length) if length else b"{}"
+                return json.loads(raw.decode("utf-8") or "{}")
+            except Exception:  # noqa: BLE001 - invalid body is a client error
+                return None
+
+        def _handle_scoped_http(
+            self,
+            path: str,
+            query: dict[str, str],
+        ) -> bool:
+            """Dispatch one canonical scoped HTTP request, never a legacy path."""
+
+            current_plugin = _plugin(plugin)
+            if path == "/api/scopes":
+                if self.command != "GET":
+                    self._send_scoped_error(ScopedApiError(400, "invalid_scoped_request"))
+                    return True
+                service = scoped_api_service_for_plugin(current_plugin)
+                if service is None:
+                    self._send_scoped_error(ScopedApiError(410, "scope_required"))
+                    return True
+                result = service.catalog_payload()
+                if isinstance(result, ScopedApiError):
+                    self._send_scoped_error(result)
+                    return True
+                self._send_json({**result, "csrf_token": _csrf_token})
+                return True
+
+            dossier = path.split("/")
+            if (
+                len(dossier) == 8
+                and dossier[1:4] == ["api", "v1", "bots"]
+                and bool(dossier[4])
+                and dossier[5] == "personas"
+                and bool(dossier[6])
+                and dossier[7] == "dossier"
+            ):
+                if self.command != "GET":
+                    self._send_scoped_error(ScopedApiError(400, "invalid_scoped_request"))
+                    return True
+                if self._authenticated_scoped_principal() is None:
+                    self._send_scoped_error(
+                        ScopedApiError(403, "scope_principal_required")
+                    )
+                    return True
+                # The typed persona grant is core-owned in the follow-up.  Until
+                # then do not let the old no-principal method read a dossier.
+                self._send_scoped_error(
+                    ScopedApiError(403, "scope_principal_forbidden")
+                )
+                return True
+
+            bootstrap = path.split("/")
+            if (
+                len(bootstrap) == 9
+                and bootstrap[1:3] == ["api", "scopes"]
+                and bool(bootstrap[3])
+                and bootstrap[4] == "personas"
+                and bool(bootstrap[5])
+                and bootstrap[6] == "sessions"
+                and bool(bootstrap[7])
+                and bootstrap[8] == "nonce"
+            ):
+                if self.command != "POST":
+                    self._send_scoped_error(ScopedApiError(400, "invalid_scoped_request"))
+                    return True
+                if "session" in query:
+                    self._send_scoped_error(
+                        ScopedApiError(400, "legacy_session_selector_forbidden")
+                    )
+                    return True
+                principal = self._authenticated_scoped_principal()
+                if principal is None:
+                    self._send_scoped_error(
+                        ScopedApiError(403, "scope_principal_required")
+                    )
+                    return True
+                service = scoped_api_service_for_plugin(current_plugin)
+                if service is None:
+                    self._send_scoped_error(ScopedApiError(410, "scope_required"))
+                    return True
+                if not _standalone_service_uses_plugin_scope_grant(
+                    current_plugin,
+                    service,
+                ):
+                    self._send_scoped_error(
+                        ScopedApiError(403, "scope_principal_forbidden")
+                    )
+                    return True
+                try:
+                    scope_path = ScopeApiPathEcho(
+                        bot_ref=bootstrap[3],
+                        persona_ref=bootstrap[5],
+                        session_ref=bootstrap[7],
+                    )
+                    route = _bootstrap_scoped_route_spec(query)
+                except (TypeError, ValueError):
+                    self._send_scoped_error(
+                        ScopedApiError(400, "invalid_scoped_request")
+                    )
+                    return True
+                nonce = service.bootstrap_nonce(
+                    scope_path,
+                    principal=principal,
+                    endpoint=route.endpoint,
+                    method=route.method,
+                )
+                if isinstance(nonce, ScopedApiError):
+                    self._send_scoped_error(nonce)
+                    return True
+                self._send_json(
+                    {
+                        "ok": True,
+                        "scope": {
+                            "bot_ref": scope_path.bot_ref,
+                            "persona_ref": scope_path.persona_ref,
+                            "session_ref": scope_path.session_ref,
+                        },
+                        "scope_nonce": nonce,
+                    }
+                )
+                return True
+
+            parsed_scope = _parse_scoped_http_path(path)
+            if parsed_scope is None:
+                return False
+            scope_path, endpoint = parsed_scope
+            try:
+                route = scoped_api_route_spec(endpoint)
+                if self.command != route.method:
+                    raise ValueError("scoped request method does not match route")
+            except (TypeError, ValueError):
+                self._send_scoped_error(ScopedApiError(400, "invalid_scoped_request"))
+                return True
+            if "session" in query:
+                self._send_scoped_error(
+                    ScopedApiError(400, "legacy_session_selector_forbidden")
+                )
+                return True
+            principal = self._authenticated_scoped_principal()
+            if principal is None:
+                self._send_scoped_error(ScopedApiError(403, "scope_principal_required"))
+                return True
+            service = scoped_api_service_for_plugin(current_plugin)
+            if service is None:
+                self._send_scoped_error(ScopedApiError(410, "scope_required"))
+                return True
+            if not _standalone_service_uses_plugin_scope_grant(current_plugin, service):
+                self._send_scoped_error(
+                    ScopedApiError(403, "scope_principal_forbidden")
+                )
+                return True
+            if route.endpoint in {"stream", "ws"}:
+                # The fallback server is HTTP-only.  Do not attempt SSE or a
+                # WebSocket upgrade; aiohttp owns the canonical stream paths.
+                self._send_scoped_error(ScopedApiError(410, "stream_unavailable"))
+                return True
+            try:
+                scoped_request = ScopedApiRequest(
+                    path=scope_path,
+                    nonce=self.headers.get(SCOPE_NONCE_HEADER),
+                    endpoint=route.endpoint,
+                    method=route.method,
+                    principal=principal,
+                )
+            except (TypeError, ValueError):
+                self._send_scoped_error(ScopedApiError(400, "invalid_scoped_request"))
+                return True
+            authorization = service.authorize(scoped_request)
+            if isinstance(authorization, ScopedApiError):
+                self._send_scoped_error(authorization)
+                return True
+            if not isinstance(authorization, ScopedApiAuthorization):
+                self._send_scoped_error(
+                    ScopedApiError(503, "scope_repository_unavailable")
+                )
+                return True
+            if scoped_request.endpoint == "memory/meltdown-nonce":
+                checked = service.revalidate(authorization)
+                if isinstance(checked, ScopedApiError):
+                    self._send_scoped_error(checked)
+                    return True
+                meltdown_nonce = issue_scoped_meltdown_nonce(current_plugin, checked)
+                if isinstance(meltdown_nonce, ScopedApiError):
+                    self._send_scoped_error(meltdown_nonce)
+                    return True
+                payload = checked.public_payload()
+                payload["meltdown_nonce"] = meltdown_nonce
+                self._send_json(payload)
+                return True
+            if scoped_request.endpoint == "memory/meltdown":
+                body = self._read_scoped_json_body()
+                if type(body) is not dict or set(body) != {"meltdown_nonce"}:
+                    self._send_scoped_error(
+                        ScopedApiError(400, "invalid_meltdown_request")
+                    )
+                    return True
+                checked = service.revalidate(authorization)
+                if isinstance(checked, ScopedApiError):
+                    self._send_scoped_error(checked)
+                    return True
+                nonce_error = consume_scoped_meltdown_nonce(
+                    current_plugin,
+                    checked,
+                    body.get("meltdown_nonce"),
+                )
+                if nonce_error is not None:
+                    self._send_scoped_error(nonce_error)
+                    return True
+                self._send_json(asyncio.run(purge_scoped_memory(current_plugin, checked)))
+                return True
+            self._send_json(
+                asyncio.run(
+                    scoped_api_payload(current_plugin, authorization, scoped_request.endpoint)
+                )
+            )
+            return True
+
         def do_OPTIONS(self) -> None:
+            raw_path = self.path.partition("?")[0].rstrip("/") or "/"
+            if is_legacy_scoped_private_path(raw_path):
+                self._send_json({"error": "scope_required"}, status=410)
+                return
             self.send_response(204)
             self.send_header(
                 "Access-Control-Allow-Origin",
@@ -2097,6 +2462,10 @@ def start_webui_thread_server(
 
         def do_GET(self) -> None:
             global _last_diag_request, _theme_preference
+            raw_path = self.path.partition("?")[0].rstrip("/") or "/"
+            if is_legacy_scoped_private_path(raw_path):
+                self._send_json({"error": "scope_required"}, status=410)
+                return
             if self._check_rate_limit():
                 self._send_json({"error": "rate_limited"}, status=429)
                 return
@@ -2104,16 +2473,24 @@ def start_webui_thread_server(
             path = parsed.path.rstrip("/") or "/"
             if path not in ("/", "/twin", "/favicon.ico", "/health", "/metrics", "/logo.png", "/assets/logo.png"):
                 auth = self.headers.get("Authorization", "")
-                if not _active_token or not auth.startswith("Bearer ") or auth[7:] != _active_token:
+                if (
+                    not _active_token
+                    or not auth.startswith("Bearer ")
+                    or not hmac.compare_digest(auth[7:], _active_token)
+                ):
                     self._send_json({"error": "unauthorized"}, status=401)
                     return
             # S9: /metrics requires Bearer token when auth is configured
             if path == "/metrics" and _active_token:
                 auth = self.headers.get("Authorization", "")
-                if not auth.startswith("Bearer ") or auth[7:] != _active_token:
+                if not auth.startswith("Bearer ") or not hmac.compare_digest(
+                    auth[7:], _active_token
+                ):
                     self._send_json({"error": "unauthorized"}, status=401)
                     return
             query = self._query()
+            if self._handle_scoped_http(path, query):
+                return
             try:
                 if path == "/":
                     self._send_text(dashboard_html)
@@ -2464,6 +2841,10 @@ def start_webui_thread_server(
 
         def do_POST(self) -> None:
             global _theme_preference
+            raw_path = self.path.partition("?")[0].rstrip("/") or "/"
+            if is_legacy_scoped_private_path(raw_path):
+                self._send_json({"error": "scope_required"}, status=410)
+                return
             if self._check_rate_limit():
                 self._send_json({"error": "rate_limited"}, status=429)
                 return
@@ -2471,13 +2852,20 @@ def start_webui_thread_server(
             path = parsed.path.rstrip("/") or "/"
             if path not in ("/", "/favicon.ico", "/logo.png", "/assets/logo.png"):
                 auth = self.headers.get("Authorization", "")
-                if not _active_token or not auth.startswith("Bearer ") or auth[7:] != _active_token:
+                if (
+                    not _active_token
+                    or not auth.startswith("Bearer ")
+                    or not hmac.compare_digest(auth[7:], _active_token)
+                ):
                     self._send_json({"error": "unauthorized"}, status=401)
                     return
             # Item 24: CSRF 防护 — POST 需要 X-CSRF-Token header
             csrf_header = self.headers.get("X-CSRF-Token", "")
             if csrf_header != _csrf_token:
                 self._send_json({"error": "csrf_token_mismatch"}, status=403)
+                return
+            query = self._query()
+            if self._handle_scoped_http(path, query):
                 return
             try:
                 length = int(self.headers.get("Content-Length", "0") or "0")
@@ -2711,6 +3099,24 @@ def start_webui_thread_server(
                 self._send_json({"ok": True, "theme": _theme_preference})
             else:
                 self.send_error(404)
+
+        def do_DELETE(self) -> None:
+            raw_path = self.path.partition("?")[0].rstrip("/") or "/"
+            if is_legacy_scoped_private_path(raw_path):
+                self._send_json({"error": "scope_required"}, status=410)
+                return
+            path = urlparse(self.path).path.rstrip("/") or "/"
+            auth = self.headers.get("Authorization", "")
+            if (
+                not _active_token
+                or not auth.startswith("Bearer ")
+                or not hmac.compare_digest(auth[7:], _active_token)
+            ):
+                self._send_json({"error": "unauthorized"}, status=401)
+                return
+            if self._handle_scoped_http(path, self._query()):
+                return
+            self.send_error(404)
 
     try:
         _httpd = ThreadingHTTPServer((host, port), SylanneWebUIHandler)
