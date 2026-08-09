@@ -1491,7 +1491,7 @@ class PublicAPI:
         self, *args: Any, **kwargs: Any
     ) -> dict[str, Any]:
         """观测用户消息撤回事件：递增 input_epoch，清除相关状态。"""
-        p = self._plugin
+        p = self._p
         event = args[0] if args else None
         supplied_session_key = str(kwargs.get("session_key", "") or "")
         registry = getattr(p, "_scope_runtime_registry", None)
