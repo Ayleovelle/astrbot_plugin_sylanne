@@ -3236,12 +3236,18 @@ class EmotionalStatePlugin(Star):
             ):
                 return False
             if resolver.set_event_extra(event, "_sylanne_transport_turn_v1", turn):
-                return True
+                registry = getattr(self, "_scope_runtime_registry", None)
+                if (
+                    type(registry) is ScopeRuntimeRegistry
+                    and registry.publish_transport_turn(transport, turn)
+                ):
+                    return True
             resolver.set_event_extra(
                 event,
                 "_sylanne_transport_scope_v1",
                 ResolvedTransportScope.disabled("transport_attachment_failed"),
             )
+            resolver.set_event_extra(event, "_sylanne_transport_turn_v1", None)
             return False
 
         try:

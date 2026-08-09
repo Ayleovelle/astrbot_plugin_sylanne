@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from sylanne_alpha.scope_contracts import (
+    AuthenticatedSubject,
     BotRef,
     PersonaRevisionRef,
     RelationRef,
@@ -15,6 +16,7 @@ from sylanne_alpha.scope_contracts import (
     SessionScope,
 )
 from sylanne_alpha.scope_repository import ScopeRepository
+from sylanne_alpha.scope_runtime import ScopeRuntimeRegistry
 
 
 def _scope() -> SessionScope:
@@ -35,6 +37,143 @@ def _relation(scope: SessionScope) -> RelationScope:
         bot_ref=scope.bot_ref, persona_ref=scope.persona_ref,
         relation_ref=RelationRef(token="relation_v1_api", bot_ref=scope.bot_ref),
         relation_generation=0,
+    )
+
+
+def _frozen_turn(scope: SessionScope, *, generation: int = 7) -> object:
+    return SimpleNamespace(
+        bot_ref=scope.bot_ref.token,
+        session_ref=scope.session_ref.token,
+        session_generation=scope.session_ref.generation,
+        turn_generation=generation,
+        turn_state="frozen",
+        active_persona_ref=scope.persona_ref.token,
+        persona_lifecycle_generation=scope.persona_ref.lifecycle_generation,
+        active_scope_token=scope.storage_token,
+        scope_generation=scope.scope_generation,
+    )
+
+
+def _runtime_fenced_claim_stack(tmp_path):
+    """Build real copy services around a SessionCatalog-shaped turn lookup."""
+
+    from sylanne_alpha.legacy_claim_api import LegacyClaimApi
+    from sylanne_alpha.legacy_claim_authority import LegacyClaimAuthority
+    from sylanne_alpha.legacy_scope_claim import LegacyScopeClaimService
+    from sylanne_alpha.memory_system import MemorySystem
+    from sylanne_alpha.scoped_api import (
+        ScopedApiAuthorization,
+        ScopedApiRequest,
+        ScopedApiService,
+    )
+
+    repository = ScopeRepository(tmp_path)
+    scope = repository.create_scope(_scope(), expected_absent=True)
+    registry = ScopeRuntimeRegistry.for_test(repository=repository)
+    registry.exact_session(scope)
+    relation_runtime = registry.relation_for(
+        scope,
+        AuthenticatedSubject(
+            relation_ref=RelationRef(
+                token="relation_v1_final_turn_fence",
+                bot_ref=scope.bot_ref,
+            ),
+            identity_quality="event_get_sender_id",
+        ),
+    )
+    assert relation_runtime is not None
+    state = {"inside_final_guard": False, "reentrant_lookup": False}
+    turns = {"current": _frozen_turn(scope)}
+
+    def session_catalog_current_exact(candidate: SessionScope) -> object | None:
+        assert candidate == scope
+        if state["inside_final_guard"]:
+            state["reentrant_lookup"] = True
+            raise AssertionError("SessionCatalog.current_exact re-entered its repository")
+        with repository.transaction():
+            return turns["current"]
+
+    principal = ScopedPrincipal("principal_v1_final_turn_fence")
+
+    def grant(
+        candidate_principal: ScopedPrincipal,
+        candidate_scope: SessionScope,
+        action: str,
+    ) -> RelationScope | None:
+        if (
+            candidate_principal == principal
+            and candidate_scope == scope
+            and action == "POST:legacy-claim"
+        ):
+            return relation_runtime.scope
+        return None
+
+    gate = ScopedApiService(
+        repository,
+        registry,
+        turn_lookup=session_catalog_current_exact,
+        clock_ms=lambda: 1_000,
+        principal_scope_grant=grant,
+        principal_persona_grant=lambda *_args: None,
+    )
+    claims = LegacyScopeClaimService(repository)
+    source = claims.inventory_memory(
+        actor_id="actor-1",
+        source_id="manual-export-001",
+        payload=MemorySystem().to_dict(),
+    )
+    authority = LegacyClaimAuthority(repository, clock_ms=lambda: 1_000)
+    acl_grant = authority.enroll_claim_grant(
+        principal=principal,
+        scope=scope,
+        relation_scope=relation_runtime.scope,
+        record_id=source.source_fingerprint,
+        actor_id="actor-1",
+        audit_id="audit_v1_final_turn_fence",
+    )
+    authority.replace_grants(inventory_grants=(), claim_grants=(acl_grant,))
+    api = LegacyClaimApi(authority, claims)
+    intent = api.preflight(
+        principal,
+        source.source_fingerprint,
+        ScopeApiPathEcho(scope.bot_ref.token, scope.persona_ref.token, scope.session_ref.token),
+    )
+    assert not hasattr(intent, "status")
+    nonce = gate.issue_nonce(
+        scope,
+        relation_runtime.scope,
+        turn_generation=7,
+        principal=principal,
+        endpoint="legacy-claim",
+        method="POST",
+    )
+    authorization = gate.authorize(
+        ScopedApiRequest.from_tokens(
+            bot_ref=scope.bot_ref.token,
+            persona_ref=scope.persona_ref.token,
+            session_ref=scope.session_ref.token,
+            nonce=nonce,
+            endpoint="legacy-claim",
+            method="POST",
+            principal=principal,
+        )
+    )
+    assert isinstance(authorization, ScopedApiAuthorization)
+    checked = gate.revalidate(authorization)
+    assert isinstance(checked, ScopedApiAuthorization)
+    return SimpleNamespace(
+        api=api,
+        authority=authority,
+        authorization=checked,
+        gate=gate,
+        principal=principal,
+        relation_scope=relation_runtime.scope,
+        repository=repository,
+        scope=scope,
+        source=source,
+        state=state,
+        turns=turns,
+        registry=registry,
     )
 
 
@@ -186,6 +325,98 @@ def test_post_lookup_runtime_fence_aborts_before_destination_write(tmp_path) -> 
     assert isinstance(result, LegacyClaimApiError)
     assert (result.status, result.code) == (409, "scope_stale")
     assert (claims.lookup_calls, claims.issue_calls, claims.claim_calls) == (1, 0, 0)
+
+
+def test_final_runtime_guard_never_reenters_session_catalog_repository_lock(tmp_path) -> None:
+    """A real copy succeeds when current_exact would lock its repository."""
+
+    from sylanne_alpha.scoped_api import ScopedApiAuthorization
+
+    stack = _runtime_fenced_claim_stack(tmp_path)
+
+    def final_runtime_fence() -> bool:
+        stack.state["inside_final_guard"] = True
+        try:
+            return stack.gate.runtime_fence(stack.authorization)
+        finally:
+            stack.state["inside_final_guard"] = False
+
+    result = stack.api.claim_after_authorization(
+        stack.api.preflight(
+            stack.principal,
+            stack.source.source_fingerprint,
+            ScopeApiPathEcho(
+                stack.scope.bot_ref.token,
+                stack.scope.persona_ref.token,
+                stack.scope.session_ref.token,
+            ),
+        ),
+        principal=stack.principal,
+        record_id=stack.source.source_fingerprint,
+        scope=stack.scope,
+        relation_scope=stack.relation_scope,
+        post_lookup_revalidate=lambda: isinstance(
+            stack.gate.revalidate(stack.authorization), ScopedApiAuthorization
+        ),
+        runtime_fence=final_runtime_fence,
+    )
+
+    assert result == {
+        "ok": True,
+        "claim": {"record_id": stack.source.source_fingerprint, "status": "copied"},
+    }
+    assert stack.state["reentrant_lookup"] is False
+    assert stack.repository.read_component(stack.scope, "memory") is not None
+
+
+def test_new_published_turn_after_lookup_blocks_the_final_target_write(tmp_path) -> None:
+    """A newer resolving turn revokes an old authorization before target publish."""
+
+    from sylanne_alpha.legacy_claim_api import LegacyClaimApiError
+    from sylanne_alpha.scoped_api import ScopedApiAuthorization
+
+    stack = _runtime_fenced_claim_stack(tmp_path)
+    published = {"newer_turn": False}
+
+    def post_lookup_revalidate_then_begin_next_turn() -> bool:
+        if not isinstance(stack.gate.revalidate(stack.authorization), ScopedApiAuthorization):
+            return False
+        published["newer_turn"] = stack.registry.publish_frozen_turn(
+            stack.scope,
+            8,
+        )
+        return published["newer_turn"]
+
+    def final_runtime_fence() -> bool:
+        stack.state["inside_final_guard"] = True
+        try:
+            return stack.gate.runtime_fence(stack.authorization)
+        finally:
+            stack.state["inside_final_guard"] = False
+
+    result = stack.api.claim_after_authorization(
+        stack.api.preflight(
+            stack.principal,
+            stack.source.source_fingerprint,
+            ScopeApiPathEcho(
+                stack.scope.bot_ref.token,
+                stack.scope.persona_ref.token,
+                stack.scope.session_ref.token,
+            ),
+        ),
+        principal=stack.principal,
+        record_id=stack.source.source_fingerprint,
+        scope=stack.scope,
+        relation_scope=stack.relation_scope,
+        post_lookup_revalidate=post_lookup_revalidate_then_begin_next_turn,
+        runtime_fence=final_runtime_fence,
+    )
+
+    assert published["newer_turn"] is True
+    assert isinstance(result, LegacyClaimApiError)
+    assert (result.status, result.code) == (409, "scope_stale")
+    assert stack.state["reentrant_lookup"] is False
+    assert stack.repository.read_component(stack.scope, "memory") is None
 
 
 def test_locked_claim_fence_rejects_a_retired_durable_relation(tmp_path) -> None:

@@ -18,6 +18,7 @@ from sylanne_alpha.scope_contracts import (
     PersonaRevisionRef,
     RelationRef,
     RelationScope,
+    ResolvedTransportScope,
     ScopeApiPathEcho,
     ScopedPrincipal,
     SessionRef,
@@ -205,6 +206,135 @@ def test_runtime_fence_rejects_a_retired_session_without_repository_access(tmp_p
     assert service.runtime_fence(authorized)
     registry.release_session(scope)
     assert not service.runtime_fence(authorized)
+
+
+def test_runtime_fence_uses_a_published_turn_without_reentering_repository(
+    tmp_path,
+) -> None:
+    """The final write guard must not call SessionCatalog under its lock."""
+
+    repository = ScopeRepository(tmp_path)
+    scope = repository.create_scope(_scope(), expected_absent=True)
+    registry = ScopeRuntimeRegistry.for_test(repository=repository)
+    registry.exact_session(scope)
+    relation_runtime = registry.relation_for(
+        scope,
+        AuthenticatedSubject(
+            relation_ref=RelationRef(
+                token="relation_v1_published_turn",
+                bot_ref=scope.bot_ref,
+            ),
+            identity_quality="event_get_sender_id",
+        ),
+    )
+    assert relation_runtime is not None
+    state = {"inside_final_guard": False, "reentrant_lookup": False}
+    turn = _frozen_turn(scope)
+
+    def production_turn_lookup(candidate: SessionScope) -> object | None:
+        assert candidate == scope
+        if state["inside_final_guard"]:
+            state["reentrant_lookup"] = True
+            raise AssertionError("turn lookup re-entered the repository transaction")
+        # SessionCatalog.current_exact uses this same repository transaction
+        # boundary in production.
+        with repository.transaction():
+            return turn
+
+    def grant(
+        _principal: ScopedPrincipal,
+        candidate: SessionScope,
+        action: str,
+    ) -> RelationScope | None:
+        if candidate == scope and action == "POST:legacy-claim":
+            return relation_runtime.scope
+        return None
+
+    service = ScopedApiService(
+        repository,
+        registry,
+        turn_lookup=production_turn_lookup,
+        clock_ms=lambda: 1_000,
+        principal_scope_grant=grant,
+        principal_persona_grant=lambda *_args: None,
+    )
+    principal = _principal("principal_v1_published_turn")
+    nonce = service.issue_nonce(
+        scope,
+        relation_runtime.scope,
+        turn_generation=7,
+        principal=principal,
+        endpoint="legacy-claim",
+        method="POST",
+    )
+    authorized = service.authorize(
+        ScopedApiRequest.from_tokens(
+            bot_ref=scope.bot_ref.token,
+            persona_ref=scope.persona_ref.token,
+            session_ref=scope.session_ref.token,
+            nonce=nonce,
+            endpoint="legacy-claim",
+            method="POST",
+            principal=principal,
+        )
+    )
+
+    assert isinstance(authorized, ScopedApiAuthorization)
+    with repository.transaction():
+        state["inside_final_guard"] = True
+        try:
+            assert service.runtime_fence(authorized)
+        finally:
+            state["inside_final_guard"] = False
+    assert state["reentrant_lookup"] is False
+
+
+def test_new_resolving_transport_turn_advances_and_clears_the_final_fence(tmp_path) -> None:
+    """Every new begin_turn publication revokes the old exact authorization."""
+
+    service, _repository, registry, scope, relation = _service(tmp_path)
+    principal = _principal("principal_v1_new_resolving_turn")
+    nonce = service.issue_nonce(
+        scope,
+        relation,
+        turn_generation=7,
+        principal=principal,
+        endpoint="legacy-claim",
+        method="POST",
+    )
+    authorized = service.authorize(
+        ScopedApiRequest.from_tokens(
+            bot_ref=scope.bot_ref.token,
+            persona_ref=scope.persona_ref.token,
+            session_ref=scope.session_ref.token,
+            nonce=nonce,
+            endpoint="legacy-claim",
+            method="POST",
+            principal=principal,
+        )
+    )
+    assert isinstance(authorized, ScopedApiAuthorization)
+    transport = ResolvedTransportScope(
+        bot_ref=scope.bot_ref,
+        session_ref=scope.session_ref,
+        identity_quality="event_get_sender_id",
+        private_scope_enabled=True,
+        disabled_reason=None,
+    )
+
+    assert registry.publish_transport_turn(
+        transport,
+        SimpleNamespace(
+            bot_ref=scope.bot_ref.token,
+            session_ref=scope.session_ref.token,
+            session_generation=scope.session_ref.generation,
+            turn_generation=8,
+            turn_state="resolving",
+        ),
+    )
+    assert not service.runtime_fence(authorized)
+    registry.release_session(scope)
+    assert not registry.matches_published_turn(scope, 8)
 
 
 def test_principal_scope_grant_is_required_and_revalidated_before_relation_runtime(

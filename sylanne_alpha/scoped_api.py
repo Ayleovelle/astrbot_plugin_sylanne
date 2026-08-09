@@ -716,14 +716,12 @@ class ScopedApiService:
                 return False
             if self._registry.relation_or_none(authorization.relation_scope) is None:
                 return False
-            turn = self._turn_lookup(authorization.scope)
+            return self._registry.matches_published_turn(
+                authorization.scope,
+                authorization.turn_generation,
+            )
         except Exception:  # noqa: BLE001 - runtime authority must fail closed
             return False
-        return self._turn_matches(
-            turn,
-            authorization.scope,
-            authorization.turn_generation,
-        )
 
     def stream_stale_payload(self) -> dict[str, object]:
         """Return the sole marker a streaming host may emit before closing."""
@@ -788,6 +786,11 @@ class ScopedApiService:
         except Exception:  # noqa: BLE001 - a host lookup cannot disclose details
             return self._stale_error() if stream else ScopedApiError(410, "scope_required")
         if not self._turn_matches(turn, resolved, record.turn_generation):
+            return self._stale_error()
+        if not self._registry.publish_frozen_turn(
+            resolved,
+            record.turn_generation,
+        ):
             return self._stale_error()
         return ScopedApiAuthorization(
             scope=resolved,

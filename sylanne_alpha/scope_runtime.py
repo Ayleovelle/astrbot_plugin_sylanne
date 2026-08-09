@@ -157,6 +157,11 @@ def _transport_identity_for_scope(scope: SessionScope) -> TransportIdentityKey:
     )
 
 
+def _transport_key_for_scope(scope: SessionScope) -> TransportKey:
+    scope = _require_scope(scope)
+    return (*_transport_identity_for_scope(scope), scope.session_ref.generation)
+
+
 RELATIONSHIP_STAGES = {
     "infant": (0.0, 3.0),
     "young": (3.0, 14.0),
@@ -948,6 +953,11 @@ class ScopeRuntimeRegistry:
         self._highest_transport_generations: dict[TransportIdentityKey, int] = {}
         self._transport_delivery_generations: dict[TransportKey, int] = {}
         self._transport_owner_views: dict[TransportKey, RequestRuntimeView] = {}
+        # This is a pure in-memory high-water fence, published by every
+        # successful resolving transport turn.  It is intentionally separate
+        # from request views: WebUI final-write guards need an exact turn
+        # fence even after a bounded request view has been evicted.
+        self._published_transport_turn_generations: dict[TransportKey, int] = {}
         self._request_views: OrderedDict[
             RequestViewKey,
             RequestRuntimeView,
@@ -977,6 +987,7 @@ class ScopeRuntimeRegistry:
             or self._highest_transport_generations
             or self._transport_delivery_generations
             or self._transport_owner_views
+            or self._published_transport_turn_generations
             or self._request_views
             or self._transient_context_sinks
             or self._transient_context_requests
@@ -1520,6 +1531,93 @@ class ScopeRuntimeRegistry:
             return False
         return self._latest_sessions.get((persona_key, scope.storage_token)) == key
 
+    def publish_transport_turn(
+        self,
+        transport: ResolvedTransportScope,
+        turn: object,
+    ) -> bool:
+        """Publish one resolving/frozen transport turn without repository access.
+
+        ``SessionCatalog.begin_turn`` calls this while it holds the repository
+        transaction.  This method therefore validates only already-attached
+        values and updates one process-local monotonic fence; it must never
+        resolve a scope, read a catalog, or create a runtime.
+        """
+
+        try:
+            key = _transport_key(transport)
+        except ScopeMismatch:
+            return False
+        generation = getattr(turn, "turn_generation", None)
+        if (
+            getattr(turn, "bot_ref", None) != transport.bot_ref.token
+            or getattr(turn, "session_ref", None) != transport.session_ref.token
+            or getattr(turn, "session_generation", None)
+            != transport.session_ref.generation
+            or getattr(turn, "turn_state", None) not in {"resolving", "frozen"}
+            or type(generation) is not int
+            or isinstance(generation, bool)
+            or generation < 1
+        ):
+            return False
+        return self._publish_transport_turn_generation(key, generation)
+
+    def publish_frozen_turn(
+        self,
+        scope: SessionScope,
+        turn_generation: int,
+    ) -> bool:
+        """Publish a service-validated frozen turn without touching storage.
+
+        The scoped API calls this only after it has checked the complete frozen
+        catalog turn.  Keeping the write here memory-only makes the final claim
+        guard safe inside ``LegacyScopeClaimService``'s repository transaction.
+        """
+
+        if (
+            type(turn_generation) is not int
+            or isinstance(turn_generation, bool)
+            or turn_generation < 1
+        ):
+            return False
+        try:
+            key = _transport_key_for_scope(scope)
+        except ScopeMismatch:
+            return False
+        return self._publish_transport_turn_generation(key, turn_generation)
+
+    def matches_published_turn(
+        self,
+        scope: SessionScope,
+        turn_generation: int,
+    ) -> bool:
+        """Check an exact published turn generation using memory only."""
+
+        if (
+            type(turn_generation) is not int
+            or isinstance(turn_generation, bool)
+            or turn_generation < 1
+        ):
+            return False
+        try:
+            key = _transport_key_for_scope(scope)
+        except ScopeMismatch:
+            return False
+        return self._published_transport_turn_generations.get(key) == turn_generation
+
+    def _publish_transport_turn_generation(
+        self,
+        key: TransportKey,
+        turn_generation: int,
+    ) -> bool:
+        """Advance one exact transport turn fence, never accepting a rollback."""
+
+        current = self._published_transport_turn_generations.get(key)
+        if current is not None and turn_generation < current:
+            return False
+        self._published_transport_turn_generations[key] = turn_generation
+        return True
+
     def track_session_task(self, scope: SessionScope, task: Any) -> bool:
         """Associate a callback task with its exact session for release fencing."""
 
@@ -1649,6 +1747,10 @@ class ScopeRuntimeRegistry:
         """Release only this exact session without creating or changing siblings."""
 
         scope = _require_scope(scope)
+        self._published_transport_turn_generations.pop(
+            _transport_key_for_scope(scope),
+            None,
+        )
         persona_key = _persona_key(scope)
         if persona_key in self._retired_personas:
             return
@@ -1749,6 +1851,12 @@ class ScopeRuntimeRegistry:
                 self._transport_owners.pop(transport_key, None)
                 self._transport_delivery_generations.pop(transport_key, None)
                 self._transport_owner_views.pop(transport_key, None)
+        for transport_key in [
+            item
+            for item in self._published_transport_turn_generations
+            if item[:3] in transport_identities
+        ]:
+            self._published_transport_turn_generations.pop(transport_key, None)
         for identity in transport_identities:
             self._drop_unused_transport_generation_fence(identity)
         self._released_sessions = {item for item in self._released_sessions if item[:3] != key}
@@ -1783,6 +1891,12 @@ class ScopeRuntimeRegistry:
         ]:
             self._transport_delivery_generations.pop(transport_key, None)
             self._transport_owner_views.pop(transport_key, None)
+        for transport_key in [
+            item
+            for item in self._published_transport_turn_generations
+            if item[:3] == identity
+        ]:
+            self._published_transport_turn_generations.pop(transport_key, None)
 
     @staticmethod
     def _cancel_runtime_tasks(runtime: PersonaRuntime) -> None:
