@@ -83,6 +83,19 @@ def test_scope_identity_key_is_stable_and_corruption_fails_closed(tmp_path: Path
         load_or_create_scope_identity_key(path)
 
 
+def test_webui_principal_issuer_is_stable_domain_separated_and_never_request_created(tmp_path: Path) -> None:
+    first = ScopeRepository(tmp_path)
+    second = ScopeRepository(tmp_path)
+
+    pages = first.derive_webui_principal_token("pages", "operator")
+    assert pages is not None
+    assert pages == second.derive_webui_principal_token("pages", "operator")
+    assert pages != first.derive_webui_principal_token("standalone", "operator")
+    assert "operator" not in pages
+    first._webui_principal_secret = None
+    assert first.derive_webui_principal_token("pages", "operator") is None
+
+
 def test_scope_lifecycle_generation_is_not_component_generation(tmp_path: Path) -> None:
     repository = ScopeRepository(tmp_path)
     active = repository.create_scope(_scope(), expected_absent=True)

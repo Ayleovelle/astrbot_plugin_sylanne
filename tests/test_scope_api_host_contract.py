@@ -27,11 +27,15 @@ def _unused_local_port() -> int:
         return int(stream.getsockname()[1])
 
 
-def test_host_principal_is_opaque_and_domain_separated() -> None:
+def test_host_principal_uses_only_a_published_resolver_key_and_is_domain_separated(tmp_path) -> None:
     import main
+    from sylanne_alpha.scope_repository import ScopeRepository
 
     plugin = object.__new__(main.EmotionalStatePlugin)
     plugin._correlation_secret = b"s" * 32
+    plugin._scope_resolver_v1 = SimpleNamespace(
+        _repository=ScopeRepository(tmp_path),
+    )
 
     pages = plugin._scoped_api_principal_from_authenticated_host(
         "pages", "dashboard-user"
@@ -54,6 +58,8 @@ def test_host_principal_is_opaque_and_domain_separated() -> None:
         )
         is None
     )
+    plugin._scope_resolver_v1 = None
+    assert plugin._scoped_api_principal_from_authenticated_host("pages", "dashboard-user") is None
 
 
 def test_host_grant_is_fail_closed_without_an_authority_mapping() -> None:

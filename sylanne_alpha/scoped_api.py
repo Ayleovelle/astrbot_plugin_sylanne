@@ -49,6 +49,7 @@ SCOPED_API_ENDPOINTS: Final[frozenset[str]] = frozenset(
         "memory/sink",
         "memory/meltdown",
         "memory/meltdown-nonce",
+        "legacy-claim",
         "stream",
         "ws",
     }
@@ -63,6 +64,7 @@ _SCOPED_API_METHODS: Final[dict[str, str]] = {
     "memory/sink": "POST",
     "memory/meltdown": "POST",
     "memory/meltdown-nonce": "GET",
+    "legacy-claim": "POST",
     "stream": "GET",
     "ws": "GET",
 }

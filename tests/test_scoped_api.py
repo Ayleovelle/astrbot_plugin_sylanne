@@ -143,10 +143,12 @@ def _principal(token: str = "principal_v1_scoped_api") -> ScopedPrincipal:
 def test_scoped_route_specs_are_immutable_and_bind_the_method_to_each_action() -> None:
     state = scoped_api_route_spec("state")
     melt = scoped_api_route_spec("memory/meltdown")
+    legacy_claim = scoped_api_route_spec("legacy-claim")
 
     assert state == ScopeRouteSpec(endpoint="state", method="GET")
     assert state.action == "GET:state"
     assert melt.action == "POST:memory/meltdown"
+    assert legacy_claim.action == "POST:legacy-claim"
     with pytest.raises(TypeError):
         SCOPED_API_ROUTE_SPECS["state"] = state  # type: ignore[index]
 
@@ -174,6 +176,7 @@ def test_scoped_method_and_route_contracts_cannot_mutate_at_runtime() -> None:
         if type(SCOPED_API_METHODS) is dict:
             SCOPED_API_METHODS["state"] = original_method
     assert scoped_api_route_spec("state").action == "GET:state"
+    assert SCOPED_API_METHODS["legacy-claim"] == "POST"
 
 
 def test_principal_scope_grant_is_required_and_revalidated_before_relation_runtime(

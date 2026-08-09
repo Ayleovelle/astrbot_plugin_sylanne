@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import math
 import os
@@ -19,7 +21,7 @@ from typing import Iterator
 import portalocker
 
 from . import infra
-from .infra import atomic_write_owner_only_bytes
+from .infra import atomic_write_owner_only_bytes, load_or_create_owner_only_secret
 from .scope_contracts import (
     BotRef,
     PersonaRevisionRef,
@@ -39,6 +41,9 @@ _RELATION_META_SCHEMA = "sylanne.scope.relation-meta.v1"
 _PERSONA_GENESIS_GLOBAL_SCHEMA = "sylanne.persona-genesis.global.v1"
 _PERSONA_GENESIS_CORRUPTION_SCHEMA = "sylanne.persona-genesis.corruption.v1"
 _LEGACY_UNSCOPED_MANIFEST_SCHEMA = "sylanne.scope.legacy-unscoped.v1"
+_WEBUI_PRINCIPAL_KEY_MAGIC = b"SYLANNE-WEBUI-PRINCIPAL\x01\x00"
+_LEGACY_CLAIM_ACTOR_KEY_MAGIC = b"SYLANNE-LEGACY-CLAIM-ACTOR\x01\x00"
+_OWNER_ONLY_SECRET_BYTES = 32
 _PERSONA_GENESIS_DAILY_LIMIT = 32
 _PERSONA_GENESIS_LEASE_MS = 5 * 60 * 1000
 _COMPONENT_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
@@ -255,12 +260,18 @@ class ScopeRepository:
         # this owner-only, explicit-inventory root.
         self.legacy_unscoped_root = self.root / "legacy-unscoped"
         self.legacy_unscoped_manifest_path = self.legacy_unscoped_root / "manifest.json"
+        # These files are distinct authority roots.  The principal signing key
+        # is neither the scope identity key nor V3's ephemeral correlation key.
+        self.webui_principal_key_path = self.root / "webui-principal.key"
+        self.legacy_claim_actor_key_path = self.legacy_unscoped_root / "actor-binding.key"
+        self.legacy_claim_authority_path = self.legacy_unscoped_root / "legacy-claim-authority.json"
         self._lock_path = self.root / ".scope-v1.lock"
         self._persona_genesis_global_path = self.root / "persona-genesis-global.json"
         self._persona_genesis_slot_path = self.root / ".persona-genesis-provider.lock"
         self._lock_timeout_seconds = timeout
         self._replace_attempts = max(1, int(replace_attempts))
         self._replace_retry_seconds = max(0.0, float(replace_retry_seconds))
+        self._webui_principal_secret: bytes | None = None
         self.root.mkdir(parents=True, exist_ok=True)
         if os.name == "nt":
             infra._secure_windows_parent(
@@ -276,6 +287,60 @@ class ScopeRepository:
                 error_label="scope repository",
             )
         self.bots_directory.mkdir(parents=True, exist_ok=True)
+        # ScopeResolver.for_context creates this repository, which initializes
+        # the distinct WebUI issuer before any request adapter can consume it.
+        self.initialize_webui_principal_key()
+
+    def initialize_webui_principal_key(self) -> None:
+        """Initialize the one repository-owned WebUI principal key.
+
+        ScopeResolver calls this during construction.  HTTP request paths only
+        consume its already-published in-memory copy, so a missing or corrupt
+        file after startup never becomes an on-demand credential creation.
+        """
+
+        with self._repository_lock():
+            self._webui_principal_secret = load_or_create_owner_only_secret(
+                self.webui_principal_key_path,
+                magic=_WEBUI_PRINCIPAL_KEY_MAGIC,
+                secret_bytes=_OWNER_ONLY_SECRET_BYTES,
+                error_label="WebUI principal key",
+            )
+
+    def derive_webui_principal_token(self, host: object, identity: object) -> str | None:
+        """Derive a domain-separated opaque host principal without HTTP-side IO."""
+
+        secret = self._webui_principal_secret
+        if (
+            host not in {"pages", "standalone"}
+            or type(identity) is not str
+            or not identity
+            or len(identity) > 512
+            or type(secret) is not bytes
+            or len(secret) != _OWNER_ONLY_SECRET_BYTES
+        ):
+            return None
+        try:
+            payload = (
+                b"sylanne-webui-principal-v1\x00"
+                + host.encode("ascii")
+                + b"\x00"
+                + identity.encode("utf-8")
+            )
+        except UnicodeEncodeError:
+            return None
+        return "principal_v1_" + hmac.new(secret, payload, hashlib.sha256).hexdigest()
+
+    def load_or_create_legacy_claim_actor_secret(self) -> bytes:
+        """Return the separate keyed actor-binding secret for offline ACL work."""
+
+        with self._repository_lock():
+            return load_or_create_owner_only_secret(
+                self.legacy_claim_actor_key_path,
+                magic=_LEGACY_CLAIM_ACTOR_KEY_MAGIC,
+                secret_bytes=_OWNER_ONLY_SECRET_BYTES,
+                error_label="legacy claim actor binding key",
+            )
 
     def _observation_scope_dir_locked(self, scope: SessionScope) -> Path:
         if type(scope) is not SessionScope:
@@ -749,6 +814,26 @@ class ScopeRepository:
                         "legacy unscoped manifest record is invalid"
                     )
         return document
+
+    def _read_legacy_claim_authority_locked(
+        self,
+    ) -> tuple[bytes, dict[str, object]] | None:
+        """Read the owner-only legacy claim ACL while holding the scope lock."""
+
+        return self._read_owner_json_locked(
+            self.legacy_claim_authority_path,
+            error_label="legacy claim authority",
+        )
+
+    def _write_legacy_claim_authority_locked(self, document: dict[str, object]) -> None:
+        """Atomically publish the complete authority replacement document."""
+
+        atomic_write_owner_only_bytes(
+            self.legacy_claim_authority_path,
+            _canonical_json_bytes(document),
+            error_label="legacy claim authority",
+        )
+        self._fsync_dir(self.legacy_unscoped_root)
 
     def _write_legacy_unscoped_manifest_locked(
         self,

@@ -239,6 +239,7 @@ from sylanne_alpha.scoped_api import (  # noqa: E402
     issue_scoped_api_nonce_for_binding,
     scoped_api_service_for_plugin,
 )
+from sylanne_alpha.legacy_claim_authority import LegacyClaimAuthority  # noqa: E402
 from sylanne_alpha.scope_contracts import (  # noqa: E402
     BotRef,
     PersonaScope,
@@ -2189,19 +2190,18 @@ class EmotionalStatePlugin(Star):
             return None
         if type(identity) is not str or not identity or len(identity) > 512:
             return None
-        secret = getattr(self, "_correlation_secret", None)
-        if type(secret) is not bytes or len(secret) != 32:
+        resolver = getattr(self, "_scope_resolver_v1", None)
+        repository = getattr(resolver, "_repository", None)
+        derive = getattr(repository, "derive_webui_principal_token", None)
+        # Do not create a resolver or a key from an HTTP request.  Resolver
+        # construction initialized the repository issuer; derivation below is
+        # memory-only and discards the host identity immediately.
+        if not callable(derive):
             return None
         try:
-            payload = b"sylanne-scoped-api-principal-v1\x00" + host.encode(
-                "ascii"
-            ) + b"\x00" + identity.encode("utf-8")
-        except UnicodeEncodeError:
-            return None
-        digest = hmac.new(secret, payload, "sha256").hexdigest()
-        try:
-            return ScopedPrincipal(token=f"principal_v1_{digest}")
-        except ValueError:
+            token = derive(host, identity)
+            return None if token is None else ScopedPrincipal(token=token)
+        except (TypeError, ValueError):
             return None
 
     def _scoped_api_principal_scope_grant(
@@ -2219,8 +2219,23 @@ class EmotionalStatePlugin(Star):
         would silently grant access.  Keep the shared core gate closed instead.
         """
 
-        del principal, scope, action
-        return None
+        if action != "POST:legacy-claim":
+            return None
+        resolver = getattr(self, "_scope_resolver_v1", None)
+        repository = getattr(resolver, "_repository", None)
+        if repository is None:
+            return None
+        authority = getattr(self, "_legacy_claim_authority", None)
+        if (
+            type(authority) is not LegacyClaimAuthority
+            or authority.repository is not repository
+        ):
+            try:
+                authority = LegacyClaimAuthority(repository)
+            except Exception:  # noqa: BLE001 - authority publication fails closed
+                return None
+            self._legacy_claim_authority = authority
+        return authority.relation_for_scope_action(principal, scope, action)
 
     def _scoped_api_principal_persona_grant(
         self,
