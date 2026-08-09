@@ -653,7 +653,7 @@ class LegacyScopeClaimService:
                 inventory = manifest["inventory"]
                 if type(inventory) is not dict:
                     raise RepositoryCorruptionError("legacy inventory is invalid")
-                for fingerprint in sorted(inventory):
+                for fingerprint in sorted(inventory)[:limit]:
                     record = inventory[fingerprint]
                     _require_digest(fingerprint, "source_fingerprint")
                     if type(record) is not dict or set(record) != {
@@ -675,15 +675,14 @@ class LegacyScopeClaimService:
                         payload_digest=digest,
                     )
                     _manifest, _payload, payload_bytes = self._verified_inventory_locked(source)
-                    if len(records) < limit:
-                        records.append(
-                            LegacyInventoryRecord(
-                                record_id=fingerprint,
-                                source_kind="explicit_memory_snapshot",
-                                checksum=digest,
-                                byte_size=len(payload_bytes),
-                            )
+                    records.append(
+                        LegacyInventoryRecord(
+                            record_id=fingerprint,
+                            source_kind="explicit_memory_snapshot",
+                            checksum=digest,
+                            byte_size=len(payload_bytes),
                         )
+                    )
         except (LegacyScopeClaimError, OSError, RepositoryCorruptionError, ValueError) as exc:
             raise LegacyClaimQuarantined("legacy inventory listing rejected unsafe record") from exc
         return tuple(records)

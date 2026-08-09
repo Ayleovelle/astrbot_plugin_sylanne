@@ -419,3 +419,64 @@ def test_inventory_list_fails_closed_on_malformed_source_without_quarantine_muta
     assert repository.legacy_unscoped_manifest_path.read_bytes() == manifest_before
     assert repository.read_component(scope, "memory") is None
     assert not (repository.legacy_unscoped_root / "quarantine").exists()
+
+
+def test_inventory_list_does_not_open_sources_after_the_requested_limit(
+    tmp_path,
+    scopes,
+) -> None:
+    """A damaged later record cannot block a deterministic bounded first page."""
+
+    from sylanne_alpha.legacy_scope_claim import (
+        LegacyClaimQuarantined,
+        LegacyScopeClaimService,
+    )
+
+    repository = ScopeRepository(tmp_path / "scope-v1")
+    scope = repository.create_scope(scopes.bot_a_persona_a, expected_absent=True)
+    service = LegacyScopeClaimService(repository)
+    first_payload = _memory_payload()
+    second_payload = _memory_payload()
+    second_payload["tick"] = 1
+    sources = sorted(
+        (
+            service.inventory_memory(
+                actor_id="operator-a",
+                source_id="manual-export-001",
+                payload=first_payload,
+            ),
+            service.inventory_memory(
+                actor_id="operator-b",
+                source_id="manual-export-002",
+                payload=second_payload,
+            ),
+        ),
+        key=lambda source: source.source_fingerprint,
+    )
+    expected, damaged = sources
+    with repository.transaction():
+        repository._write_legacy_unscoped_source_locked(
+            damaged.source_fingerprint,
+            {
+                "schema_version": "sylanne.scope.legacy-source.v1",
+                "source_fingerprint": damaged.source_fingerprint,
+                "actor_id": damaged.actor_id,
+                "source_id": damaged.source_id,
+                "payload_digest": damaged.payload_digest,
+                "payload": {"not": "a strict memory snapshot"},
+            },
+        )
+    manifest_before = repository.legacy_unscoped_manifest_path.read_bytes()
+
+    listed = service.list_inventory(limit=1)
+
+    assert listed[0].record_id == expected.source_fingerprint
+    assert listed[0].checksum == expected.payload_digest
+    assert repository.legacy_unscoped_manifest_path.read_bytes() == manifest_before
+    assert repository.read_component(scope, "memory") is None
+    assert not (repository.legacy_unscoped_root / "quarantine").exists()
+    with pytest.raises(LegacyClaimQuarantined, match="legacy inventory listing"):
+        service.list_inventory(limit=2)
+    assert repository.legacy_unscoped_manifest_path.read_bytes() == manifest_before
+    assert repository.read_component(scope, "memory") is None
+    assert not (repository.legacy_unscoped_root / "quarantine").exists()
