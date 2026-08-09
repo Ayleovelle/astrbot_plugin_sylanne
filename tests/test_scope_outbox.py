@@ -44,6 +44,8 @@ from sylanne_alpha.session_catalog import ProtectedDeliveryBinding, SessionCatal
 
 _PLATFORM = "test-platform"
 _SELF_ID = "test-account"
+_SECOND_PLATFORM = "test-platform-b"
+_SECOND_SELF_ID = "test-account-b"
 _SESSION = "test:FriendMessage:42"
 _TARGET = "test-target-address"
 _PROOF_DIGEST = "proof-set-v1"
@@ -54,12 +56,13 @@ _EXPIRES_AT_MS = 10_000
 class _StaticProofs:
     def __init__(self, current: CurrentAdapterAccountProof | None) -> None:
         self.current_value = current
+        self._by_platform: dict[str, CurrentAdapterAccountProof] = {}
 
     def current(self, platform_id: str) -> CurrentAdapterAccountProof | None:
         current = self.current_value
-        if current is None or current.proof.platform_id != platform_id:
-            return None
-        return current
+        if current is not None and current.proof.platform_id == platform_id:
+            return current
+        return self._by_platform.get(platform_id)
 
 
 class _Transport:
@@ -90,18 +93,27 @@ def test_transport_protocol_treats_adapter_result_as_unverified_object() -> None
     assert get_type_hints(AccountAwareTransport.send)["return"] is object
 
 
-def _transport_scope(bot: BotRef) -> ResolvedTransportScope:
+def _transport_scope(
+    bot: BotRef,
+    *,
+    session_token: str = "session_v1_outbox",
+) -> ResolvedTransportScope:
     return ResolvedTransportScope(
         bot_ref=bot,
-        session_ref=SessionRef(token="session_v1_outbox", bot_ref=bot, generation=0),
+        session_ref=SessionRef(token=session_token, bot_ref=bot, generation=0),
         identity_quality="event_self_id",
         private_scope_enabled=True,
         disabled_reason=None,
     )
 
 
-def _scope(bot: BotRef, persona_token: str) -> SessionScope:
-    transport = _transport_scope(bot)
+def _scope(
+    bot: BotRef,
+    persona_token: str,
+    *,
+    session_token: str = "session_v1_outbox",
+) -> SessionScope:
+    transport = _transport_scope(bot, session_token=session_token)
     return SessionScope(
         bot_ref=bot,
         persona_ref=PersonaRevisionRef(
@@ -117,10 +129,15 @@ def _scope(bot: BotRef, persona_token: str) -> SessionScope:
     )
 
 
-def _binding(*, adapter_capability: str = "proactive") -> ProtectedDeliveryBinding:
+def _binding(
+    *,
+    adapter_capability: str = "proactive",
+    platform_id: str = _PLATFORM,
+    self_id: str = _SELF_ID,
+) -> ProtectedDeliveryBinding:
     return ProtectedDeliveryBinding(
-        platform_id=_PLATFORM,
-        self_id=_SELF_ID,
+        platform_id=platform_id,
+        self_id=self_id,
         message_session=_SESSION,
         target_address=_TARGET,
         adapter_capability=adapter_capability,
@@ -131,10 +148,14 @@ def _binding(*, adapter_capability: str = "proactive") -> ProtectedDeliveryBindi
     )
 
 
-def _current_proof(bot: BotRef) -> CurrentAdapterAccountProof:
+def _current_proof(
+    bot: BotRef,
+    *,
+    platform_id: str = _PLATFORM,
+) -> CurrentAdapterAccountProof:
     return CurrentAdapterAccountProof(
         proof=AdapterAccountProof(
-            platform_id=_PLATFORM,
+            platform_id=platform_id,
             bot_ref=bot,
             proof_generation=0,
             verified_at_ms=0,
@@ -147,10 +168,19 @@ def _current_proof(bot: BotRef) -> CurrentAdapterAccountProof:
     )
 
 
-def _registered_bot(catalog: SessionCatalog, root: Path) -> BotRef:
-    generation = catalog.binding_generation(_PLATFORM, _SELF_ID)
+def _registered_bot(
+    catalog: SessionCatalog,
+    root: Path,
+    *,
+    platform_id: str = _PLATFORM,
+    self_id: str = _SELF_ID,
+) -> BotRef:
+    generation = catalog.binding_generation(platform_id, self_id)
     key = load_or_create_scope_identity_key(root / "identity.key")
-    return key.bot_ref(BotBinding(platform_id=_PLATFORM, self_id=_SELF_ID), generation)
+    return key.bot_ref(
+        BotBinding(platform_id=platform_id, self_id=self_id),
+        generation,
+    )
 
 
 def _freeze_scope(
@@ -158,11 +188,17 @@ def _freeze_scope(
     scope: SessionScope,
     *,
     adapter_capability: str = "proactive",
+    platform_id: str = _PLATFORM,
+    self_id: str = _SELF_ID,
 ) -> None:
     catalog.freeze_persona(
         catalog.begin_turn(
-            _transport_scope(scope.bot_ref),
-            _binding(adapter_capability=adapter_capability),
+            _transport_scope(scope.bot_ref, session_token=scope.session_ref.token),
+            _binding(
+                adapter_capability=adapter_capability,
+                platform_id=platform_id,
+                self_id=self_id,
+            ),
         ),
         scope,
     )
@@ -198,13 +234,38 @@ def _issued_draft(
     *,
     text: str = "hello",
     idempotent: bool = False,
+    scope: SessionScope | None = None,
 ):
     return context.catalog.issue_proactive_intent(
-        context.scope,
+        context.scope if scope is None else scope,
         text=text,
         idempotent=idempotent,
         expires_at_ms=_EXPIRES_AT_MS,
     )
+
+
+def _second_bot_scope(outbox_context) -> tuple[BotRef, SessionScope]:
+    bot = _registered_bot(
+        outbox_context.catalog,
+        outbox_context.repository.root,
+        platform_id=_SECOND_PLATFORM,
+        self_id=_SECOND_SELF_ID,
+    )
+    outbox_context.proofs._by_platform[_SECOND_PLATFORM] = _current_proof(
+        bot,
+        platform_id=_SECOND_PLATFORM,
+    )
+    scope = outbox_context.repository.create_scope(
+        _scope(bot, "persona_v1_outbox_c"),
+        expected_absent=True,
+    )
+    _freeze_scope(
+        outbox_context.catalog,
+        scope,
+        platform_id=_SECOND_PLATFORM,
+        self_id=_SECOND_SELF_ID,
+    )
+    return bot, scope
 
 
 def _outbox(context: SimpleNamespace) -> DeliveryOutbox:
@@ -366,8 +427,8 @@ def test_non_idempotent_receipt_loss_is_never_automatically_retried(outbox_conte
         transport = _Transport()
         transport.behavior = "send_then_lose_receipt"
 
-        await outbox.dispatch_one(transport, worker_id="worker-a")
-        await outbox.dispatch_one(transport, worker_id="worker-b")
+        await outbox.dispatch_one(transport, outbox_context.bot, worker_id="worker-a")
+        await outbox.dispatch_one(transport, outbox_context.bot, worker_id="worker-b")
 
         assert outbox.get(item.delivery_ref).status is DeliveryStatus.OUTCOME_UNKNOWN
         assert transport.calls == [item.delivery_id]
@@ -386,8 +447,8 @@ def test_normal_transport_return_is_never_a_confirmed_receipt(
         transport.behavior = "ordinary_return"
         transport.normal_return = ordinary_return
 
-        await outbox.dispatch_one(transport, worker_id="worker-a")
-        await outbox.dispatch_one(transport, worker_id="worker-b")
+        await outbox.dispatch_one(transport, outbox_context.bot, worker_id="worker-a")
+        await outbox.dispatch_one(transport, outbox_context.bot, worker_id="worker-b")
 
         assert outbox.get(item.delivery_ref).status is DeliveryStatus.OUTCOME_UNKNOWN
         assert transport.calls == [item.delivery_id]
@@ -402,7 +463,7 @@ def test_confirmed_receipt_must_bind_the_issued_delivery_id(outbox_context) -> N
         transport = _Transport()
         transport.receipt_delivery_id = "other-delivery"
 
-        await outbox.dispatch_one(transport, worker_id="worker-a")
+        await outbox.dispatch_one(transport, outbox_context.bot, worker_id="worker-a")
 
         assert outbox.get(item.delivery_ref).status is DeliveryStatus.OUTCOME_UNKNOWN
         assert transport.calls == [item.delivery_id]
@@ -422,9 +483,9 @@ def test_idempotent_retry_reuses_the_issued_delivery_id(outbox_context) -> None:
         transport = _Transport()
         transport.behavior = "send_then_lose_receipt"
 
-        await outbox.dispatch_one(transport, worker_id="worker-a")
+        await outbox.dispatch_one(transport, outbox_context.bot, worker_id="worker-a")
         transport.behavior = "confirm"
-        await outbox.dispatch_one(transport, worker_id="worker-b")
+        await outbox.dispatch_one(transport, outbox_context.bot, worker_id="worker-b")
 
         assert outbox.get(item.delivery_ref).status is DeliveryStatus.SENT_CONFIRMED
         assert transport.calls == [item.delivery_id, item.delivery_id]
@@ -439,8 +500,8 @@ def test_plain_proactive_adapter_never_retries_an_unknown_send(outbox_context) -
         transport = _Transport()
         transport.behavior = "send_then_lose_receipt"
 
-        await outbox.dispatch_one(transport, worker_id="worker-a")
-        await outbox.dispatch_one(transport, worker_id="worker-b")
+        await outbox.dispatch_one(transport, outbox_context.bot, worker_id="worker-a")
+        await outbox.dispatch_one(transport, outbox_context.bot, worker_id="worker-b")
 
         assert outbox.get(item.delivery_ref).status is DeliveryStatus.OUTCOME_UNKNOWN
         assert transport.calls == [item.delivery_id]
@@ -466,12 +527,20 @@ def test_proven_pre_send_failure_retries_even_when_non_idempotent(outbox_context
         item = outbox.enqueue(_issued_draft(outbox_context, idempotent=False))
         transport = _PreSendFailureTransport()
 
-        first = await outbox.dispatch_one(transport, worker_id="worker-a")
+        first = await outbox.dispatch_one(
+            transport,
+            outbox_context.bot,
+            worker_id="worker-a",
+        )
         assert first is not None
         assert first.status is DeliveryStatus.FAILED_RETRYABLE
         assert first.reason == "adapter_rejected_before_send"
 
-        second = await outbox.dispatch_one(transport, worker_id="worker-a")
+        second = await outbox.dispatch_one(
+            transport,
+            outbox_context.bot,
+            worker_id="worker-a",
+        )
         assert second is not None
         assert second.status is DeliveryStatus.SENT_CONFIRMED
         assert transport.calls == [item.delivery_id, item.delivery_id]
@@ -499,13 +568,24 @@ def test_second_startup_never_replays_a_live_plain_dispatch(outbox_context) -> N
         first_transport = _PausedTransport()
         second_transport = _Transport()
         first_task = asyncio.create_task(
-            first.dispatch_one(first_transport, worker_id="worker-a")
+            first.dispatch_one(
+                first_transport,
+                outbox_context.bot,
+                worker_id="worker-a",
+            )
         )
         await first_transport.started.wait()
 
         recovered = second.recover_after_restart()
         assert recovered[item.delivery_ref].status is DeliveryStatus.OUTCOME_UNKNOWN
-        assert await second.dispatch_one(second_transport, worker_id="worker-b") is None
+        assert (
+            await second.dispatch_one(
+                second_transport,
+                outbox_context.bot,
+                worker_id="worker-b",
+            )
+            is None
+        )
         assert second_transport.calls == []
 
         first_transport.release.set()
@@ -524,7 +604,7 @@ def test_account_change_or_unaddressable_transport_suppresses_without_send(
         transport = _Transport()
         transport.addressable = False
 
-        await outbox.dispatch_one(transport, worker_id="worker-a")
+        await outbox.dispatch_one(transport, outbox_context.bot, worker_id="worker-a")
 
         assert outbox.get(item.delivery_ref).status is DeliveryStatus.SUPPRESSED
         assert transport.calls == []
@@ -570,7 +650,7 @@ def test_account_change_at_the_send_boundary_suppresses_before_send(outbox_conte
         item = outbox.enqueue(_issued_draft(outbox_context, idempotent=True))
         transport = _ChangingTransport()
 
-        await outbox.dispatch_one(transport, worker_id="worker-a")
+        await outbox.dispatch_one(transport, outbox_context.bot, worker_id="worker-a")
 
         assert outbox.get(item.delivery_ref).status is DeliveryStatus.SUPPRESSED
         assert transport.calls == []
@@ -596,7 +676,7 @@ def test_account_change_after_send_leaves_the_outcome_unknown(outbox_context) ->
         item = outbox.enqueue(_issued_draft(outbox_context, idempotent=True))
         transport = _ReceiptChangingTransport()
 
-        await outbox.dispatch_one(transport, worker_id="worker-a")
+        await outbox.dispatch_one(transport, outbox_context.bot, worker_id="worker-a")
 
         assert outbox.get(item.delivery_ref).status is DeliveryStatus.OUTCOME_UNKNOWN
         assert transport.calls == [item.delivery_id]
@@ -617,17 +697,60 @@ def test_persona_a_to_b_to_a_never_revives_an_old_lease(outbox_context) -> None:
         _freeze_scope(catalog, scope_b)
         transport = _Transport()
 
-        await outbox.dispatch_one(transport, worker_id="worker-a")
+        await outbox.dispatch_one(transport, outbox_context.bot, worker_id="worker-a")
         _freeze_scope(catalog, outbox_context.scope)
-        await outbox.dispatch_one(transport, worker_id="worker-b")
+        await outbox.dispatch_one(transport, outbox_context.bot, worker_id="worker-b")
 
         assert outbox.get(old.delivery_ref).status is DeliveryStatus.SUPPRESSED
         assert transport.calls == []
         fresh = _issued_draft(outbox_context, text="fresh", idempotent=True)
         fresh_item = outbox.enqueue(fresh)
-        await outbox.dispatch_one(transport, worker_id="worker-c")
+        await outbox.dispatch_one(transport, outbox_context.bot, worker_id="worker-c")
         assert outbox.get(fresh_item.delivery_ref).status is DeliveryStatus.SENT_CONFIRMED
         assert transport.calls == [fresh_item.delivery_id]
+
+    asyncio.run(scenario())
+
+
+def test_persona_a_to_b_to_a_during_send_makes_old_receipt_outcome_unknown(
+    outbox_context,
+) -> None:
+    class _TakeoverDuringSendTransport(_Transport):
+        def __init__(self) -> None:
+            super().__init__()
+            self._sends = 0
+
+        async def send(self, delivery_ref, _text: str) -> object:
+            self.calls.append(delivery_ref.delivery_id)
+            self._sends += 1
+            await asyncio.sleep(0)
+            if self._sends != 1:
+                return DeliveryReceipt(delivery_ref.delivery_id)
+            scope_b = outbox_context.repository.create_scope(
+                _scope(outbox_context.bot, "persona_v1_outbox_b"),
+                expected_absent=True,
+            )
+            _freeze_scope(outbox_context.catalog, scope_b)
+            _freeze_scope(outbox_context.catalog, outbox_context.scope)
+            return DeliveryReceipt(delivery_ref.delivery_id)
+
+    async def scenario() -> None:
+        outbox = _outbox(outbox_context)
+        old = outbox.enqueue(_issued_draft(outbox_context, idempotent=True))
+        transport = _TakeoverDuringSendTransport()
+
+        await outbox.dispatch_one(transport, outbox_context.bot, worker_id="worker-a")
+
+        assert outbox.get(old.delivery_ref).status is DeliveryStatus.OUTCOME_UNKNOWN
+        assert transport.calls == [old.delivery_id]
+
+        fresh = outbox.enqueue(
+            _issued_draft(outbox_context, text="fresh", idempotent=True)
+        )
+        await outbox.dispatch_one(transport, outbox_context.bot, worker_id="worker-b")
+
+        assert outbox.get(fresh.delivery_ref).status is DeliveryStatus.SENT_CONFIRMED
+        assert transport.calls == [old.delivery_id, fresh.delivery_id]
 
     asyncio.run(scenario())
 
@@ -870,13 +993,111 @@ def test_cancelling_after_dispatch_boundary_keeps_dispatching_durable(
         outbox = _outbox(outbox_context)
         item = outbox.enqueue(_issued_draft(outbox_context, idempotent=True))
         transport = _CancellingTransport()
-        task = asyncio.create_task(outbox.dispatch_one(transport, worker_id="worker-a"))
+        task = asyncio.create_task(
+            outbox.dispatch_one(
+                transport,
+                outbox_context.bot,
+                worker_id="worker-a",
+            )
+        )
         await transport.started.wait()
         task.cancel()
 
         with pytest.raises(asyncio.CancelledError):
             await task
         assert outbox.get(item.delivery_ref).status is DeliveryStatus.DISPATCHING
+
+    asyncio.run(scenario())
+
+
+def test_release_claimed_for_exact_worker_preserves_foreign_and_dispatching(
+    outbox_context,
+) -> None:
+    outbox = _outbox(outbox_context)
+    local = outbox.enqueue(_issued_draft(outbox_context, text="local"))
+    foreign = outbox.enqueue(_issued_draft(outbox_context, text="foreign"))
+    inflight = outbox.enqueue(_issued_draft(outbox_context, text="inflight"))
+    local_claim = outbox.claim(local.delivery_ref, worker_id="local-worker")
+    foreign_claim = outbox.claim(foreign.delivery_ref, worker_id="foreign-worker")
+    inflight_claim = outbox.claim(inflight.delivery_ref, worker_id="local-worker")
+
+    assert local_claim is not None
+    assert foreign_claim is not None
+    assert inflight_claim is not None
+    inflight_dispatching = outbox.mark_dispatching(
+        inflight_claim,
+        worker_id="local-worker",
+    )
+    assert inflight_dispatching is not None
+
+    released = outbox.release_claimed_for_worker(worker_id="local-worker")
+
+    released_local = released[local.delivery_ref]
+    assert released_local.status is DeliveryStatus.PENDING
+    assert released_local.claim_worker_id is None
+    assert released_local.claim_expires_at_ms is None
+    assert released_local.item_generation == local_claim.item_generation + 1
+    assert outbox.get(foreign.delivery_ref) == foreign_claim
+    assert outbox.get(inflight.delivery_ref) == inflight_dispatching
+
+
+def test_release_claimed_for_worker_does_not_overwrite_a_newer_foreign_claim(
+    outbox_context,
+) -> None:
+    now_ms = [_NOW_MS]
+    outbox = DeliveryOutbox(
+        outbox_context.repository,
+        outbox_context.catalog,
+        claim_lease_ms=1,
+        clock_ms=lambda: now_ms[0],
+    )
+    item = outbox.enqueue(_issued_draft(outbox_context))
+    first_claim = outbox.claim(item.delivery_ref, worker_id="local-worker")
+    assert first_claim is not None
+
+    now_ms[0] += 2
+    foreign_claim = outbox.claim(item.delivery_ref, worker_id="foreign-worker")
+    assert foreign_claim is not None
+    assert foreign_claim.claim_generation == first_claim.claim_generation + 1
+
+    assert outbox.release_claimed_for_worker(worker_id="local-worker") == {}
+    assert outbox.get(item.delivery_ref) == foreign_claim
+
+
+def test_stopping_worker_releases_only_its_claimed_work_after_cancellation(
+    outbox_context,
+) -> None:
+    async def scenario() -> None:
+        outbox = _outbox(outbox_context)
+        local = outbox.enqueue(_issued_draft(outbox_context, text="local"))
+        foreign = outbox.enqueue(_issued_draft(outbox_context, text="foreign"))
+        inflight = outbox.enqueue(_issued_draft(outbox_context, text="inflight"))
+        worker = DeliveryOutboxWorker(
+            outbox,
+            lambda: None,
+            bot_ref=outbox_context.bot,
+            worker_id="local-worker",
+            idle_wait_seconds=60.0,
+        )
+        local_claim = outbox.claim(local.delivery_ref, worker_id="local-worker")
+        foreign_claim = outbox.claim(foreign.delivery_ref, worker_id="foreign-worker")
+        inflight_claim = outbox.claim(inflight.delivery_ref, worker_id="local-worker")
+        assert local_claim is not None
+        assert foreign_claim is not None
+        assert inflight_claim is not None
+        inflight_dispatching = outbox.mark_dispatching(
+            inflight_claim,
+            worker_id="local-worker",
+        )
+        assert inflight_dispatching is not None
+
+        worker.start()
+        await asyncio.sleep(0)
+        await worker.stop()
+
+        assert outbox.get(local.delivery_ref).status is DeliveryStatus.PENDING
+        assert outbox.get(foreign.delivery_ref) == foreign_claim
+        assert outbox.get(inflight.delivery_ref) == inflight_dispatching
 
     asyncio.run(scenario())
 
@@ -917,6 +1138,7 @@ def test_outbox_worker_waits_for_wake_and_stops_by_cancelling_its_loop(
         worker = DeliveryOutboxWorker(
             outbox,
             transport,
+            bot_ref=outbox_context.bot,
             worker_id="worker-a",
             idle_wait_seconds=60.0,
         )
@@ -936,6 +1158,136 @@ def test_outbox_worker_waits_for_wake_and_stops_by_cancelling_its_loop(
     asyncio.run(scenario())
 
 
+def test_outbox_worker_never_claims_or_sends_another_bot_item(outbox_context) -> None:
+    async def scenario() -> None:
+        outbox = _outbox(outbox_context)
+        second_bot, second_scope = _second_bot_scope(outbox_context)
+        first_item = outbox.enqueue(_issued_draft(outbox_context, text="first"))
+        second_item = outbox.enqueue(
+            _issued_draft(outbox_context, text="second", scope=second_scope)
+        )
+        first_transport = _Transport()
+        second_transport = _Transport()
+        first_worker = DeliveryOutboxWorker(
+            outbox,
+            first_transport,
+            bot_ref=outbox_context.bot,
+            worker_id="first-worker",
+            idle_wait_seconds=60.0,
+        )
+        second_worker = DeliveryOutboxWorker(
+            outbox,
+            second_transport,
+            bot_ref=second_bot,
+            worker_id="second-worker",
+            idle_wait_seconds=60.0,
+        )
+        try:
+            first_worker.start()
+            first_worker.wake()
+            for _ in range(20):
+                if (
+                    outbox.get(first_item.delivery_ref).status
+                    is DeliveryStatus.SENT_CONFIRMED
+                ):
+                    break
+                await asyncio.sleep(0)
+
+            assert outbox.get(first_item.delivery_ref).status is DeliveryStatus.SENT_CONFIRMED
+            assert outbox.get(second_item.delivery_ref).status is DeliveryStatus.PENDING
+            assert first_transport.calls == [first_item.delivery_id]
+            assert second_transport.calls == []
+
+            second_worker.start()
+            second_worker.wake()
+            for _ in range(20):
+                if (
+                    outbox.get(second_item.delivery_ref).status
+                    is DeliveryStatus.SENT_CONFIRMED
+                ):
+                    break
+                await asyncio.sleep(0)
+
+            assert outbox.get(second_item.delivery_ref).status is DeliveryStatus.SENT_CONFIRMED
+            assert second_transport.calls == [second_item.delivery_id]
+        finally:
+            await first_worker.stop()
+            await second_worker.stop()
+
+    asyncio.run(scenario())
+
+
+def test_outbox_dispatch_rejects_a_bot_ref_with_the_wrong_generation(
+    outbox_context,
+) -> None:
+    async def scenario() -> None:
+        outbox = _outbox(outbox_context)
+        item = outbox.enqueue(_issued_draft(outbox_context))
+        stale_bot = replace(
+            outbox_context.bot,
+            generation=outbox_context.bot.generation + 1,
+        )
+        transport = _Transport()
+
+        assert (
+            await outbox.dispatch_one(
+                transport,
+                stale_bot,
+                worker_id="stale-generation-worker",
+            )
+            is None
+        )
+        assert outbox.get(item.delivery_ref).status is DeliveryStatus.PENDING
+        assert transport.calls == []
+
+    asyncio.run(scenario())
+
+
+def test_one_bot_worker_dispatches_multiple_live_persona_scopes(outbox_context) -> None:
+    async def scenario() -> None:
+        outbox = _outbox(outbox_context)
+        second_scope = outbox_context.repository.create_scope(
+            _scope(
+                outbox_context.bot,
+                "persona_v1_outbox_b",
+                session_token="session_v1_outbox_b",
+            ),
+            expected_absent=True,
+        )
+        _freeze_scope(outbox_context.catalog, second_scope)
+        first_item = outbox.enqueue(_issued_draft(outbox_context, text="first"))
+        second_item = outbox.enqueue(
+            _issued_draft(outbox_context, text="second", scope=second_scope)
+        )
+        transport = _Transport()
+        worker = DeliveryOutboxWorker(
+            outbox,
+            transport,
+            bot_ref=outbox_context.bot,
+            worker_id="same-bot-worker",
+            idle_wait_seconds=60.0,
+        )
+        try:
+            worker.start()
+            worker.wake()
+            for _ in range(40):
+                statuses = {
+                    outbox.get(first_item.delivery_ref).status,
+                    outbox.get(second_item.delivery_ref).status,
+                }
+                if statuses == {DeliveryStatus.SENT_CONFIRMED}:
+                    break
+                await asyncio.sleep(0)
+
+            assert outbox.get(first_item.delivery_ref).status is DeliveryStatus.SENT_CONFIRMED
+            assert outbox.get(second_item.delivery_ref).status is DeliveryStatus.SENT_CONFIRMED
+            assert set(transport.calls) == {first_item.delivery_id, second_item.delivery_id}
+        finally:
+            await worker.stop()
+
+    asyncio.run(scenario())
+
+
 def test_plugin_scoped_enqueue_reaches_the_durable_worker(outbox_context) -> None:
     """The public plugin gateway retains the exact scope through delivery."""
 
@@ -948,6 +1300,7 @@ def test_plugin_scoped_enqueue_reaches_the_durable_worker(outbox_context) -> Non
     worker = DeliveryOutboxWorker(
         outbox,
         transport,
+        bot_ref=outbox_context.bot,
         worker_id="plugin-worker",
         idle_wait_seconds=60.0,
     )
@@ -964,7 +1317,8 @@ def test_plugin_scoped_enqueue_reaches_the_durable_worker(outbox_context) -> Non
     plugin._scope_resolver_v1 = resolver
     plugin._scope_runtime_registry = registry
     plugin._scope_delivery_outbox = outbox
-    plugin._scope_delivery_worker = worker
+    plugin._scope_delivery_workers = {outbox_context.bot: worker}
+    plugin._scope_delivery_recovered = True
     plugin._scope_account_proof_provider = outbox_context.proofs
 
     async def scenario() -> None:
@@ -983,6 +1337,83 @@ def test_plugin_scoped_enqueue_reaches_the_durable_worker(outbox_context) -> Non
             assert outbox.get(item.delivery_ref).status is DeliveryStatus.SENT_CONFIRMED
             assert transport.calls == [item.delivery_id]
         finally:
+            await worker.stop()
+
+    asyncio.run(scenario())
+
+
+def test_plugin_configures_process_unique_scope_delivery_worker_ids(
+    outbox_context,
+) -> None:
+    from main import EmotionalStatePlugin
+
+    resolver = ScopeResolver(
+        SimpleNamespace(),
+        repository=outbox_context.repository,
+        catalog=outbox_context.catalog,
+        identity=load_or_create_scope_identity_key(
+            outbox_context.repository.root / "identity.key"
+        ),
+        account_proofs=outbox_context.proofs,
+    )
+    first = object.__new__(EmotionalStatePlugin)
+    second = object.__new__(EmotionalStatePlugin)
+    for plugin in (first, second):
+        plugin.context = SimpleNamespace()
+        plugin._scope_account_proof_provider = outbox_context.proofs
+        plugin._configure_scope_delivery(resolver)
+
+    first_worker = first._scope_delivery_worker_for_bot(outbox_context.bot)
+    second_worker = second._scope_delivery_worker_for_bot(outbox_context.bot)
+    assert type(first_worker) is DeliveryOutboxWorker
+    assert type(second_worker) is DeliveryOutboxWorker
+    assert first_worker._worker_id.startswith("scope-delivery-worker:")
+    assert second_worker._worker_id.startswith("scope-delivery-worker:")
+    assert first_worker._worker_id != second_worker._worker_id
+
+
+def test_start_provisions_live_bot_workers_after_one_outbox_recovery(
+    outbox_context,
+    monkeypatch,
+) -> None:
+    from main import EmotionalStatePlugin
+
+    async def scenario() -> None:
+        second_bot, second_scope = _second_bot_scope(outbox_context)
+        registry = ScopeRuntimeRegistry.for_test(repository=outbox_context.repository)
+        registry.exact_session(outbox_context.scope)
+        registry.exact_session(second_scope)
+        outbox = _outbox(outbox_context)
+        recovery_calls: list[str] = []
+        monkeypatch.setattr(
+            outbox,
+            "recover_after_restart",
+            lambda: recovery_calls.append("recover") or {},
+        )
+        monkeypatch.setattr(
+            outbox,
+            "expire",
+            lambda: recovery_calls.append("expire") or {},
+        )
+        plugin = object.__new__(EmotionalStatePlugin)
+        plugin.context = SimpleNamespace()
+        plugin._scope_account_proof_provider = outbox_context.proofs
+        plugin._scope_runtime_registry = registry
+        plugin._scope_delivery_outbox = outbox
+        plugin._scope_delivery_workers = {}
+        plugin._scope_delivery_recovered = False
+
+        plugin._start_scope_delivery_worker()
+
+        workers = plugin._scope_delivery_workers
+        assert set(workers) == {outbox_context.bot, second_bot}
+        assert all(worker.running for worker in workers.values())
+        assert recovery_calls == ["recover", "expire"]
+
+        plugin._start_scope_delivery_worker(second_bot)
+
+        assert recovery_calls == ["recover", "expire"]
+        for worker in tuple(workers.values()):
             await worker.stop()
 
     asyncio.run(scenario())
@@ -1009,7 +1440,13 @@ def test_plugin_scoped_enqueue_rejects_new_intents_after_termination_begins(
     plugin._scope_resolver_v1 = resolver
     plugin._scope_runtime_registry = registry
     plugin._scope_delivery_outbox = outbox
-    plugin._scope_delivery_worker = DeliveryOutboxWorker(outbox, _Transport())
+    plugin._scope_delivery_workers = {
+        outbox_context.bot: DeliveryOutboxWorker(
+            outbox,
+            _Transport(),
+            bot_ref=outbox_context.bot,
+        )
+    }
     plugin._scope_delivery_accepting = False
 
     assert (

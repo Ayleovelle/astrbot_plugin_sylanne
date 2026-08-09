@@ -237,6 +237,7 @@ from sylanne_alpha.scoped_api import (  # noqa: E402
     scoped_api_service_for_plugin,
 )
 from sylanne_alpha.scope_contracts import (  # noqa: E402
+    BotRef,
     ResolvedScope,
     ResolvedTransportScope,
     SessionScope,
@@ -1455,7 +1456,8 @@ class EmotionalStatePlugin(Star):
         self._scope_account_proof_provider = NoAdapterAccountProofProvider()
         self._scope_resolver_v1: ScopeResolver | None = None
         self._scope_delivery_outbox: DeliveryOutbox | None = None
-        self._scope_delivery_worker: DeliveryOutboxWorker | None = None
+        self._scope_delivery_workers: dict[BotRef, DeliveryOutboxWorker] = {}
+        self._scope_delivery_recovered = False
         # The outbox remains durable during teardown, but no new intents may
         # enter once termination has started.
         self._scope_delivery_accepting = True
@@ -2945,32 +2947,73 @@ class EmotionalStatePlugin(Star):
         ):
             outbox = DeliveryOutbox(resolver._repository, resolver.catalog)
             self._scope_delivery_outbox = outbox
-            self._scope_delivery_worker = None
-        worker = getattr(self, "_scope_delivery_worker", None)
-        if type(worker) is DeliveryOutboxWorker:
-            return
+            self._scope_delivery_workers = {}
+            self._scope_delivery_recovered = False
+
+    def _scope_delivery_worker_for_bot(
+        self,
+        bot_ref: BotRef,
+    ) -> DeliveryOutboxWorker | None:
+        if type(bot_ref) is not BotRef:
+            return None
+        outbox = getattr(self, "_scope_delivery_outbox", None)
+        if type(outbox) is not DeliveryOutbox:
+            return None
+        workers = getattr(self, "_scope_delivery_workers", None)
+        if type(workers) is not dict:
+            workers = {}
+            self._scope_delivery_workers = workers
+        worker = workers.get(bot_ref)
+        if (
+            type(worker) is DeliveryOutboxWorker
+            and worker._bot_ref == bot_ref
+        ):
+            return worker
         context = getattr(self, "context", None)
-        self._scope_delivery_worker = DeliveryOutboxWorker(
+        worker = DeliveryOutboxWorker(
             outbox,
             lambda: AstrBotAccountAwareTransport(
                 context,
                 self._scope_account_proof_provider,
             ),
-            worker_id="scope-delivery-worker",
+            bot_ref=bot_ref,
+            worker_id=(
+                f"scope-delivery-worker:{os.getpid()}:{os.urandom(8).hex()}"
+            ),
         )
+        workers[bot_ref] = worker
+        return worker
 
-    def _start_scope_delivery_worker(self) -> None:
+    def _start_scope_delivery_worker(self, bot_ref: BotRef | None = None) -> None:
         outbox = getattr(self, "_scope_delivery_outbox", None)
-        worker = getattr(self, "_scope_delivery_worker", None)
-        if type(outbox) is not DeliveryOutbox or type(worker) is not DeliveryOutboxWorker:
-            return
-        if worker.running:
+        if type(outbox) is not DeliveryOutbox:
             return
         # The recovery ordering is intentional: classify a prior dispatch,
         # expire stale queued work, then permit new adapter calls.
-        outbox.recover_after_restart()
-        outbox.expire()
-        worker.start()
+        if getattr(self, "_scope_delivery_recovered", False) is not True:
+            outbox.recover_after_restart()
+            outbox.expire()
+            self._scope_delivery_recovered = True
+        if bot_ref is not None:
+            candidates = (bot_ref,) if type(bot_ref) is BotRef else ()
+        else:
+            registry = getattr(self, "_scope_runtime_registry", None)
+            live = getattr(registry, "live_persona_runtimes", None)
+            try:
+                runtimes = () if not callable(live) else live()
+            except Exception:
+                runtimes = ()
+            bot_refs: set[BotRef] = set()
+            for runtime in runtimes:
+                persona_ref = getattr(runtime, "persona_ref", None)
+                candidate = getattr(persona_ref, "bot_ref", None)
+                if type(candidate) is BotRef:
+                    bot_refs.add(candidate)
+            candidates = tuple(bot_refs)
+        for candidate in candidates:
+            worker = self._scope_delivery_worker_for_bot(candidate)
+            if type(worker) is DeliveryOutboxWorker and not worker.running:
+                worker.start()
 
     def enqueue_scoped_proactive_intent(
         self,
@@ -2989,7 +3032,7 @@ class EmotionalStatePlugin(Star):
         resolver = self._scope_resolver_instance()
         registry = getattr(self, "_scope_runtime_registry", None)
         outbox = getattr(self, "_scope_delivery_outbox", None)
-        worker = getattr(self, "_scope_delivery_worker", None)
+        worker = self._scope_delivery_worker_for_bot(scope.bot_ref)
         if (
             resolver is None
             or registry is None
@@ -2998,7 +3041,7 @@ class EmotionalStatePlugin(Star):
         ):
             return None
         try:
-            self._start_scope_delivery_worker()
+            self._start_scope_delivery_worker(scope.bot_ref)
         except RuntimeError:
             # A pre-initialize caller may enqueue, but cannot create an asyncio
             # worker without the host loop.  The durable item remains pending.
@@ -3044,7 +3087,8 @@ class EmotionalStatePlugin(Star):
                 self._configure_scope_delivery(resolver)
             except Exception:
                 self._scope_delivery_outbox = None
-                self._scope_delivery_worker = None
+                self._scope_delivery_workers = {}
+                self._scope_delivery_recovered = False
             return resolver
         context = getattr(self, "context", None)
         if (
@@ -3068,7 +3112,8 @@ class EmotionalStatePlugin(Star):
             self._configure_scope_delivery(resolver)
         except Exception:
             self._scope_delivery_outbox = None
-            self._scope_delivery_worker = None
+            self._scope_delivery_workers = {}
+            self._scope_delivery_recovered = False
         registry = getattr(self, "_scope_runtime_registry", None)
         if registry is not None:
             if registry.repository is None:
@@ -6314,8 +6359,13 @@ class EmotionalStatePlugin(Star):
         # Close the producer boundary before cancelling the worker.  Durable
         # DISPATCHING records remain for restart classification.
         self._scope_delivery_accepting = False
-        worker = getattr(self, "_scope_delivery_worker", None)
-        if type(worker) is DeliveryOutboxWorker:
+        workers = getattr(self, "_scope_delivery_workers", None)
+        worker_snapshot = (
+            tuple(workers.values()) if type(workers) is dict else ()
+        )
+        for worker in worker_snapshot:
+            if type(worker) is not DeliveryOutboxWorker:
+                continue
             try:
                 await worker.stop()
             except Exception as e:

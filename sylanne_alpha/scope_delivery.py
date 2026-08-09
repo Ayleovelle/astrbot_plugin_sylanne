@@ -402,6 +402,7 @@ _SAFE_OUTBOX_REASONS = frozenset(
     {
         "account_unavailable",
         "claim_expired",
+        "claim_released_on_stop",
         "claim_recovered",
         "adapter_rejected_before_send",
         "expired",
@@ -1344,7 +1345,9 @@ class DeliveryOutbox:
                 items.append(item)
         return items
 
-    def _next_candidate(self) -> DeliveryItem | None:
+    def _next_candidate(self, bot_ref: object) -> DeliveryItem | None:
+        if type(bot_ref) is not BotRef:
+            return None
         try:
             with self.repository.transaction():
                 candidates = [
@@ -1352,6 +1355,7 @@ class DeliveryOutbox:
                     for item in self._all_items_locked()
                     if item.status
                     in {DeliveryStatus.PENDING, DeliveryStatus.FAILED_RETRYABLE}
+                    and item.delivery_ref.bot_ref == bot_ref
                 ]
                 if not candidates:
                     return None
@@ -1452,6 +1456,55 @@ class DeliveryOutbox:
             return recovered
         return recovered
 
+    def release_claimed_for_worker(
+        self,
+        *,
+        worker_id: str,
+    ) -> dict[BotDeliveryRef, DeliveryItem]:
+        """Return only this stopped worker's pre-send claims to ``PENDING``."""
+
+        if type(worker_id) is not str or not worker_id:
+            return {}
+        released: dict[BotDeliveryRef, DeliveryItem] = {}
+        try:
+            with self.repository.transaction():
+                grouped: dict[tuple[str, str], list[DeliveryItem]] = {}
+                for item in self._all_items_locked():
+                    grouped.setdefault(
+                        (
+                            item.delivery_ref.bot_ref.token,
+                            item.delivery_ref.persona_ref.token,
+                        ),
+                        [],
+                    ).append(item)
+                for items_in_document in grouped.values():
+                    scope = _scope_for_draft(items_in_document[0]._draft)
+                    generation, items = self._load_document_locked(scope)
+                    changed = False
+                    for token, item in tuple(items.items()):
+                        if (
+                            item.status is not DeliveryStatus.CLAIMED
+                            or item.claim_worker_id != worker_id
+                        ):
+                            continue
+                        pending = self._replace_item(
+                            item,
+                            status=DeliveryStatus.PENDING,
+                            reason="claim_released_on_stop",
+                        )
+                        items[token] = pending
+                        released[pending.delivery_ref] = pending
+                        changed = True
+                    if changed:
+                        self._write_document_locked(
+                            scope,
+                            expected_generation=generation,
+                            items=items,
+                        )
+        except (RepositoryCorruptionError, ValueError):
+            return released
+        return released
+
     def expire(self) -> dict[BotDeliveryRef, DeliveryItem]:
         """Expire queued work; never rewrite an in-flight dispatch as unsent."""
 
@@ -1503,12 +1556,15 @@ class DeliveryOutbox:
     async def dispatch_one(
         self,
         transport: AccountAwareTransport,
+        bot_ref: BotRef,
         *,
         worker_id: str = "outbox-worker",
     ) -> DeliveryItem | None:
-        """Claim and attempt exactly one item using an account-aware transport."""
+        """Claim and attempt one item for one exact Bot runtime only."""
 
-        candidate = self._next_candidate()
+        if type(bot_ref) is not BotRef:
+            return None
+        candidate = self._next_candidate(bot_ref)
         if candidate is None:
             return None
         claim = self.claim(candidate.delivery_ref, worker_id=worker_id)
@@ -1670,12 +1726,15 @@ class DeliveryOutboxWorker:
         outbox: DeliveryOutbox,
         transport: AccountAwareTransport | Callable[[], AccountAwareTransport],
         *,
+        bot_ref: BotRef,
         worker_id: str = "outbox-worker",
         idle_wait_seconds: float = 1.0,
     ) -> None:
         if type(outbox) is not DeliveryOutbox:
             raise ValueError("outbox must be a DeliveryOutbox")
         if (
+            type(bot_ref) is not BotRef
+            or
             type(worker_id) is not str
             or not worker_id
             or type(idle_wait_seconds) not in (int, float)
@@ -1686,6 +1745,7 @@ class DeliveryOutboxWorker:
             raise ValueError("transport must send or be a transport factory")
         self._outbox = outbox
         self._transport = transport
+        self._bot_ref = bot_ref
         self._worker_id = worker_id
         self._idle_wait_seconds = float(idle_wait_seconds)
         self._wakeup = asyncio.Event()
@@ -1744,6 +1804,7 @@ class DeliveryOutboxWorker:
             try:
                 item = await self._outbox.dispatch_one(
                     transport,
+                    self._bot_ref,
                     worker_id=self._worker_id,
                 )
             except asyncio.CancelledError:
@@ -1762,13 +1823,16 @@ class DeliveryOutboxWorker:
         self._stopped.set()
         self.wake()
         task = self._task
-        if task is None or task.done():
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            finally:
+                self._outbox.release_claimed_for_worker(worker_id=self._worker_id)
             return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        self._outbox.release_claimed_for_worker(worker_id=self._worker_id)
 
 
 __all__ = [
