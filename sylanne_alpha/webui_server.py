@@ -58,6 +58,10 @@ from sylanne_alpha.scoped_api import (
     scoped_api_route_spec,
 )
 from sylanne_alpha.scope_contracts import ScopeApiPathEcho, ScopedPrincipal
+from sylanne_alpha.legacy_claim_api import (
+    LegacyClaimApiError,
+    legacy_claim_api_for_plugin,
+)
 
 
 def _get_plugin_version() -> str:
@@ -467,6 +471,19 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         # POST an exact-scope nonce bootstrap; no session payload is exposed here.
         return web.json_response({**result, "csrf_token": _csrf_token})
 
+    async def handle_legacy_inventory(request: web.Request) -> web.Response:
+        current_plugin = _plugin(plugin)
+        principal = scoped_principal(request)
+        if principal is None:
+            return scoped_error(ScopedApiError(403, "scope_principal_required"))
+        api = legacy_claim_api_for_plugin(current_plugin)
+        if api is None:
+            return scoped_error(ScopedApiError(403, "scope_principal_forbidden"))
+        result = api.inventory_payload(principal)
+        if isinstance(result, LegacyClaimApiError):
+            return scoped_error(ScopedApiError(result.status, result.code))
+        return web.json_response(result)
+
     async def handle_persona_dossier(request: web.Request) -> web.Response:
         """Serve one Persona-owned public projection without a Session selector."""
 
@@ -558,6 +575,22 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
             return scoped_error(ScopedApiError(403, "scope_principal_required"))
         if not _standalone_service_uses_plugin_scope_grant(current_plugin, service):
             return scoped_error(ScopedApiError(403, "scope_principal_forbidden"))
+        body = None
+        intent = None
+        legacy_api = None
+        if route.endpoint == "legacy-claim":
+            try:
+                body = await request.json()
+            except Exception:  # noqa: BLE001 - malformed input cannot consume a nonce
+                body = None
+            if type(body) is not dict or set(body) != {"record_id"} or type(body.get("record_id")) is not str:
+                return scoped_error(ScopedApiError(400, "invalid_legacy_claim_request"))
+            legacy_api = legacy_claim_api_for_plugin(current_plugin)
+            if legacy_api is None:
+                return scoped_error(ScopedApiError(403, "scope_principal_forbidden"))
+            intent = legacy_api.preflight(principal, body["record_id"], path)
+            if isinstance(intent, LegacyClaimApiError):
+                return scoped_error(ScopedApiError(intent.status, intent.code))
         try:
             scoped_request = ScopedApiRequest(
                 path=path,
@@ -573,6 +606,21 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
             return scoped_error(authorization)
         if not isinstance(authorization, ScopedApiAuthorization):
             return scoped_error(ScopedApiError(503, "scope_repository_unavailable"))
+        if route.endpoint == "legacy-claim":
+            assert legacy_api is not None and intent is not None and type(body) is dict
+            checked = service.revalidate(authorization)
+            if isinstance(checked, ScopedApiError):
+                return scoped_error(checked)
+            result = legacy_api.claim_after_authorization(
+                intent,
+                principal=checked.principal,
+                record_id=body["record_id"],
+                scope=checked.scope,
+                relation_scope=checked.relation_scope,
+            )
+            if isinstance(result, LegacyClaimApiError):
+                return scoped_error(ScopedApiError(result.status, result.code))
+            return web.json_response({**checked.public_payload(), **result})
         if scoped_request.endpoint == "memory/meltdown-nonce":
             checked = service.revalidate(authorization)
             if isinstance(checked, ScopedApiError):
@@ -1985,6 +2033,7 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         "/api/scopes/{bot_ref}/personas/{persona_ref}/sessions/{session_ref}/nonce"
     )
     app.router.add_get(scope_catalog_root, handle_scope_catalog)
+    app.router.add_get("/api/v1/legacy/inventory", handle_legacy_inventory)
     app.router.add_get(persona_dossier_root, handle_persona_dossier)
     app.router.add_post(scope_bootstrap_root, handle_scope_bootstrap)
     scoped_root = "/api/v1/bots/{bot_ref}/personas/{persona_ref}/sessions/{session_ref}"
@@ -2259,6 +2308,24 @@ def start_webui_thread_server(
             """Dispatch one canonical scoped HTTP request, never a legacy path."""
 
             current_plugin = _plugin(plugin)
+            if path == "/api/v1/legacy/inventory":
+                if self.command != "GET":
+                    self._send_scoped_error(ScopedApiError(400, "invalid_scoped_request"))
+                    return True
+                principal = self._authenticated_scoped_principal()
+                if principal is None:
+                    self._send_scoped_error(ScopedApiError(403, "scope_principal_required"))
+                    return True
+                api = legacy_claim_api_for_plugin(current_plugin)
+                if api is None:
+                    self._send_scoped_error(ScopedApiError(403, "scope_principal_forbidden"))
+                    return True
+                result = api.inventory_payload(principal)
+                if isinstance(result, LegacyClaimApiError):
+                    self._send_scoped_error(ScopedApiError(result.status, result.code))
+                    return True
+                self._send_json(result)
+                return True
             if path == "/api/scopes":
                 if self.command != "GET":
                     self._send_scoped_error(ScopedApiError(400, "invalid_scoped_request"))
@@ -2420,6 +2487,22 @@ def start_webui_thread_server(
                     ScopedApiError(403, "scope_principal_forbidden")
                 )
                 return True
+            body = None
+            intent = None
+            legacy_api = None
+            if route.endpoint == "legacy-claim":
+                body = self._read_scoped_json_body()
+                if type(body) is not dict or set(body) != {"record_id"} or type(body.get("record_id")) is not str:
+                    self._send_scoped_error(ScopedApiError(400, "invalid_legacy_claim_request"))
+                    return True
+                legacy_api = legacy_claim_api_for_plugin(current_plugin)
+                if legacy_api is None:
+                    self._send_scoped_error(ScopedApiError(403, "scope_principal_forbidden"))
+                    return True
+                intent = legacy_api.preflight(principal, body["record_id"], scope_path)
+                if isinstance(intent, LegacyClaimApiError):
+                    self._send_scoped_error(ScopedApiError(intent.status, intent.code))
+                    return True
             if route.endpoint in {"stream", "ws"}:
                 # The fallback server is HTTP-only.  Do not attempt SSE or a
                 # WebSocket upgrade; aiohttp owns the canonical stream paths.
@@ -2444,6 +2527,24 @@ def start_webui_thread_server(
                 self._send_scoped_error(
                     ScopedApiError(503, "scope_repository_unavailable")
                 )
+                return True
+            if route.endpoint == "legacy-claim":
+                assert legacy_api is not None and intent is not None and type(body) is dict
+                checked = service.revalidate(authorization)
+                if isinstance(checked, ScopedApiError):
+                    self._send_scoped_error(checked)
+                    return True
+                result = legacy_api.claim_after_authorization(
+                    intent,
+                    principal=checked.principal,
+                    record_id=body["record_id"],
+                    scope=checked.scope,
+                    relation_scope=checked.relation_scope,
+                )
+                if isinstance(result, LegacyClaimApiError):
+                    self._send_scoped_error(ScopedApiError(result.status, result.code))
+                    return True
+                self._send_json({**checked.public_payload(), **result})
                 return True
             if scoped_request.endpoint == "memory/meltdown-nonce":
                 checked = service.revalidate(authorization)

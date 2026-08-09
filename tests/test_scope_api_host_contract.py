@@ -110,6 +110,23 @@ def test_pages_registers_immutable_http_routes_but_never_the_scoped_websocket() 
     assert 'if endpoint == "ws":' in source
     assert "[route.method]" in source
     assert "legacy_scope_gone_handler" in source
+    assert "/api/v1/legacy/inventory" in source
+    assert "legacy_inventory_handler" in source
+
+
+def test_host_claim_adapters_preflight_before_nonce_authorization_and_keep_inventory_explicit() -> None:
+    import inspect
+    from sylanne_alpha.webui_routes import WebUIRoutes
+    from sylanne_alpha import webui_server
+
+    pages = inspect.getsource(WebUIRoutes.scoped_api_handler)
+    aiohttp = inspect.getsource(webui_server.start_webui_server)
+    stdlib = inspect.getsource(webui_server.start_webui_thread_server)
+    assert 'route.endpoint == "legacy-claim"' in pages
+    assert pages.index("legacy_api.preflight") < pages.index("service.authorize")
+    assert "handle_legacy_inventory" in aiohttp
+    assert 'app.router.add_get("/api/v1/legacy/inventory"' in aiohttp
+    assert 'path == "/api/v1/legacy/inventory"' in stdlib
 
 
 @pytest.mark.asyncio

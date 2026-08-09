@@ -1570,6 +1570,12 @@ class EmotionalStatePlugin(Star):
             "Sylanne scoped API catalog",
         )
         context.register_web_api(
+            f"/{P}/api/v1/legacy/inventory",
+            wr.legacy_inventory_handler,
+            ["GET"],
+            "Sylanne legacy inventory projection",
+        )
+        context.register_web_api(
             f"/{P}/api/v1/bots/<bot_ref>/personas/<persona_ref>/dossier",
             wr.persona_dossier_handler,
             ["GET"],

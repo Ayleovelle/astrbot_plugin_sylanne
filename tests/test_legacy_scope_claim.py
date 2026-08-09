@@ -263,6 +263,36 @@ def test_stale_destination_capability_never_creates_a_memory_component(
     assert repository.read_component(replacement, "memory") is None
 
 
+def test_authorization_guard_denial_never_quarantines_or_writes_target(
+    tmp_path,
+    scopes,
+) -> None:
+    from sylanne_alpha.legacy_scope_claim import (
+        LegacyClaimAuthorizationDenied,
+        LegacyScopeClaimService,
+    )
+
+    repository = ScopeRepository(tmp_path / "scope-v1")
+    scope = repository.create_scope(scopes.bot_a_persona_a, expected_absent=True)
+    service = LegacyScopeClaimService(repository)
+    source = service.inventory_memory(
+        actor_id="operator-a", source_id="manual-export-001", payload=_memory_payload()
+    )
+    quarantine = repository.legacy_unscoped_root / "quarantine"
+    before = tuple(quarantine.glob("*.json")) if quarantine.exists() else ()
+
+    with pytest.raises(LegacyClaimAuthorizationDenied):
+        service.claim_memory(
+            service.issue_destination(scope, actor_id="operator-a"),
+            source,
+            authorization_guard=lambda: False,
+        )
+
+    assert repository.read_component(scope, "memory") is None
+    after = tuple(quarantine.glob("*.json")) if quarantine.exists() else ()
+    assert after == before
+
+
 def test_malformed_source_is_quarantined_before_any_scope_can_be_selected(
     tmp_path,
 ) -> None:

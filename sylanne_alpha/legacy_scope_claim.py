@@ -42,6 +42,10 @@ class LegacyClaimQuarantined(LegacyScopeClaimError):
     """Malformed, drifted, or untrusted input was isolated without a target write."""
 
 
+class LegacyClaimAuthorizationDenied(LegacyScopeClaimError):
+    """A live authorization fence was revoked without quarantining valid input."""
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class LegacyInventorySource:
     """A service-issued handle for one explicitly inventoried source."""
@@ -285,6 +289,15 @@ class LegacyScopeClaimService:
     def _fault(self, point: str) -> None:
         if self._fault_injector is not None:
             self._fault_injector(point)
+
+    @staticmethod
+    def _authorization_allowed(guard: Callable[[], bool] | None) -> bool:
+        if guard is None:
+            return True
+        try:
+            return guard() is True
+        except Exception:  # noqa: BLE001 - a revoked guard never becomes quarantine input
+            return False
 
     def _issue_source(
         self,
@@ -837,9 +850,13 @@ class LegacyScopeClaimService:
         self,
         destination: LegacyDestinationCapability,
         source: LegacyInventorySource,
+        *,
+        authorization_guard: Callable[[], bool] | None = None,
     ) -> LegacyClaimResult:
         """Copy one explicit source through ``memory`` generation zero exactly once."""
 
+        if authorization_guard is not None and not callable(authorization_guard):
+            raise ValueError("authorization_guard must be callable or None")
         destination = self._consume_destination(destination)
         source = self._require_source(source)
         if destination.actor_id != source.actor_id:
@@ -854,11 +871,14 @@ class LegacyScopeClaimService:
             raise LegacyClaimConflict("legacy claim actor does not match destination")
 
         stage = None
+        created_pending = False
         try:
             with self._repository.transaction():
                 # The first fence rejects purge/retire/ABA capabilities before
                 # a staging or target operation can happen.
                 self._repository._validate_session_scope_locked(destination.scope)
+                if not self._authorization_allowed(authorization_guard):
+                    raise LegacyClaimAuthorizationDenied("legacy claim authorization was revoked")
                 manifest, payload, payload_bytes = self._verified_inventory_locked(source)
                 claims = manifest["claims"]
                 if type(claims) is not dict:
@@ -906,6 +926,7 @@ class LegacyScopeClaimService:
                     )
                     next_claims = dict(claims)
                     next_claims[source.source_fingerprint] = pending
+                    created_pending = True
                     # Reserve the cross-process source key before target publish.
                     self._repository._write_legacy_unscoped_manifest_locked(
                         self._next_manifest(manifest, claims=next_claims)
@@ -922,6 +943,8 @@ class LegacyScopeClaimService:
                 # repository lock keeps the check/write pair serializable even
                 # when a second process owns another ScopeRepository object.
                 self._repository._validate_session_scope_locked(destination.scope)
+                if not self._authorization_allowed(authorization_guard):
+                    raise LegacyClaimAuthorizationDenied("legacy claim authorization was revoked")
                 target_generation = self._repository._write_snapshot_locked(
                     self._repository.component_path(destination.scope, "memory"),
                     expected_generation=0,
@@ -950,6 +973,20 @@ class LegacyScopeClaimService:
                     idempotent=False,
                     recovered=resumed_pending,
                 )
+        except LegacyClaimAuthorizationDenied:
+            if stage is not None:
+                stage.unlink(missing_ok=True)
+            if created_pending:
+                with self._repository.transaction():
+                    manifest = self._repository._read_legacy_unscoped_manifest_locked()
+                    claims = manifest["claims"]
+                    if type(claims) is dict and claims.get(source.source_fingerprint) is not None:
+                        next_claims = dict(claims)
+                        next_claims.pop(source.source_fingerprint, None)
+                        self._repository._write_legacy_unscoped_manifest_locked(
+                            self._next_manifest(manifest, claims=next_claims)
+                        )
+            raise
         except StaleScopeWrite:
             # Lifecycle fences are expected failures, not a reason to mutate a
             # target or reinterpret the source under a later scope generation.
@@ -978,6 +1015,7 @@ class LegacyScopeClaimService:
 
 __all__ = [
     "LegacyClaimConflict",
+    "LegacyClaimAuthorizationDenied",
     "LegacyClaimQuarantined",
     "LegacyClaimResult",
     "LegacyDestinationCapability",

@@ -462,26 +462,74 @@ class LegacyClaimAuthority:
         except (AttributeError, TypeError, ValueError):
             return False
         loaded = self._load()
-        if loaded is None:
-            return False
-        revision, _views, claims = loaded
-        if revision != intent.document_revision:
-            return False
-        matches = tuple(
-            grant for grant in claims if grant.grant_id == intent.grant_id and grant.grant_revision == intent.grant_revision
+        return self._revalidate_loaded(
+            loaded, intent=intent, principal=principal, record_id=record_id, scope=scope,
+            relation_scope=relation_scope, action=action, actor_id=actor_id,
         )
-        if len(matches) != 1:
-            return False
-        grant = matches[0]
-        if (
-            not self._active(grant, self._clock_ms()) or grant.principal != principal or grant.record_id != record_id
-            or grant.scope != scope or grant.relation_scope != relation_scope or grant.action != action
-            or grant.audit_id != intent.audit_id
-        ):
-            return False
+
+    def revalidate_pre_source(
+        self, intent: LegacyClaimIntent, *, principal: ScopedPrincipal, record_id: str,
+        scope: SessionScope, relation_scope: RelationScope, action: str,
+    ) -> bool:
+        """Fence all non-secret claim fields before an inventory source lookup."""
+
+        return self._revalidate_loaded(
+            self._load(), intent=intent, principal=principal, record_id=record_id,
+            scope=scope, relation_scope=relation_scope, action=action, actor_id=None,
+        )
+
+    def revalidate_claim_locked(
+        self, intent: LegacyClaimIntent, *, principal: ScopedPrincipal, record_id: str,
+        scope: SessionScope, relation_scope: RelationScope, action: str, actor_id: str,
+    ) -> bool:
+        """Recheck the exact durable ACL while ``ScopeRepository.transaction`` is held."""
+
         try:
+            loaded = self._document_locked()
+        except Exception:  # noqa: BLE001 - a durable ACL fence always fails closed
+            return False
+        return self._revalidate_loaded(
+            loaded, intent=intent, principal=principal, record_id=record_id, scope=scope,
+            relation_scope=relation_scope, action=action, actor_id=actor_id,
+        )
+
+    def _revalidate_loaded(
+        self,
+        loaded: tuple[int, tuple[LegacyInventoryViewGrant, ...], tuple[LegacyClaimGrant, ...]] | None,
+        *, intent: LegacyClaimIntent, principal: ScopedPrincipal, record_id: str,
+        scope: SessionScope, relation_scope: RelationScope, action: str, actor_id: str | None,
+    ) -> bool:
+        try:
+            if (
+                loaded is None or type(intent) is not LegacyClaimIntent
+                or type(principal) is not ScopedPrincipal or type(scope) is not SessionScope
+                or type(relation_scope) is not RelationScope or action != LEGACY_CLAIM_ACTION
+                or intent.action != LEGACY_CLAIM_ACTION or principal != intent.principal
+                or record_id != intent.record_id or scope != intent.scope
+                or relation_scope != intent.relation_scope
+            ):
+                return False
+            revision, _views, claims = loaded
+            if revision != intent.document_revision:
+                return False
+            matches = tuple(
+                grant for grant in claims
+                if grant.grant_id == intent.grant_id and grant.grant_revision == intent.grant_revision
+            )
+            if len(matches) != 1:
+                return False
+            grant = matches[0]
+            if (
+                not self._active(grant, self._clock_ms()) or grant.principal != principal
+                or grant.record_id != record_id or grant.scope != scope
+                or grant.relation_scope != relation_scope or grant.action != action
+                or grant.audit_id != intent.audit_id
+            ):
+                return False
+            if actor_id is None:
+                return True
             return hmac.compare_digest(grant.actor_binding, self._actor_binding(actor_id))
-        except ValueError:
+        except (AttributeError, TypeError, ValueError):
             return False
 
 

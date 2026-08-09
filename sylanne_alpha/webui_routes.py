@@ -39,6 +39,10 @@ from sylanne_alpha.scoped_api import (
     scoped_api_route_spec,
 )
 from sylanne_alpha.scope_contracts import ScopeApiPathEcho, ScopedPrincipal
+from sylanne_alpha.legacy_claim_api import (
+    LegacyClaimApiError,
+    legacy_claim_api_for_plugin,
+)
 
 if TYPE_CHECKING:
     from sylanne_alpha.protocols import PluginHost
@@ -871,6 +875,22 @@ class WebUIRoutes:
                 continue
         return {**payload, "status": error.status}
 
+    async def legacy_inventory_handler(self) -> Any:
+        """Serve the bounded legacy inventory only to an ACL-authorized principal."""
+
+        from astrbot.api.web import request
+
+        principal = self._scoped_principal_from_pages_request(request)
+        if principal is None:
+            return self._scoped_native_error(ScopedApiError(403, "scope_principal_required"))
+        api = legacy_claim_api_for_plugin(self._p)
+        if api is None:
+            return self._scoped_native_error(ScopedApiError(403, "scope_principal_forbidden"))
+        result = api.inventory_payload(principal)
+        if isinstance(result, LegacyClaimApiError):
+            return self._scoped_native_error(ScopedApiError(result.status, result.code))
+        return result
+
     async def scoped_api_handler(self, endpoint: str = "scope") -> Any:
         """Adapt an AstrBot request into the shared exact scoped API service."""
 
@@ -904,6 +924,22 @@ class WebUIRoutes:
             return self._scoped_native_error(
                 ScopedApiError(403, "scope_principal_forbidden")
             )
+        body = None
+        intent = None
+        legacy_api = None
+        if route.endpoint == "legacy-claim":
+            try:
+                body = await request.json()
+            except Exception:  # noqa: BLE001 - reject malformed body before nonce consumption
+                body = None
+            if type(body) is not dict or set(body) != {"record_id"} or type(body.get("record_id")) is not str:
+                return self._scoped_native_error(ScopedApiError(400, "invalid_legacy_claim_request"))
+            legacy_api = legacy_claim_api_for_plugin(self._p)
+            if legacy_api is None:
+                return self._scoped_native_error(ScopedApiError(403, "scope_principal_forbidden"))
+            intent = legacy_api.preflight(principal, body["record_id"], path)
+            if isinstance(intent, LegacyClaimApiError):
+                return self._scoped_native_error(ScopedApiError(intent.status, intent.code))
         try:
             scoped_request = ScopedApiRequest(
                 path=path,
@@ -919,6 +955,21 @@ class WebUIRoutes:
             return self._scoped_native_error(authorization)
         if not isinstance(authorization, ScopedApiAuthorization):
             return self._scoped_native_error(ScopedApiError(503, "scope_repository_unavailable"))
+        if route.endpoint == "legacy-claim":
+            assert legacy_api is not None and intent is not None and type(body) is dict
+            checked = service.revalidate(authorization)
+            if isinstance(checked, ScopedApiError):
+                return self._scoped_native_error(checked)
+            result = legacy_api.claim_after_authorization(
+                intent,
+                principal=checked.principal,
+                record_id=body["record_id"],
+                scope=checked.scope,
+                relation_scope=checked.relation_scope,
+            )
+            if isinstance(result, LegacyClaimApiError):
+                return self._scoped_native_error(ScopedApiError(result.status, result.code))
+            return {**checked.public_payload(), **result}
         if scoped_request.endpoint == "stream":
             from astrbot.api.web import stream_response
 
