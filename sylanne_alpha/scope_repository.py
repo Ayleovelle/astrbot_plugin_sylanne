@@ -86,6 +86,14 @@ class ScopeParentMismatch(ValueError):
     """A child scope/ref does not belong to the named Bot or Persona parent."""
 
 
+class ScopeBotNotFound(KeyError):
+    """The requested durable Bot parent does not exist."""
+
+
+class ScopePersonaNotFound(KeyError):
+    """The requested active Persona does not exist under its Bot parent."""
+
+
 class StaleScopeWrite(RuntimeError):
     """A CAS or lifecycle fence rejected a stale writer."""
 
@@ -1035,12 +1043,8 @@ class ScopeRepository:
             return
         self._validate_bot_ref_locked(bot_ref)
 
-    def _resolve_active_persona_tokens_locked(
-        self,
-        bot_token: str,
-        persona_token: str,
-    ) -> tuple[PersonaRevisionRef, dict[str, object]]:
-        """Resolve an active Persona directly from its durable parent manifests."""
+    def _active_bot_ref_locked(self, bot_token: str) -> BotRef | None:
+        """Load one active durable Bot without treating its directory as authority."""
 
         resolved_bot_token = _require_token(bot_token, "bot_v1_")
         loaded_bot = self._read_json(
@@ -1048,13 +1052,25 @@ class ScopeRepository:
             error_label="bot manifest",
         )
         if loaded_bot is None:
-            raise KeyError("persona not found")
+            return None
         _raw_bot, bot_document = loaded_bot
         bot_generation = bot_document.get("bot_generation")
         if type(bot_generation) is not int or bot_generation < 0:
             raise RepositoryCorruptionError("bot manifest is invalid")
         bot = BotRef(token=resolved_bot_token, generation=bot_generation)
         self._validate_bot_ref_locked(bot)
+        return bot
+
+    def _resolve_active_persona_tokens_locked(
+        self,
+        bot_token: str,
+        persona_token: str,
+    ) -> tuple[PersonaRevisionRef, dict[str, object]]:
+        """Resolve an active Persona directly from its durable parent manifests."""
+
+        bot = self._active_bot_ref_locked(bot_token)
+        if bot is None:
+            raise KeyError("persona not found")
 
         resolved_persona_token = _require_token(persona_token, "persona_v1_")
         stub = PersonaRevisionRef(
@@ -1075,6 +1091,45 @@ class ScopeRepository:
             lifecycle_generation=int(manifest["lifecycle_generation"]),
         )
         return self._require_active_persona_locked(persona), manifest
+
+    def _active_persona_under_other_bot_locked(
+        self,
+        bot_token: str,
+        persona_token: str,
+    ) -> bool:
+        """Check durable active Persona parentage without consulting Session state."""
+
+        try:
+            bot_directories = tuple(self.bots_directory.iterdir())
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise RepositoryCorruptionError("bot directory is unreadable") from exc
+        for directory in bot_directories:
+            try:
+                if not directory.is_dir():
+                    continue
+            except OSError as exc:
+                raise RepositoryCorruptionError("bot directory is unreadable") from exc
+            candidate_bot_token = directory.name
+            if candidate_bot_token == bot_token:
+                continue
+            try:
+                active, _manifest = self._resolve_active_persona_tokens_locked(
+                    candidate_bot_token,
+                    persona_token,
+                )
+            except ValueError:
+                # Directory names are not authority.  Only a validated manifest
+                # can establish parentage for the requested Persona token.
+                continue
+            except (KeyError, StaleScopeWrite):
+                # Missing or retired foreign Personas are intentionally not
+                # disclosed through this parent classifier.
+                continue
+            if active.bot_ref.token != bot_token:
+                return True
+        return False
 
     def _load_persona_manifest_locked(
         self,
@@ -1529,6 +1584,33 @@ class ScopeRepository:
                 session_token,
                 missing_is_corruption=False,
             )
+
+    def resolve_exact_persona(
+        self,
+        bot_token: str,
+        persona_token: str,
+    ) -> PersonaRevisionRef:
+        """Resolve one active durable Bot/Persona parent chain without a Session."""
+
+        with self._repository_lock():
+            resolved_bot_token = _require_token(bot_token, "bot_v1_")
+            resolved_persona_token = _require_token(persona_token, "persona_v1_")
+            bot = self._active_bot_ref_locked(resolved_bot_token)
+            if bot is None:
+                raise ScopeBotNotFound("bot not found")
+            try:
+                active, _manifest = self._resolve_active_persona_tokens_locked(
+                    resolved_bot_token,
+                    resolved_persona_token,
+                )
+            except KeyError as exc:
+                if self._active_persona_under_other_bot_locked(
+                    resolved_bot_token,
+                    resolved_persona_token,
+                ):
+                    raise ScopeParentMismatch("persona does not belong to bot") from exc
+                raise ScopePersonaNotFound("persona not found") from exc
+            return active
 
     def list_active_scopes(self) -> tuple[SessionScope, ...]:
         """List current scopes through catalog registrations only.
@@ -3067,8 +3149,10 @@ __all__ = [
     "RelationScopedPersistence",
     "RelationScopedPersistenceGateway",
     "RepositoryCorruptionError",
+    "ScopeBotNotFound",
     "ScopeCorrupt",
     "ScopeParentMismatch",
+    "ScopePersonaNotFound",
     "ScopeRepository",
     "ScopedPersistence",
     "ScopedPersistenceGateway",

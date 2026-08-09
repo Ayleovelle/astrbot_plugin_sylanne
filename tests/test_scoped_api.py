@@ -14,6 +14,7 @@ import pytest
 from sylanne_alpha.scope_contracts import (
     AuthenticatedSubject,
     BotRef,
+    PersonaScope,
     PersonaRevisionRef,
     RelationRef,
     RelationScope,
@@ -25,8 +26,10 @@ from sylanne_alpha.scope_contracts import (
 from sylanne_alpha.scope_repository import ScopeRepository
 from sylanne_alpha.scope_runtime import ScopeRuntimeRegistry
 from sylanne_alpha.scoped_api import (
+    PERSONA_DOSSIER_ROUTE_SPEC,
     SCOPED_API_METHODS,
     SCOPED_API_ROUTE_SPECS,
+    PersonaRouteSpec,
     ScopeRouteSpec,
     ScopedApiAuthorization,
     ScopedApiError,
@@ -99,12 +102,25 @@ def _service(tmp_path):
     ) -> RelationScope | None:
         return relation.scope if candidate == scope else None
 
+    def test_persona_grant(
+        _principal: ScopedPrincipal,
+        candidate: PersonaScope,
+        _action: str,
+    ) -> RelationScope | None:
+        if (
+            candidate.bot_ref == scope.bot_ref
+            and candidate.persona_ref == scope.persona_ref
+        ):
+            return relation.scope
+        return None
+
     service = ScopedApiService(
         repository,
         registry,
         turn_lookup=lambda candidate: turn if candidate == scope else None,
         clock_ms=lambda: 1_000,
         principal_scope_grant=test_grant,
+        principal_persona_grant=test_persona_grant,
     )
     return service, repository, registry, scope, relation.scope
 
@@ -133,6 +149,20 @@ def test_scoped_route_specs_are_immutable_and_bind_the_method_to_each_action() -
     assert melt.action == "POST:memory/meltdown"
     with pytest.raises(TypeError):
         SCOPED_API_ROUTE_SPECS["state"] = state  # type: ignore[index]
+
+
+def test_persona_dossier_route_is_immutable_and_owns_its_action() -> None:
+    assert PERSONA_DOSSIER_ROUTE_SPEC == PersonaRouteSpec(
+        endpoint="dossier",
+        method="GET",
+    )
+    assert PERSONA_DOSSIER_ROUTE_SPEC.action == "GET:persona-dossier"
+    with pytest.raises(ValueError):
+        PersonaRouteSpec(endpoint="dossier", method="POST")
+    with pytest.raises(ValueError):
+        PersonaRouteSpec(endpoint="scope", method="GET")
+    with pytest.raises(AttributeError):
+        PERSONA_DOSSIER_ROUTE_SPEC.method = "POST"  # type: ignore[misc]
 
 
 def test_scoped_method_and_route_contracts_cannot_mutate_at_runtime() -> None:
@@ -324,6 +354,8 @@ def test_plugin_service_requires_host_principal_scope_grant(tmp_path) -> None:
 
     assert scoped_api_service_for_plugin(plugin) is None
     plugin._scoped_api_principal_scope_grant = lambda *_args: None
+    assert scoped_api_service_for_plugin(plugin) is None
+    plugin._scoped_api_principal_persona_grant = lambda *_args: None
     assert isinstance(scoped_api_service_for_plugin(plugin), ScopedApiService)
 
 
@@ -335,6 +367,222 @@ def _safe_genesis_profile() -> dict[str, object]:
         "proactivity_prior": {},
         "circadian_prior": {},
     }
+
+
+def _dossier_service(tmp_path):
+    repository = ScopeRepository(tmp_path)
+    scope = repository.create_scope(_scope(), expected_absent=True)
+    registry = ScopeRuntimeRegistry.for_test(repository=repository)
+    registry.exact_session(scope)
+    relation_runtime = registry.relation_for(
+        scope,
+        AuthenticatedSubject(
+            relation_ref=RelationRef(
+                token="relation_v1_dossier_owner",
+                bot_ref=scope.bot_ref,
+            ),
+            identity_quality="event_get_sender_id",
+        ),
+    )
+    assert relation_runtime is not None
+    principal = _principal("principal_v1_dossier_owner")
+    grant_state = {"allowed": True}
+    grant_calls: list[tuple[ScopedPrincipal, PersonaScope, str]] = []
+
+    def session_grant(
+        _candidate_principal: ScopedPrincipal,
+        candidate_scope: SessionScope,
+        _action: str,
+    ) -> RelationScope | None:
+        return relation_runtime.scope if candidate_scope == scope else None
+
+    def persona_grant(
+        candidate_principal: ScopedPrincipal,
+        candidate_scope: PersonaScope,
+        action: str,
+    ) -> RelationScope | None:
+        grant_calls.append((candidate_principal, candidate_scope, action))
+        if (
+            grant_state["allowed"]
+            and candidate_principal == principal
+            and candidate_scope.bot_ref == scope.bot_ref
+            and candidate_scope.persona_ref == scope.persona_ref
+            and action == "GET:persona-dossier"
+        ):
+            return relation_runtime.scope
+        return None
+
+    service = ScopedApiService(
+        repository,
+        registry,
+        turn_lookup=lambda _candidate: None,
+        clock_ms=lambda: 1_000,
+        principal_scope_grant=session_grant,
+        principal_persona_grant=persona_grant,
+    )
+    return service, repository, scope, principal, grant_state, grant_calls
+
+
+def test_persona_dossier_requires_principal_before_reader(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository, _registry, scope, _relation = _service(tmp_path)
+    monkeypatch.setattr(
+        repository,
+        "read_persona_dossier",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("principal denial must precede dossier reader")
+        ),
+    )
+
+    result = service.persona_dossier_payload(
+        scope.bot_ref.token,
+        scope.persona_ref.token,
+    )
+
+    assert isinstance(result, ScopedApiError)
+    assert (result.status, result.code) == (403, "scope_principal_required")
+
+
+def test_persona_dossier_classifies_parent_before_reader(tmp_path, monkeypatch) -> None:
+    service, repository, scope, principal, _grant_state, _grant_calls = _dossier_service(tmp_path)
+    foreign = repository.create_scope(
+        _scope(
+            bot_token="bot_v1_other",
+            persona_token="persona_v1_foreign",
+            session_token="session_v1_other",
+        ),
+        expected_absent=True,
+    )
+    monkeypatch.setattr(
+        repository,
+        "read_persona_dossier",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("parent classification must precede dossier reader")
+        ),
+    )
+
+    wrong_parent = service.persona_dossier_payload(
+        scope.bot_ref.token,
+        foreign.persona_ref.token,
+        principal=principal,
+    )
+    missing = service.persona_dossier_payload(
+        scope.bot_ref.token,
+        "persona_v1_missing",
+        principal=principal,
+    )
+    missing_bot = service.persona_dossier_payload(
+        "bot_v1_missing",
+        scope.persona_ref.token,
+        principal=principal,
+    )
+
+    assert isinstance(wrong_parent, ScopedApiError)
+    assert (wrong_parent.status, wrong_parent.code) == (403, "scope_persona_not_owned")
+    assert isinstance(missing, ScopedApiError)
+    assert (missing.status, missing.code) == (404, "scope_persona_not_found")
+    assert isinstance(missing_bot, ScopedApiError)
+    assert (missing_bot.status, missing_bot.code) == (404, "scope_bot_not_found")
+
+
+def test_persona_dossier_preserves_retired_persona_as_stale(tmp_path) -> None:
+    service, repository, scope, principal, _grant_state, _grant_calls = _dossier_service(tmp_path)
+    repository.retire_persona_revision(
+        scope.persona_ref,
+        expected_lifecycle_generation=scope.persona_ref.lifecycle_generation,
+        reason="test",
+    )
+
+    result = service.persona_dossier_payload(
+        scope.bot_ref.token,
+        scope.persona_ref.token,
+        principal=principal,
+    )
+
+    assert isinstance(result, ScopedApiError)
+    assert (result.status, result.code) == (409, "scope_stale")
+
+
+def test_persona_dossier_grant_echo_and_post_read_revocation(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository, scope, principal, grant_state, grant_calls = _dossier_service(tmp_path)
+
+    monkeypatch.setattr(
+        repository,
+        "list_active_scopes",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("Persona dossier must not enumerate Session scopes")
+        ),
+    )
+    payload = service.persona_dossier_payload(
+        scope.bot_ref.token,
+        scope.persona_ref.token,
+        principal=principal,
+    )
+
+    assert not isinstance(payload, ScopedApiError)
+    assert payload["scope"] == {
+        "bot_ref": scope.bot_ref.token,
+        "persona_ref": scope.persona_ref.token,
+    }
+    assert payload["scope_generation"] == scope.persona_ref.lifecycle_generation
+    assert payload["resolved_at_ms"] == 1_000
+    assert payload["generations"] == {
+        "bot": scope.bot_ref.generation,
+        "persona_lifecycle": scope.persona_ref.lifecycle_generation,
+    }
+    assert grant_calls[-1] == (
+        principal,
+        PersonaScope(bot_ref=scope.bot_ref, persona_ref=scope.persona_ref),
+        "GET:persona-dossier",
+    )
+
+    original_reader = repository.read_persona_dossier
+
+    def revoke_after_reader(*args):
+        snapshot = original_reader(*args)
+        grant_state["allowed"] = False
+        return snapshot
+
+    monkeypatch.setattr(repository, "read_persona_dossier", revoke_after_reader)
+    revoked = service.persona_dossier_payload(
+        scope.bot_ref.token,
+        scope.persona_ref.token,
+        principal=principal,
+    )
+
+    assert isinstance(revoked, ScopedApiError)
+    assert (revoked.status, revoked.code) == (403, "scope_principal_forbidden")
+
+
+def test_plugin_service_requires_host_persona_grant(tmp_path) -> None:
+    repository = ScopeRepository(tmp_path)
+    scope = repository.create_scope(_scope(), expected_absent=True)
+    registry = ScopeRuntimeRegistry.for_test(repository=repository)
+    registry.exact_session(scope)
+    resolver = SimpleNamespace(
+        _repository=repository,
+        catalog=SimpleNamespace(
+            current_exact=lambda bot_ref, session_ref: (
+                _frozen_turn(scope)
+                if (bot_ref, session_ref) == (scope.bot_ref.token, scope.session_ref.token)
+                else None
+            )
+        ),
+    )
+    plugin = SimpleNamespace(
+        _scope_runtime_registry=registry,
+        _scope_resolver_v1=resolver,
+        _scoped_api_principal_scope_grant=lambda *_args: None,
+    )
+
+    assert scoped_api_service_for_plugin(plugin) is None
+    plugin._scoped_api_principal_persona_grant = lambda *_args: None
+    assert isinstance(scoped_api_service_for_plugin(plugin), ScopedApiService)
 
 
 def test_persona_dossier_projects_only_safe_active_genesis(tmp_path) -> None:
@@ -359,14 +607,17 @@ def test_persona_dossier_projects_only_safe_active_genesis(tmp_path) -> None:
     payload = service.persona_dossier_payload(
         scope.bot_ref.token,
         scope.persona_ref.token,
+        principal=_principal(),
     )
 
     assert not isinstance(payload, ScopedApiError)
     assert payload["ok"] is True
-    assert payload["persona_scope"] == {
+    assert payload["scope"] == {
         "bot_ref": scope.bot_ref.token,
         "persona_ref": scope.persona_ref.token,
     }
+    assert payload["scope_generation"] == scope.persona_ref.lifecycle_generation
+    assert payload["resolved_at_ms"] == 1_000
     assert payload["generations"] == {
         "bot": scope.bot_ref.generation,
         "persona_lifecycle": scope.persona_ref.lifecycle_generation,
@@ -408,16 +659,25 @@ def test_persona_dossier_is_two_level_and_fail_closed(tmp_path, monkeypatch) -> 
     payload = service.persona_dossier_payload(
         scope.bot_ref.token,
         scope.persona_ref.token,
+        principal=_principal(),
     )
     assert not isinstance(payload, ScopedApiError)
     assert payload["persona"]["genesis"] == {"state": "awaiting"}
 
-    missing = service.persona_dossier_payload(scope.bot_ref.token, "persona_v1_missing")
+    missing = service.persona_dossier_payload(
+        scope.bot_ref.token,
+        "persona_v1_missing",
+        principal=_principal(),
+    )
     assert isinstance(missing, ScopedApiError)
     assert missing.status == 404
-    assert missing.public_payload() == {"error": "persona_not_found"}
+    assert missing.public_payload() == {"error": "scope_persona_not_found"}
 
-    malformed = service.persona_dossier_payload("not_a_bot_ref", scope.persona_ref.token)
+    malformed = service.persona_dossier_payload(
+        "not_a_bot_ref",
+        scope.persona_ref.token,
+        principal=_principal(),
+    )
     assert isinstance(malformed, ScopedApiError)
     assert malformed.status == 400
     assert malformed.public_payload() == {"error": "invalid_persona_request"}
@@ -962,10 +1222,9 @@ async def test_astrbot_persona_dossier_handler_uses_no_session_nonce(
 
     payload = await routes.persona_dossier_handler()
 
-    assert payload["ok"] is True
-    assert payload["persona_scope"] == {
-        "bot_ref": scope.bot_ref.token,
-        "persona_ref": scope.persona_ref.token,
+    assert payload == {
+        "error": "scope_principal_required",
+        "status": 403,
     }
 
     web.request.query = {"session": scope.session_ref.token}
@@ -1279,12 +1538,9 @@ async def test_aiohttp_persona_dossier_is_two_level_and_rejects_session_selector
                     await asyncio.sleep(0.01)
             assert response is not None
             async with response:
-                assert response.status == 200
+                assert response.status == 403
                 payload = await response.json()
-            assert payload["persona_scope"] == {
-                "bot_ref": scope.bot_ref.token,
-                "persona_ref": scope.persona_ref.token,
-            }
+            assert payload == {"error": "scope_principal_required"}
 
             async with client.get(f"http://127.0.0.1:{port}{path}?session=default") as rejected:
                 assert rejected.status == 400

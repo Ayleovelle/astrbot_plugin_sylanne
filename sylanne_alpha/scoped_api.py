@@ -15,13 +15,23 @@ from types import MappingProxyType
 from typing import Any, Callable, Final, Mapping, TypeAlias
 
 from .scope_contracts import (
+    PersonaApiEcho,
+    PersonaApiPathEcho,
+    PersonaScope,
     RelationScope,
     ScopeApiEcho,
     ScopeApiPathEcho,
     ScopedPrincipal,
     SessionScope,
 )
-from .scope_repository import RepositoryCorruptionError, ScopeRepository, StaleScopeWrite
+from .scope_repository import (
+    RepositoryCorruptionError,
+    ScopeBotNotFound,
+    ScopeParentMismatch,
+    ScopePersonaNotFound,
+    ScopeRepository,
+    StaleScopeWrite,
+)
 from .scope_runtime import ScopeRuntimeRegistry
 
 
@@ -59,6 +69,9 @@ _SCOPED_API_METHODS: Final[dict[str, str]] = {
 SCOPED_API_METHODS: Final[Mapping[str, str]] = MappingProxyType(_SCOPED_API_METHODS)
 PrincipalScopeGrant: TypeAlias = Callable[
     [ScopedPrincipal, SessionScope, str], RelationScope | None
+]
+PrincipalPersonaGrant: TypeAlias = Callable[
+    [ScopedPrincipal, PersonaScope, str], RelationScope | None
 ]
 
 _NONCE_PREFIX: Final[str] = "scope_nonce_v1_"
@@ -137,6 +150,30 @@ class ScopeRouteSpec:
     @property
     def action(self) -> str:
         return f"{self.method}:{self.endpoint}"
+
+
+@dataclass(frozen=True, slots=True)
+class PersonaRouteSpec:
+    """Transport-neutral Persona resource/action contract owned by the core gate."""
+
+    endpoint: str
+    method: str
+
+    def __post_init__(self) -> None:
+        if type(self.endpoint) is not str or self.endpoint != "dossier":
+            raise ValueError("unsupported Persona API endpoint")
+        if type(self.method) is not str or self.method != "GET":
+            raise ValueError("Persona dossier requires GET")
+
+    @property
+    def action(self) -> str:
+        return f"{self.method}:persona-{self.endpoint}"
+
+
+PERSONA_DOSSIER_ROUTE_SPEC: Final[PersonaRouteSpec] = PersonaRouteSpec(
+    endpoint="dossier",
+    method="GET",
+)
 
 
 SCOPED_API_ROUTE_SPECS: Final = MappingProxyType(
@@ -323,6 +360,7 @@ class ScopedApiService:
         clock_ms: Callable[[], int] | None = None,
         nonce_ttl_ms: int = _NONCE_TTL_MS,
         principal_scope_grant: PrincipalScopeGrant | None = None,
+        principal_persona_grant: PrincipalPersonaGrant | None = None,
     ) -> None:
         if type(repository) is not ScopeRepository:
             raise ValueError("repository must be a ScopeRepository")
@@ -334,12 +372,15 @@ class ScopedApiService:
             raise ValueError("nonce_ttl_ms must be a positive int")
         if principal_scope_grant is not None and not callable(principal_scope_grant):
             raise ValueError("principal_scope_grant must be callable or None")
+        if principal_persona_grant is not None and not callable(principal_persona_grant):
+            raise ValueError("principal_persona_grant must be callable or None")
         self._repository = repository
         self._registry = registry
         self._turn_lookup = turn_lookup
         self._clock_ms = clock_ms or _now_ms
         self._nonce_ttl_ms = nonce_ttl_ms
         self._principal_scope_grant = principal_scope_grant
+        self._principal_persona_grant = principal_persona_grant
         self._lock = threading.RLock()
         self._pending_nonces: dict[str, _NonceRecord] = {}
         self._retired_nonces: dict[str, tuple[int, str]] = {}
@@ -376,19 +417,36 @@ class ScopedApiService:
         self,
         bot_ref: object,
         persona_ref: object,
+        *,
+        principal: ScopedPrincipal | None = None,
     ) -> dict[str, object] | ScopedApiError:
-        """Project one active Persona without selecting or inspecting a Session."""
+        """Project one authorized active Persona without selecting a Session."""
 
-        if type(bot_ref) is not str or type(persona_ref) is not str:
-            return ScopedApiError(400, "invalid_persona_request")
         try:
-            dossier = self._repository.read_persona_dossier(bot_ref, persona_ref)
-        except (KeyError, StaleScopeWrite):
-            return ScopedApiError(404, "persona_not_found")
+            path = PersonaApiPathEcho(bot_ref=bot_ref, persona_ref=persona_ref)
         except ValueError:
             return ScopedApiError(400, "invalid_persona_request")
-        except (OSError, RepositoryCorruptionError, TypeError):
+        if type(principal) is not ScopedPrincipal:
+            return ScopedApiError(403, "scope_principal_required")
+        persona_scope = self.resolve_persona(path.bot_ref, path.persona_ref)
+        if isinstance(persona_scope, ScopedApiError):
+            return persona_scope
+        authorization = self._authorize_persona_dossier(principal, persona_scope)
+        if isinstance(authorization, ScopedApiError):
+            return authorization
+        try:
+            dossier = self._repository.read_persona_dossier(path.bot_ref, path.persona_ref)
+        except (KeyError, StaleScopeWrite):
+            return self._stale_error()
+        except (OSError, RepositoryCorruptionError, TypeError, ValueError):
             return ScopedApiError(503, "scope_repository_unavailable")
+
+        active = dossier.persona_ref
+        if active.bot_ref != persona_scope.bot_ref or active != persona_scope.persona_ref:
+            return self._stale_error()
+        authorization = self._authorize_persona_dossier(principal, persona_scope)
+        if isinstance(authorization, ScopedApiError):
+            return authorization
 
         genesis: dict[str, object] = {"state": "awaiting"}
         genesis_snapshot = dossier.genesis
@@ -410,14 +468,23 @@ class ScopedApiService:
                     "accepted_at_ms": accepted_at_ms,
                 }
 
-        active = dossier.persona_ref
         short_ref = active.token[-8:]
+        echo = PersonaApiEcho(
+            scope=PersonaApiPathEcho(
+                bot_ref=active.bot_ref.token,
+                persona_ref=active.token,
+            ),
+            scope_generation=active.lifecycle_generation,
+            resolved_at_ms=self._clock_ms(),
+        )
         return {
             "ok": True,
-            "persona_scope": {
-                "bot_ref": active.bot_ref.token,
-                "persona_ref": active.token,
+            "scope": {
+                "bot_ref": echo.scope.bot_ref,
+                "persona_ref": echo.scope.persona_ref,
             },
+            "scope_generation": echo.scope_generation,
+            "resolved_at_ms": echo.resolved_at_ms,
             "generations": {
                 "bot": active.bot_ref.generation,
                 "persona_lifecycle": active.lifecycle_generation,
@@ -431,6 +498,34 @@ class ScopedApiService:
                 "updated_at_ms": dossier.updated_at_ms,
             },
         }
+
+    def resolve_persona(
+        self,
+        bot_ref: object,
+        persona_ref: object,
+    ) -> PersonaScope | ScopedApiError:
+        """Resolve one exact active Persona without selecting a Session sibling."""
+
+        try:
+            path = PersonaApiPathEcho(bot_ref=bot_ref, persona_ref=persona_ref)
+        except ValueError:
+            return ScopedApiError(400, "invalid_persona_request")
+        try:
+            active = self._repository.resolve_exact_persona(
+                path.bot_ref,
+                path.persona_ref,
+            )
+        except ScopeBotNotFound:
+            return ScopedApiError(404, "scope_bot_not_found")
+        except ScopeParentMismatch:
+            return ScopedApiError(403, "scope_persona_not_owned")
+        except ScopePersonaNotFound:
+            return ScopedApiError(404, "scope_persona_not_found")
+        except StaleScopeWrite:
+            return self._stale_error()
+        except (OSError, RepositoryCorruptionError, TypeError, ValueError):
+            return ScopedApiError(503, "scope_repository_unavailable")
+        return PersonaScope(bot_ref=active.bot_ref, persona_ref=active)
 
     def resolve(
         self,
@@ -763,6 +858,57 @@ class ScopedApiService:
             return None
         return grant
 
+    def _persona_grant(
+        self,
+        principal: ScopedPrincipal,
+        scope: PersonaScope,
+        action: str,
+    ) -> RelationScope | None:
+        """Return one exact Persona grant, failing closed on every ambiguity."""
+
+        grant_issuer = self._principal_persona_grant
+        if not callable(grant_issuer):
+            return None
+        try:
+            grant = grant_issuer(principal, scope, action)
+        except Exception:  # noqa: BLE001 - external identity proof must fail closed
+            return None
+        if (
+            type(grant) is not RelationScope
+            or grant.bot_ref != scope.bot_ref
+            or grant.persona_ref != scope.persona_ref
+        ):
+            return None
+        return grant
+
+    def _authorize_persona_dossier(
+        self,
+        principal: ScopedPrincipal,
+        scope: PersonaScope,
+    ) -> RelationScope | ScopedApiError:
+        """Fence the authoritative grant before returning Persona-only data."""
+
+        grant = self._persona_grant(
+            principal,
+            scope,
+            PERSONA_DOSSIER_ROUTE_SPEC.action,
+        )
+        if grant is None:
+            return ScopedApiError(403, "scope_principal_forbidden")
+        try:
+            self._repository.validate_relation_scope(grant)
+        except (KeyError, StaleScopeWrite, ValueError):
+            return ScopedApiError(403, "scope_principal_forbidden")
+        except (OSError, RepositoryCorruptionError, TypeError):
+            return ScopedApiError(503, "scope_repository_unavailable")
+        try:
+            relation_runtime = self._registry.relation_or_none(grant)
+        except Exception:  # noqa: BLE001 - private runtime must fail closed
+            relation_runtime = None
+        if relation_runtime is None:
+            return ScopedApiError(403, "scope_principal_forbidden")
+        return grant
+
     def _missing_parent_error(self, path: ScopeApiPathEcho) -> ScopedApiError:
         """Classify only parent ownership after an exact lookup has missed.
 
@@ -837,19 +983,28 @@ def scoped_api_service_for_plugin(plugin: object) -> ScopedApiService | None:
 
     existing = getattr(plugin, "_scoped_api_service", None)
     if type(existing) is ScopedApiService:
-        return existing if callable(existing._principal_scope_grant) else None
+        return (
+            existing
+            if (
+                callable(existing._principal_scope_grant)
+                and callable(existing._principal_persona_grant)
+            )
+            else None
+        )
     registry = getattr(plugin, "_scope_runtime_registry", None)
     resolver = getattr(plugin, "_scope_resolver_v1", None)
     repository = getattr(resolver, "_repository", None)
     catalog = getattr(resolver, "catalog", None)
     current_exact = getattr(catalog, "current_exact", None)
     principal_scope_grant = getattr(plugin, "_scoped_api_principal_scope_grant", None)
+    principal_persona_grant = getattr(plugin, "_scoped_api_principal_persona_grant", None)
     if (
         type(registry) is not ScopeRuntimeRegistry
         or type(repository) is not ScopeRepository
         or registry.repository is not repository
         or not callable(current_exact)
         or not callable(principal_scope_grant)
+        or not callable(principal_persona_grant)
     ):
         return None
 
@@ -861,6 +1016,7 @@ def scoped_api_service_for_plugin(plugin: object) -> ScopedApiService | None:
         registry,
         turn_lookup=turn_lookup,
         principal_scope_grant=principal_scope_grant,
+        principal_persona_grant=principal_persona_grant,
     )
     try:
         setattr(plugin, "_scoped_api_service", service)
@@ -910,7 +1066,10 @@ __all__ = [
     "SCOPED_API_METHODS",
     "SCOPED_API_ROUTE_SPECS",
     "SCOPED_API_ROOT",
+    "PERSONA_DOSSIER_ROUTE_SPEC",
     "SCOPE_NONCE_HEADER",
+    "PersonaRouteSpec",
+    "PrincipalPersonaGrant",
     "PrincipalScopeGrant",
     "ScopeRouteSpec",
     "ScopedApiAuthorization",

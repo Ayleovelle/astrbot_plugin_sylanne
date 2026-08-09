@@ -18,14 +18,22 @@ from sylanne_alpha.scope_contracts import (
 from sylanne_alpha.scope_identity import load_or_create_scope_identity_key
 from sylanne_alpha.scope_repository import (
     RepositoryCorruptionError,
+    ScopeBotNotFound,
     ScopeParentMismatch,
+    ScopePersonaNotFound,
     ScopeRepository,
     StaleScopeWrite,
 )
 
 
-def _scope(*, generation: int = 0, persona_token: str = "persona_v1_P") -> SessionScope:
-    bot = BotRef(token="bot_v1_A", generation=0)
+def _scope(
+    *,
+    generation: int = 0,
+    bot_token: str = "bot_v1_A",
+    persona_token: str = "persona_v1_P",
+    session_token: str = "session_v1_S",
+) -> SessionScope:
+    bot = BotRef(token=bot_token, generation=0)
     persona = PersonaRevisionRef(
         token=persona_token,
         bot_ref=bot,
@@ -33,12 +41,12 @@ def _scope(*, generation: int = 0, persona_token: str = "persona_v1_P") -> Sessi
         source_fingerprint="b" * 64,
         lifecycle_generation=generation,
     )
-    session = SessionRef(token="session_v1_S", bot_ref=bot, generation=0)
+    session = SessionRef(token=session_token, bot_ref=bot, generation=0)
     return SessionScope(
         bot_ref=bot,
         persona_ref=persona,
         session_ref=session,
-        storage_token=f"scope_v1_{persona_token.rsplit('_', 1)[-1]}",
+        storage_token=f"scope_v1_{session_token.rsplit('_', 1)[-1]}",
         scope_generation=0,
     )
 
@@ -119,6 +127,90 @@ def test_exact_scope_resolver_uses_the_three_opaque_path_tokens(tmp_path: Path) 
             active.persona_ref.token,
             "session_v1_missing",
         )
+
+
+def test_exact_persona_resolver_is_parent_aware_session_free_and_read_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = ScopeRepository(tmp_path)
+    active = repository.activate_persona_revision(_scope().persona_ref)
+    foreign = repository.activate_persona_revision(
+        _scope(
+            bot_token="bot_v1_B",
+            persona_token="persona_v1_foreign",
+        ).persona_ref
+    )
+    watched = (
+        repository.catalog_path,
+        repository.bots_directory / active.bot_ref.token / "manifest.json",
+        repository.persona_manifest_path(active),
+        repository.bots_directory / foreign.bot_ref.token / "manifest.json",
+        repository.persona_manifest_path(foreign),
+    )
+    before = {path: path.read_bytes() for path in watched}
+    monkeypatch.setattr(
+        repository,
+        "list_active_scopes",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("Persona resolver must not enumerate Session scopes")
+        ),
+    )
+
+    assert repository.resolve_exact_persona(
+        active.bot_ref.token,
+        active.token,
+    ) == active
+    assert {path: path.read_bytes() for path in watched} == before
+    with pytest.raises(ScopeBotNotFound):
+        repository.resolve_exact_persona("bot_v1_missing", active.token)
+    with pytest.raises(ScopeParentMismatch):
+        repository.resolve_exact_persona(active.bot_ref.token, foreign.token)
+    with pytest.raises(ScopePersonaNotFound):
+        repository.resolve_exact_persona(active.bot_ref.token, "persona_v1_missing")
+
+    repository.retire_persona_revision(
+        active,
+        expected_lifecycle_generation=active.lifecycle_generation,
+        reason="test",
+    )
+    with pytest.raises(StaleScopeWrite, match="persona_lifecycle_stale"):
+        repository.resolve_exact_persona(active.bot_ref.token, active.token)
+
+
+def test_exact_persona_resolver_hides_retired_foreign_personas_and_propagates_corruption(
+    tmp_path: Path,
+) -> None:
+    repository = ScopeRepository(tmp_path)
+    active = repository.activate_persona_revision(_scope().persona_ref)
+    foreign = repository.activate_persona_revision(
+        _scope(
+            bot_token="bot_v1_B",
+            persona_token="persona_v1_foreign",
+        ).persona_ref
+    )
+    repository.retire_persona_revision(
+        foreign,
+        expected_lifecycle_generation=foreign.lifecycle_generation,
+        reason="test",
+    )
+
+    with pytest.raises(ScopePersonaNotFound):
+        repository.resolve_exact_persona(active.bot_ref.token, foreign.token)
+
+    corrupt_foreign = repository.activate_persona_revision(
+        _scope(
+            bot_token="bot_v1_B",
+            persona_token="persona_v1_corrupt_foreign",
+        ).persona_ref
+    )
+    repository.persona_manifest_path(corrupt_foreign).write_text("{broken", encoding="utf-8")
+    with pytest.raises(RepositoryCorruptionError):
+        repository.resolve_exact_persona(active.bot_ref.token, corrupt_foreign.token)
+
+    repository.persona_manifest_path(active).write_text("{broken", encoding="utf-8")
+    with pytest.raises(RepositoryCorruptionError):
+        repository.resolve_exact_persona(active.bot_ref.token, active.token)
 
 
 def test_persona_retirement_reactivation_fences_stale_genesis_writer(tmp_path: Path) -> None:
