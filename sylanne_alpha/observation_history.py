@@ -1104,10 +1104,21 @@ class ObservationHistoryStore:
             )
         return expected_generation
 
-    def _scoped_used_bytes(self) -> int:
+    def _scoped_used_bytes(
+        self,
+        *,
+        manifest_generation: int | None = None,
+    ) -> int:
+        # Cleanup diagnostics are a bounded audit trail, not retained
+        # observation history.  Keeping them outside the retention ledger
+        # prevents their own records from creating artificial cleanup churn.
+        quota_manifest = dict(self._manifest)
+        quota_manifest.pop("cleanup_diagnostics", None)
+        if manifest_generation is not None:
+            quota_manifest["generation"] = manifest_generation
         return len(
             json.dumps(
-                self._manifest,
+                quota_manifest,
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
@@ -1129,6 +1140,13 @@ class ObservationHistoryStore:
             and segment.get("path") != active
             and segment.get("path") != latest
         ]
+
+    def _current_scoped_cleanup_result(self) -> CleanupResult:
+        return CleanupResult(
+            budget_unsatisfiable=bool(self._manifest.get("budget_unsatisfiable")),
+            cleanup_active=bool(self._manifest.get("cleanup_active")),
+            manifest_generation=int(self._manifest.get("generation", 0)),
+        )
 
     def _append_cleanup_diagnostic_locked(
         self,
@@ -1196,8 +1214,10 @@ class ObservationHistoryStore:
         unfinished_reason: str | None,
         persist: bool,
     ) -> CleanupResult:
-        after_bytes = self._scoped_used_bytes()
         expected_generation = int(self._manifest.get("generation", 0)) + 1
+        after_bytes = self._scoped_used_bytes(
+            manifest_generation=expected_generation,
+        )
         self._append_cleanup_diagnostic_locked(
             deleted_scope=deleted_scope,
             deleted_segment=deleted_segment,
@@ -1225,7 +1245,13 @@ class ObservationHistoryStore:
     ) -> CleanupResult:
         limit = self._limit_bytes()
         before_bytes = self._scoped_used_bytes()
+        was_cleanup_active = bool(self._manifest.get("cleanup_active"))
+        was_budget_unsatisfiable = bool(
+            self._manifest.get("budget_unsatisfiable")
+        )
         if limit == 0:
+            if not was_cleanup_active and not was_budget_unsatisfiable:
+                return self._current_scoped_cleanup_result()
             self._manifest["cleanup_active"] = False
             self._manifest["budget_unsatisfiable"] = False
             return self._finish_scoped_cleanup_decision_locked(
@@ -1241,6 +1267,8 @@ class ObservationHistoryStore:
         used = before_bytes
         target = math.floor(limit * self._target_ratio)
         if used <= target:
+            if not was_cleanup_active and not was_budget_unsatisfiable:
+                return self._current_scoped_cleanup_result()
             self._manifest["cleanup_active"] = False
             self._manifest["budget_unsatisfiable"] = False
             return self._finish_scoped_cleanup_decision_locked(
@@ -1254,6 +1282,8 @@ class ObservationHistoryStore:
                 persist=persist,
             )
         if used <= limit and not self._manifest.get("cleanup_active"):
+            if not was_budget_unsatisfiable:
+                return self._current_scoped_cleanup_result()
             self._manifest["budget_unsatisfiable"] = False
             return self._finish_scoped_cleanup_decision_locked(
                 deleted_scope=None,
@@ -1304,6 +1334,8 @@ class ObservationHistoryStore:
             )
         if not candidates:
             self._manifest["budget_unsatisfiable"] = True
+            if was_cleanup_active and was_budget_unsatisfiable:
+                return self._current_scoped_cleanup_result()
             return self._finish_scoped_cleanup_decision_locked(
                 deleted_scope=None,
                 deleted_segment=None,
@@ -1332,7 +1364,12 @@ class ObservationHistoryStore:
         metadata["latest_closed_segment"] = None if not closed else closed[-1]["path"]
         self._manifest["cleanup_cursor"] = token
         self._manifest["budget_unsatisfiable"] = False
-        self._manifest["cleanup_active"] = self._scoped_used_bytes() > target
+        self._manifest["cleanup_active"] = (
+            self._scoped_used_bytes(
+                manifest_generation=int(self._manifest.get("generation", 0)) + 1,
+            )
+            > target
+        )
         return self._finish_scoped_cleanup_decision_locked(
             deleted_scope=token,
             deleted_segment=segment["path"],
