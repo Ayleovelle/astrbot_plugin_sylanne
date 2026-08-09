@@ -11,9 +11,16 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Callable, Final
 
-from .scope_contracts import RelationScope, ScopeApiEcho, ScopeApiPathEcho, SessionScope
+from .scope_contracts import (
+    RelationScope,
+    ScopeApiEcho,
+    ScopeApiPathEcho,
+    ScopedPrincipal,
+    SessionScope,
+)
 from .scope_repository import RepositoryCorruptionError, ScopeRepository, StaleScopeWrite
 from .scope_runtime import ScopeRuntimeRegistry
 
@@ -100,6 +107,54 @@ def _require_method(value: object) -> str:
     return normalized
 
 
+def _scoped_action(endpoint: object, method: object) -> str:
+    """Return the canonical endpoint action carried by each one-use nonce."""
+
+    normalized_method = _require_method(method)
+    route = scoped_api_route_spec(endpoint)
+    if route.method != normalized_method:
+        raise ValueError("scoped API method does not match endpoint")
+    return route.action
+
+
+@dataclass(frozen=True, slots=True)
+class ScopeRouteSpec:
+    """Transport-neutral endpoint/action contract owned by the core gate."""
+
+    endpoint: str
+    method: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "endpoint", _require_endpoint(self.endpoint))
+        object.__setattr__(self, "method", _require_method(self.method))
+        if SCOPED_API_METHODS[self.endpoint] != self.method:
+            raise ValueError("scoped API method does not match endpoint")
+
+    @property
+    def action(self) -> str:
+        return f"{self.method}:{self.endpoint}"
+
+
+SCOPED_API_ROUTE_SPECS: Final = MappingProxyType(
+    {
+        endpoint: ScopeRouteSpec(endpoint=endpoint, method=method)
+        for endpoint, method in SCOPED_API_METHODS.items()
+    }
+)
+
+
+def scoped_api_route_spec(endpoint: object) -> ScopeRouteSpec:
+    """Return the immutable method/action contract for one supported endpoint."""
+
+    return SCOPED_API_ROUTE_SPECS[_require_endpoint(endpoint)]
+
+
+def _require_principal(principal: object) -> ScopedPrincipal:
+    if type(principal) is not ScopedPrincipal:
+        raise ValueError("principal must be a ScopedPrincipal")
+    return principal
+
+
 @dataclass(frozen=True, slots=True)
 class ScopedApiRequest:
     """Pure transport-neutral request DTO for one exact scoped endpoint."""
@@ -108,6 +163,7 @@ class ScopedApiRequest:
     nonce: str | None
     endpoint: str = "scope"
     method: str = "GET"
+    principal: ScopedPrincipal | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if type(self.path) is not ScopeApiPathEcho:
@@ -118,6 +174,8 @@ class ScopedApiRequest:
             raise ValueError("scoped API method does not match endpoint")
         if self.nonce is not None and type(self.nonce) is not str:
             raise ValueError("nonce must be a str or None")
+        if self.principal is not None:
+            _require_principal(self.principal)
 
     @classmethod
     def from_tokens(
@@ -129,6 +187,7 @@ class ScopedApiRequest:
         nonce: str | None,
         endpoint: str = "scope",
         method: str = "GET",
+        principal: ScopedPrincipal | None = None,
     ) -> ScopedApiRequest:
         return cls(
             path=ScopeApiPathEcho(
@@ -139,6 +198,7 @@ class ScopedApiRequest:
             nonce=nonce,
             endpoint=endpoint,
             method=method,
+            principal=principal,
         )
 
 
@@ -177,6 +237,8 @@ class ScopedApiAuthorization:
     relation_scope: RelationScope = field(repr=False)
     turn_generation: int = field(repr=False)
     expires_at_ms: int = field(repr=False)
+    principal: ScopedPrincipal = field(repr=False)
+    action: str = field(repr=False)
     echo: ScopeApiEcho
 
     def __post_init__(self) -> None:
@@ -193,6 +255,13 @@ class ScopedApiAuthorization:
             raise ValueError("turn_generation must be a non-negative int")
         if type(self.expires_at_ms) is not int or self.expires_at_ms < 0:
             raise ValueError("expires_at_ms must be a non-negative int")
+        if type(self.principal) is not ScopedPrincipal:
+            raise ValueError("principal must be a ScopedPrincipal")
+        if type(self.action) is not str or self.action not in {
+            _scoped_action(endpoint, method)
+            for endpoint, method in SCOPED_API_METHODS.items()
+        }:
+            raise ValueError("action must be a supported scoped API action")
         if type(self.echo) is not ScopeApiEcho:
             raise ValueError("echo must be a ScopeApiEcho")
 
@@ -207,6 +276,7 @@ class ScopedApiAuthorization:
                 "session_ref": self.echo.scope.session_ref,
             },
             "scope_generation": self.echo.scope_generation,
+            "resolved_at_ms": self.echo.resolved_at_ms,
             "status": "available",
         }
         generations = {
@@ -228,6 +298,8 @@ class _NonceRecord:
     relation_scope: RelationScope
     turn_generation: int
     expires_at_ms: int
+    principal: ScopedPrincipal
+    action: str
 
 
 class ScopedApiService:
@@ -352,25 +424,57 @@ class ScopedApiService:
             },
         }
 
-    def bootstrap_nonce(self, path: ScopeApiPathEcho) -> str | ScopedApiError:
-        """Mint or refresh one nonce for a live, uniquely owned exact scope."""
+    def resolve(
+        self,
+        bot_ref: object,
+        persona_ref: object,
+        session_ref: object,
+    ) -> SessionScope | ScopedApiError:
+        """Resolve only the requested parent chain; never select a sibling scope."""
 
-        if type(path) is not ScopeApiPathEcho:
+        try:
+            path = ScopeApiPathEcho(
+                bot_ref=bot_ref,
+                persona_ref=persona_ref,
+                session_ref=session_ref,
+            )
+        except ValueError:
             return ScopedApiError(400, "invalid_scoped_request")
         try:
-            scope = self._repository.resolve_exact_scope(
+            return self._repository.resolve_exact_scope(
                 path.bot_ref,
                 path.persona_ref,
                 path.session_ref,
             )
         except KeyError:
-            # No capability has been issued for this path, so absence is a
-            # normal not-found response rather than a stale capability signal.
-            return ScopedApiError(404, "scope_not_found")
+            return self._missing_parent_error(path)
         except StaleScopeWrite:
             return self._stale_error()
         except (OSError, RepositoryCorruptionError, TypeError, ValueError):
             return ScopedApiError(503, "scope_repository_unavailable")
+
+    def bootstrap_nonce(
+        self,
+        path: ScopeApiPathEcho,
+        *,
+        principal: ScopedPrincipal | None = None,
+        endpoint: str = "scope",
+        method: str = "GET",
+    ) -> str | ScopedApiError:
+        """Mint or refresh one nonce for a live, uniquely owned exact scope."""
+
+        if type(path) is not ScopeApiPathEcho:
+            return ScopedApiError(400, "invalid_scoped_request")
+        try:
+            authenticated_principal = _require_principal(principal)
+            route = ScopeRouteSpec(endpoint=endpoint, method=method)
+        except ValueError:
+            if principal is None:
+                return ScopedApiError(403, "scope_principal_required")
+            return ScopedApiError(400, "invalid_scoped_request")
+        scope = self.resolve(path.bot_ref, path.persona_ref, path.session_ref)
+        if isinstance(scope, ScopedApiError):
+            return scope
         if not self._registry.is_live_session(scope):
             return ScopedApiError(410, "scope_required")
         relation = self._registry.unique_relation_for_scope(scope)
@@ -392,6 +496,9 @@ class ScopedApiService:
                 scope,
                 relation.scope,
                 turn_generation=turn_generation,
+                principal=authenticated_principal,
+                endpoint=route.endpoint,
+                method=route.method,
             )
         except RuntimeError:
             return ScopedApiError(410, "scope_required")
@@ -402,10 +509,19 @@ class ScopedApiService:
         relation_scope: RelationScope,
         *,
         turn_generation: int,
+        principal: ScopedPrincipal,
+        endpoint: str = "state",
+        method: str = "GET",
     ) -> str:
         """Mint one opaque bearer capability after exact live-scope validation."""
 
-        record = self._validated_record(scope, relation_scope, turn_generation)
+        record = self._validated_record(
+            scope,
+            relation_scope,
+            turn_generation,
+            principal=_require_principal(principal),
+            action=_scoped_action(endpoint, method),
+        )
         nonce = f"{_NONCE_PREFIX}{secrets.token_urlsafe(24)}"
         with self._lock:
             self._purge_expired_locked(self._clock_ms())
@@ -424,6 +540,8 @@ class ScopedApiService:
             return ScopedApiError(400, "scope_nonce_required")
         if not _is_shaped_nonce(request.nonce, _NONCE_PREFIX):
             return ScopedApiError(400, "invalid_scope_nonce")
+        if request.principal is None:
+            return ScopedApiError(403, "scope_principal_required")
         now_ms = self._clock_ms()
         with self._lock:
             self._purge_expired_locked(now_ms)
@@ -440,6 +558,13 @@ class ScopedApiService:
             # Reject before repository lookup so a sibling path cannot reveal
             # whether any of its opaque tokens exist.
             return ScopedApiError(403, "scope_nonce_mismatch")
+        if (
+            _require_principal(request.principal) != record.principal
+            or _scoped_action(request.endpoint, request.method) != record.action
+        ):
+            # This token is already retired above. A mismatched request must
+            # never consult a scope, relation, or transport runtime.
+            return ScopedApiError(409, "scope_nonce_binding_mismatch")
         return self._authorize_record(record, now_ms)
 
     def revalidate(
@@ -457,6 +582,8 @@ class ScopedApiService:
             relation_scope=authorization.relation_scope,
             turn_generation=authorization.turn_generation,
             expires_at_ms=authorization.expires_at_ms,
+            principal=authorization.principal,
+            action=authorization.action,
         )
         result = self._authorize_record(record, self._clock_ms(), stream=True)
         return authorization if isinstance(result, ScopedApiAuthorization) else result
@@ -527,6 +654,8 @@ class ScopedApiService:
             relation_scope=record.relation_scope,
             turn_generation=record.turn_generation,
             expires_at_ms=record.expires_at_ms,
+            principal=record.principal,
+            action=record.action,
             echo=ScopeApiEcho(
                 scope=ScopeApiPathEcho(
                     bot_ref=resolved.bot_ref.token,
@@ -550,6 +679,9 @@ class ScopedApiService:
         scope: SessionScope,
         relation_scope: RelationScope,
         turn_generation: int,
+        *,
+        principal: ScopedPrincipal,
+        action: str,
     ) -> _NonceRecord:
         if type(scope) is not SessionScope:
             raise ValueError("scope must be a SessionScope")
@@ -557,6 +689,13 @@ class ScopedApiService:
             raise ValueError("relation_scope must be a RelationScope")
         if type(turn_generation) is not int or turn_generation < 0:
             raise ValueError("turn_generation must be a non-negative int")
+        if type(principal) is not ScopedPrincipal:
+            raise ValueError("principal must be a ScopedPrincipal")
+        if type(action) is not str or action not in {
+            _scoped_action(endpoint, method)
+            for endpoint, method in SCOPED_API_METHODS.items()
+        }:
+            raise ValueError("action must be a supported scoped API action")
         if (
             relation_scope.bot_ref != scope.bot_ref
             or relation_scope.persona_ref != scope.persona_ref
@@ -568,6 +707,8 @@ class ScopedApiService:
             relation_scope=relation_scope,
             turn_generation=turn_generation,
             expires_at_ms=now_ms + self._nonce_ttl_ms,
+            principal=principal,
+            action=action,
         )
         validated = self._authorize_record(record, now_ms)
         if isinstance(validated, ScopedApiError):
@@ -581,6 +722,33 @@ class ScopedApiService:
             and path.persona_ref == scope.persona_ref.token
             and path.session_ref == scope.session_ref.token
         )
+
+    def _missing_parent_error(self, path: ScopeApiPathEcho) -> ScopedApiError:
+        """Classify only parent ownership after an exact lookup has missed.
+
+        The catalog is used strictly as an existence/parentage index.  Its
+        entries are never selected or returned, so an exact path cannot fall
+        back to a sibling Bot, Persona, or Session.
+        """
+
+        try:
+            scopes = self._repository.list_active_scopes()
+        except (OSError, RepositoryCorruptionError, TypeError, ValueError):
+            return ScopedApiError(503, "scope_repository_unavailable")
+        if not any(scope.bot_ref.token == path.bot_ref for scope in scopes):
+            return ScopedApiError(404, "scope_bot_not_found")
+        has_requested_persona_parent = any(
+            scope.bot_ref.token == path.bot_ref
+            and scope.persona_ref.token == path.persona_ref
+            for scope in scopes
+        )
+        if not has_requested_persona_parent:
+            if any(scope.persona_ref.token == path.persona_ref for scope in scopes):
+                return ScopedApiError(403, "scope_persona_not_owned")
+            return ScopedApiError(404, "scope_persona_not_found")
+        if any(scope.session_ref.token == path.session_ref for scope in scopes):
+            return ScopedApiError(403, "scope_session_not_owned")
+        return ScopedApiError(404, "scope_session_not_found")
 
     @staticmethod
     def _turn_matches(
@@ -671,10 +839,12 @@ def issue_scoped_api_nonce_for_binding(
     relation_runtime = getattr(binding, "relation_runtime", None)
     relation_scope = getattr(relation_runtime, "scope", None)
     turn_generation = getattr(binding, "turn_generation", None)
+    principal = getattr(binding, "principal", None)
     if (
         type(scope) is not SessionScope
         or type(relation_scope) is not RelationScope
         or type(turn_generation) is not int
+        or type(principal) is not ScopedPrincipal
     ):
         return None
     try:
@@ -682,6 +852,7 @@ def issue_scoped_api_nonce_for_binding(
             scope,
             relation_scope,
             turn_generation=turn_generation,
+            principal=principal,
         )
     except Exception:  # noqa: BLE001 - an unavailable private scope mints nothing
         return None
@@ -690,8 +861,10 @@ def issue_scoped_api_nonce_for_binding(
 __all__ = [
     "SCOPED_API_ENDPOINTS",
     "SCOPED_API_METHODS",
+    "SCOPED_API_ROUTE_SPECS",
     "SCOPED_API_ROOT",
     "SCOPE_NONCE_HEADER",
+    "ScopeRouteSpec",
     "ScopedApiAuthorization",
     "ScopedApiError",
     "ScopedApiRequest",
@@ -699,4 +872,5 @@ __all__ = [
     "issue_scoped_api_nonce_for_binding",
     "scoped_api_service_for_plugin",
     "scoped_api_path",
+    "scoped_api_route_spec",
 ]

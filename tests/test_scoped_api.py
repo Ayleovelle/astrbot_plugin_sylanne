@@ -17,23 +17,32 @@ from sylanne_alpha.scope_contracts import (
     PersonaRevisionRef,
     RelationRef,
     ScopeApiPathEcho,
+    ScopedPrincipal,
     SessionRef,
     SessionScope,
 )
 from sylanne_alpha.scope_repository import ScopeRepository
 from sylanne_alpha.scope_runtime import ScopeRuntimeRegistry
 from sylanne_alpha.scoped_api import (
+    SCOPED_API_ROUTE_SPECS,
+    ScopeRouteSpec,
     ScopedApiAuthorization,
     ScopedApiError,
     ScopedApiRequest,
     ScopedApiService,
+    scoped_api_route_spec,
 )
 
 
-def _scope(*, session_token: str = "session_v1_api") -> SessionScope:
-    bot = BotRef(token="bot_v1_api", generation=0)
+def _scope(
+    *,
+    bot_token: str = "bot_v1_api",
+    persona_token: str = "persona_v1_api",
+    session_token: str = "session_v1_api",
+) -> SessionScope:
+    bot = BotRef(token=bot_token, generation=0)
     persona = PersonaRevisionRef(
-        token="persona_v1_api",
+        token=persona_token,
         bot_ref=bot,
         persona_id_digest="a" * 64,
         source_fingerprint="b" * 64,
@@ -95,7 +104,23 @@ def _request(scope: SessionScope, nonce: str | None) -> ScopedApiRequest:
         session_ref=scope.session_ref.token,
         nonce=nonce,
         endpoint="state",
+        principal=_principal(),
     )
+
+
+def _principal(token: str = "principal_v1_scoped_api") -> ScopedPrincipal:
+    return ScopedPrincipal(token=token)
+
+
+def test_scoped_route_specs_are_immutable_and_bind_the_method_to_each_action() -> None:
+    state = scoped_api_route_spec("state")
+    melt = scoped_api_route_spec("memory/meltdown")
+
+    assert state == ScopeRouteSpec(endpoint="state", method="GET")
+    assert state.action == "GET:state"
+    assert melt.action == "POST:memory/meltdown"
+    with pytest.raises(TypeError):
+        SCOPED_API_ROUTE_SPECS["state"] = state  # type: ignore[index]
 
 
 def _safe_genesis_profile() -> dict[str, object]:
@@ -197,7 +222,7 @@ def test_persona_dossier_is_two_level_and_fail_closed(tmp_path, monkeypatch) -> 
 def test_scoped_nonce_is_single_use_and_returns_only_scope_echo(tmp_path) -> None:
     service, _repository, _registry, scope, relation = _service(tmp_path)
 
-    nonce = service.issue_nonce(scope, relation, turn_generation=7)
+    nonce = service.issue_nonce(scope, relation, turn_generation=7, principal=_principal())
     result = service.authorize(_request(scope, nonce))
 
     assert isinstance(result, ScopedApiAuthorization)
@@ -212,14 +237,183 @@ def test_scoped_nonce_is_single_use_and_returns_only_scope_echo(tmp_path) -> Non
         "session_ref": scope.session_ref.token,
     }
     assert public["scope_generation"] == scope.scope_generation
+    assert public["resolved_at_ms"] == 1_000
     assert public["generations"]["relation"] == relation.relation_generation
     assert "relation_v1_" not in repr(public)
+    assert "principal_v1_" not in repr(public)
     assert "memory" not in repr(public)
 
     replay = service.authorize(_request(scope, nonce))
     assert isinstance(replay, ScopedApiError)
     assert replay.status == 403
     assert replay.code == "scope_nonce_replayed"
+
+
+def test_scope_resolver_distinguishes_absent_and_wrong_parents_without_selection(tmp_path) -> None:
+    service, repository, _registry, scope, _relation = _service(tmp_path)
+    other = repository.create_scope(
+        _scope(
+            bot_token="bot_v1_other",
+            persona_token="persona_v1_other",
+            session_token="session_v1_other",
+        ),
+        expected_absent=True,
+    )
+
+    missing_bot = service.resolve(
+        "bot_v1_missing",
+        scope.persona_ref.token,
+        scope.session_ref.token,
+    )
+    assert isinstance(missing_bot, ScopedApiError)
+    assert (missing_bot.status, missing_bot.code) == (404, "scope_bot_not_found")
+
+    wrong_persona = service.resolve(
+        scope.bot_ref.token,
+        other.persona_ref.token,
+        scope.session_ref.token,
+    )
+    assert isinstance(wrong_persona, ScopedApiError)
+    assert (wrong_persona.status, wrong_persona.code) == (403, "scope_persona_not_owned")
+
+    wrong_session = service.resolve(
+        scope.bot_ref.token,
+        scope.persona_ref.token,
+        other.session_ref.token,
+    )
+    assert isinstance(wrong_session, ScopedApiError)
+    assert (wrong_session.status, wrong_session.code) == (403, "scope_session_not_owned")
+
+
+def test_scoped_nonce_rejects_cross_principal_or_action_before_data_access(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository, _registry, scope, relation = _service(tmp_path)
+    owner = _principal("principal_v1_owner")
+    other = _principal("principal_v1_other")
+    principal_nonce = service.issue_nonce(
+        scope,
+        relation,
+        turn_generation=7,
+        principal=owner,
+        endpoint="state",
+    )
+    action_nonce = service.issue_nonce(
+        scope,
+        relation,
+        turn_generation=7,
+        principal=owner,
+        endpoint="state",
+    )
+
+    def no_data_access(*_args: object, **_kwargs: object) -> SessionScope:
+        raise AssertionError("principal/action nonce mismatch must reject before scope lookup")
+
+    monkeypatch.setattr(repository, "resolve_exact_scope", no_data_access)
+    missing_principal = ScopedApiRequest.from_tokens(
+        bot_ref=scope.bot_ref.token,
+        persona_ref=scope.persona_ref.token,
+        session_ref=scope.session_ref.token,
+        nonce=principal_nonce,
+        endpoint="state",
+    )
+    missing_principal_error = service.authorize(missing_principal)
+    assert isinstance(missing_principal_error, ScopedApiError)
+    assert (missing_principal_error.status, missing_principal_error.code) == (
+        403,
+        "scope_principal_required",
+    )
+
+    cross_principal = ScopedApiRequest.from_tokens(
+        bot_ref=scope.bot_ref.token,
+        persona_ref=scope.persona_ref.token,
+        session_ref=scope.session_ref.token,
+        nonce=principal_nonce,
+        endpoint="state",
+        principal=other,
+    )
+    principal_error = service.authorize(cross_principal)
+    assert isinstance(principal_error, ScopedApiError)
+    assert (principal_error.status, principal_error.code) == (
+        409,
+        "scope_nonce_binding_mismatch",
+    )
+
+    cross_action = ScopedApiRequest.from_tokens(
+        bot_ref=scope.bot_ref.token,
+        persona_ref=scope.persona_ref.token,
+        session_ref=scope.session_ref.token,
+        nonce=action_nonce,
+        endpoint="diagnostics",
+        principal=owner,
+    )
+    action_error = service.authorize(cross_action)
+    assert isinstance(action_error, ScopedApiError)
+    assert (action_error.status, action_error.code) == (
+        409,
+        "scope_nonce_binding_mismatch",
+    )
+
+    replay = service.authorize(cross_principal)
+    assert isinstance(replay, ScopedApiError)
+    assert (replay.status, replay.code) == (403, "scope_nonce_replayed")
+
+
+def test_bootstrap_nonce_binds_the_explicit_requested_route_action(tmp_path) -> None:
+    service, _repository, _registry, scope, _relation = _service(tmp_path)
+    owner = _principal("principal_v1_bootstrap_owner")
+    path = ScopeApiPathEcho(
+        bot_ref=scope.bot_ref.token,
+        persona_ref=scope.persona_ref.token,
+        session_ref=scope.session_ref.token,
+    )
+    nonce = service.bootstrap_nonce(
+        path,
+        principal=owner,
+        endpoint="diagnostics",
+    )
+
+    assert isinstance(nonce, str)
+    authorized = service.authorize(
+        ScopedApiRequest.from_tokens(
+            bot_ref=scope.bot_ref.token,
+            persona_ref=scope.persona_ref.token,
+            session_ref=scope.session_ref.token,
+            nonce=nonce,
+            endpoint="diagnostics",
+            principal=owner,
+        )
+    )
+    assert isinstance(authorized, ScopedApiAuthorization)
+
+    replay_nonce = service.bootstrap_nonce(
+        path,
+        principal=owner,
+        endpoint="diagnostics",
+    )
+    assert isinstance(replay_nonce, str)
+    cross_action = service.authorize(
+        ScopedApiRequest.from_tokens(
+            bot_ref=scope.bot_ref.token,
+            persona_ref=scope.persona_ref.token,
+            session_ref=scope.session_ref.token,
+            nonce=replay_nonce,
+            endpoint="state",
+            principal=owner,
+        )
+    )
+    assert isinstance(cross_action, ScopedApiError)
+    assert (cross_action.status, cross_action.code) == (409, "scope_nonce_binding_mismatch")
+
+    invalid_method = service.bootstrap_nonce(
+        path,
+        principal=owner,
+        endpoint="memory/meltdown",
+        method="GET",
+    )
+    assert isinstance(invalid_method, ScopedApiError)
+    assert (invalid_method.status, invalid_method.code) == (400, "invalid_scoped_request")
 
 
 def test_scope_catalog_bootstrap_is_redacted_and_refreshes_exact_nonce(tmp_path) -> None:
@@ -252,29 +446,52 @@ def test_scope_catalog_bootstrap_is_redacted_and_refreshes_exact_nonce(tmp_path)
     assert "storage_token" not in repr(catalog)
     assert "relation" not in repr(catalog)
 
-    first = service.bootstrap_nonce(path)
-    second = service.bootstrap_nonce(path)
+    first = service.bootstrap_nonce(path, principal=_principal())
+    second = service.bootstrap_nonce(path, principal=_principal())
     assert isinstance(first, str)
     assert isinstance(second, str)
     assert first != second
-    assert isinstance(service.authorize(_request(scope, first)), ScopedApiAuthorization)
-    assert isinstance(service.authorize(_request(scope, second)), ScopedApiAuthorization)
+    assert isinstance(
+        service.authorize(
+            ScopedApiRequest.from_tokens(
+                bot_ref=scope.bot_ref.token,
+                persona_ref=scope.persona_ref.token,
+                session_ref=scope.session_ref.token,
+                nonce=first,
+                principal=_principal(),
+            )
+        ),
+        ScopedApiAuthorization,
+    )
+    assert isinstance(
+        service.authorize(
+            ScopedApiRequest.from_tokens(
+                bot_ref=scope.bot_ref.token,
+                persona_ref=scope.persona_ref.token,
+                session_ref=scope.session_ref.token,
+                nonce=second,
+                principal=_principal(),
+            )
+        ),
+        ScopedApiAuthorization,
+    )
 
     absent = service.bootstrap_nonce(
         ScopeApiPathEcho(
             bot_ref=scope.bot_ref.token,
             persona_ref=scope.persona_ref.token,
             session_ref="session_v1_absent",
-        )
+        ),
+        principal=_principal(),
     )
     assert isinstance(absent, ScopedApiError)
     assert absent.status == 404
-    assert absent.code == "scope_not_found"
+    assert absent.code == "scope_session_not_found"
 
 
 def test_issued_nonce_returns_conflict_when_its_scope_is_purged(tmp_path) -> None:
     service, repository, _registry, scope, relation = _service(tmp_path)
-    nonce = service.issue_nonce(scope, relation, turn_generation=7)
+    nonce = service.issue_nonce(scope, relation, turn_generation=7, principal=_principal())
     repository.scope_meta_path(scope).unlink()
 
     stale = service.authorize(_request(scope, nonce))
@@ -286,7 +503,7 @@ def test_issued_nonce_returns_conflict_when_its_scope_is_purged(tmp_path) -> Non
 
 def test_scope_echo_includes_every_public_generation_fence(tmp_path) -> None:
     service, _repository, _registry, scope, relation = _service(tmp_path)
-    nonce = service.issue_nonce(scope, relation, turn_generation=7)
+    nonce = service.issue_nonce(scope, relation, turn_generation=7, principal=_principal())
 
     result = service.authorize(_request(scope, nonce))
 
@@ -322,7 +539,7 @@ def test_issued_nonce_rejects_every_frozen_turn_fence_drift(
     service, _repository, _registry, scope, relation = _service(tmp_path)
     turn = _frozen_turn(scope)
     service._turn_lookup = lambda candidate: turn if candidate == scope else None
-    nonce = service.issue_nonce(scope, relation, turn_generation=7)
+    nonce = service.issue_nonce(scope, relation, turn_generation=7, principal=_principal())
     setattr(turn, field, value)
 
     stale = service.authorize(_request(scope, nonce))
@@ -334,7 +551,12 @@ def test_issued_nonce_rejects_every_frozen_turn_fence_drift(
 
 def test_issued_nonce_rejects_relation_and_scope_generation_staleness(tmp_path) -> None:
     service, repository, _registry, scope, relation = _service(tmp_path)
-    relation_nonce = service.issue_nonce(scope, relation, turn_generation=7)
+    relation_nonce = service.issue_nonce(
+        scope,
+        relation,
+        turn_generation=7,
+        principal=_principal(),
+    )
     repository.invalidate_relation(
         relation,
         expected_relation_generation=relation.relation_generation,
@@ -346,7 +568,7 @@ def test_issued_nonce_rejects_relation_and_scope_generation_staleness(tmp_path) 
     assert relation_stale.status == 409
 
     service, repository, _registry, scope, relation = _service(tmp_path / "scope")
-    scope_nonce = service.issue_nonce(scope, relation, turn_generation=7)
+    scope_nonce = service.issue_nonce(scope, relation, turn_generation=7, principal=_principal())
     repository.invalidate_scope(
         scope,
         expected_scope_generation=scope.scope_generation,
@@ -363,7 +585,7 @@ def test_issued_nonce_maps_runtime_loss_to_410_and_repository_failure_to_503(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service, repository, registry, scope, relation = _service(tmp_path)
-    runtime_nonce = service.issue_nonce(scope, relation, turn_generation=7)
+    runtime_nonce = service.issue_nonce(scope, relation, turn_generation=7, principal=_principal())
     registry.release_session(scope)
 
     runtime_error = service.authorize(_request(scope, runtime_nonce))
@@ -372,7 +594,12 @@ def test_issued_nonce_maps_runtime_loss_to_410_and_repository_failure_to_503(
     assert runtime_error.code == "scope_required"
 
     service, repository, _registry, scope, relation = _service(tmp_path / "repository")
-    repository_nonce = service.issue_nonce(scope, relation, turn_generation=7)
+    repository_nonce = service.issue_nonce(
+        scope,
+        relation,
+        turn_generation=7,
+        principal=_principal(),
+    )
     monkeypatch.setattr(
         repository,
         "resolve_exact_scope",
@@ -387,7 +614,7 @@ def test_issued_nonce_maps_runtime_loss_to_410_and_repository_failure_to_503(
 
 def test_scoped_nonce_expiry_and_ambiguous_bootstrap_fail_closed(tmp_path) -> None:
     service, _repository, registry, scope, relation = _service(tmp_path)
-    nonce = service.issue_nonce(scope, relation, turn_generation=7)
+    nonce = service.issue_nonce(scope, relation, turn_generation=7, principal=_principal())
     expiry = service._pending_nonces[nonce].expires_at_ms
     service._clock_ms = lambda: expiry + 1
 
@@ -413,7 +640,8 @@ def test_scoped_nonce_expiry_and_ambiguous_bootstrap_fail_closed(tmp_path) -> No
             bot_ref=scope.bot_ref.token,
             persona_ref=scope.persona_ref.token,
             session_ref=scope.session_ref.token,
-        )
+        ),
+        principal=_principal(),
     )
     assert isinstance(bootstrap, ScopedApiError)
     assert bootstrap.status == 410
@@ -422,7 +650,7 @@ def test_scoped_nonce_expiry_and_ambiguous_bootstrap_fail_closed(tmp_path) -> No
 def test_scoped_nonce_path_substitution_fails_without_resolving_sibling(tmp_path, monkeypatch) -> None:
     service, repository, _registry, scope, relation = _service(tmp_path)
     sibling = repository.create_scope(_scope(session_token="session_v1_sibling"), expected_absent=True)
-    nonce = service.issue_nonce(scope, relation, turn_generation=7)
+    nonce = service.issue_nonce(scope, relation, turn_generation=7, principal=_principal())
 
     def no_sibling_resolution(*_args, **_kwargs):
         raise AssertionError("cross-scope nonce must be rejected before lookup")
@@ -438,7 +666,7 @@ def test_scoped_nonce_path_substitution_fails_without_resolving_sibling(tmp_path
 
 def test_scoped_stream_revalidates_live_owner_before_each_send(tmp_path) -> None:
     service, _repository, registry, scope, relation = _service(tmp_path)
-    nonce = service.issue_nonce(scope, relation, turn_generation=7)
+    nonce = service.issue_nonce(scope, relation, turn_generation=7, principal=_principal())
     authorization = service.authorize(_request(scope, nonce))
     assert isinstance(authorization, ScopedApiAuthorization)
 
@@ -477,7 +705,7 @@ def test_shaped_but_unissued_scope_nonce_is_invalid(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_astrbot_scoped_handler_delegates_to_the_shared_service(
+async def test_astrbot_scoped_handler_fails_closed_without_a_principal_adapter(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -485,7 +713,7 @@ async def test_astrbot_scoped_handler_delegates_to_the_shared_service(
     from sylanne_alpha.webui_routes import WebUIRoutes
 
     service, _repository, _registry, scope, relation = _service(tmp_path)
-    nonce = service.issue_nonce(scope, relation, turn_generation=7)
+    nonce = service.issue_nonce(scope, relation, turn_generation=7, principal=_principal())
     web = ModuleType("astrbot.api.web")
     web.request = SimpleNamespace(
         headers={SCOPE_NONCE_HEADER: nonce},
@@ -503,9 +731,8 @@ async def test_astrbot_scoped_handler_delegates_to_the_shared_service(
         "state"
     )
 
-    assert payload["ok"] is True
-    assert payload["scope"]["bot_ref"] == scope.bot_ref.token
-    assert payload["generations"]["turn"] == 7
+    assert payload == {"error": "scope_principal_required", "status": 403}
+    assert nonce in service._pending_nonces
 
 
 @pytest.mark.asyncio
@@ -625,48 +852,46 @@ async def test_scoped_read_dtos_are_real_and_strictly_redacted(
 
     payloads = {}
     for endpoint in ("state", "observation-history", "diagnostics", "memory-pools"):
-        nonce = service.issue_nonce(scope, relation, turn_generation=7)
+        nonce = service.issue_nonce(
+            scope,
+            relation,
+            turn_generation=7,
+            principal=_principal(),
+            endpoint=endpoint,
+        )
         install_request(endpoint, nonce)
         payloads[endpoint] = await routes.scoped_api_handler(endpoint)
 
-    assert payloads["state"]["state"]["tick_count"] == 12
-    assert payloads["observation-history"]["observation_history"]["sample_count"] == 1
-    assert payloads["diagnostics"]["diagnostics"]["route_counts"]["resonance"] == 4
-    assert payloads["memory-pools"]["memory_pools"] == {
-        "l1_count": 2,
-        "l2_count": 1,
-        "l3_node_count": 1,
-        "l3_edge_count": 1,
-        "tick": 9,
-    }
     for payload in payloads.values():
+        assert payload == {"error": "scope_principal_required", "status": 403}
         rendered = repr(payload)
         assert secret not in rendered
         assert scope.storage_token not in rendered
         assert "hidden-topic" not in rendered
 
-    nonce = service.issue_nonce(scope, relation, turn_generation=7)
-    install_request("memory/meltdown-nonce", nonce)
-    melt_nonce_payload = await routes.scoped_api_handler("memory/meltdown-nonce")
-    melt_nonce = melt_nonce_payload["meltdown_nonce"]
-    assert plugin._meltdown_nonces == {scope.storage_token: melt_nonce}
-
-    nonce = service.issue_nonce(scope, relation, turn_generation=7)
+    nonce = service.issue_nonce(
+        scope,
+        relation,
+        turn_generation=7,
+        principal=_principal(),
+        endpoint="memory/meltdown",
+        method="POST",
+    )
     install_request(
         "memory/meltdown",
         nonce,
         method="POST",
-        body={"meltdown_nonce": melt_nonce},
+        body={"meltdown_nonce": "unreachable"},
     )
-    purged = await routes.scoped_api_handler("memory/meltdown")
-    assert purged["cleared"] is True
+    blocked = await routes.scoped_api_handler("memory/meltdown")
+    assert blocked == {"error": "scope_principal_required", "status": 403}
     assert plugin._meltdown_nonces == {}
-    assert memory._l1 == []
-    assert memory._l2 == []
-    assert memory._l3_nodes == {}
-    assert memory._l3_edges == []
-    assert host.kernel.body.memory["traces"] == []
-    assert persistence.purged == [scope.storage_token]
+    assert memory._l1 == [memory._l1[0], memory._l1[1]]
+    assert memory._l2 == [memory._l2[0]]
+    assert memory._l3_nodes == {"hidden-topic": memory._l3_nodes["hidden-topic"]}
+    assert memory._l3_edges == [("hidden-a", "hidden-b")]
+    assert host.kernel.body.memory["traces"] == [secret]
+    assert persistence.purged == []
 
 
 def test_scope_service_has_no_private_meltdown_nonce_store(tmp_path) -> None:
@@ -684,6 +909,7 @@ def test_only_a_frozen_relation_runtime_binding_can_issue_a_scope_nonce(tmp_path
         scope=scope,
         relation_runtime=SimpleNamespace(scope=relation),
         turn_generation=7,
+        principal=_principal(),
     )
 
     nonce = issue_scoped_api_nonce_for_binding(service, binding)
@@ -702,7 +928,7 @@ def _unused_local_port() -> int:
 
 
 @pytest.mark.asyncio
-async def test_aiohttp_scoped_route_uses_the_same_gate_and_retires_legacy_path(
+async def test_aiohttp_scoped_route_fails_closed_without_a_principal_adapter(
     tmp_path,
 ) -> None:
     from aiohttp import ClientSession
@@ -732,7 +958,13 @@ async def test_aiohttp_scoped_route_uses_the_same_gate_and_retires_legacy_path(
             ),
             "state",
         )
-        nonce = service.issue_nonce(scope, relation, turn_generation=7)
+        nonce = service.issue_nonce(
+            scope,
+            relation,
+            turn_generation=7,
+            principal=_principal(),
+            endpoint="state",
+        )
         async with ClientSession(headers={"Authorization": f"Bearer {token}"}) as client:
             response = None
             for _ in range(100):
@@ -746,11 +978,9 @@ async def test_aiohttp_scoped_route_uses_the_same_gate_and_retires_legacy_path(
                     await asyncio.sleep(0.01)
             assert response is not None
             async with response:
-                assert response.status == 200
-                payload = await response.json()
-                assert payload["ok"] is True
-                assert payload["scope"]["session_ref"] == scope.session_ref.token
-                assert payload["generations"]["scope"] == scope.scope_generation
+                assert response.status == 403
+                assert await response.json() == {"error": "scope_principal_required"}
+            assert nonce in service._pending_nonces
             legacy = await client.get(f"http://127.0.0.1:{port}/api/state")
             async with legacy:
                 assert legacy.status == 410
@@ -762,7 +992,7 @@ async def test_aiohttp_scoped_route_uses_the_same_gate_and_retires_legacy_path(
 
 
 @pytest.mark.asyncio
-async def test_aiohttp_scope_catalog_and_bootstrap_issue_exact_nonce(tmp_path) -> None:
+async def test_aiohttp_scope_bootstrap_fails_closed_without_a_principal_adapter(tmp_path) -> None:
     from aiohttp import ClientSession
 
     from sylanne_alpha import webui_server
@@ -805,24 +1035,8 @@ async def test_aiohttp_scope_catalog_and_bootstrap_issue_exact_nonce(tmp_path) -
                 f"http://127.0.0.1:{port}{bootstrap_path}",
                 headers={"X-CSRF-Token": body["csrf_token"]},
             ) as bootstrap:
-                assert bootstrap.status == 200
-                bootstrap_body = await bootstrap.json()
-            nonce = bootstrap_body["scope_nonce"]
-            assert nonce.startswith("scope_nonce_v1_")
-
-            path = scoped_api_path(
-                ScopeApiPathEcho(
-                    bot_ref=scope.bot_ref.token,
-                    persona_ref=scope.persona_ref.token,
-                    session_ref=scope.session_ref.token,
-                )
-            )
-            async with client.get(
-                f"http://127.0.0.1:{port}{path}",
-                headers={SCOPE_NONCE_HEADER: nonce},
-            ) as scoped:
-                assert scoped.status == 200
-                assert (await scoped.json())["scope"]["bot_ref"] == scope.bot_ref.token
+                assert bootstrap.status == 403
+                assert await bootstrap.json() == {"error": "scope_principal_required"}
     finally:
         task.cancel()
         await task
@@ -880,8 +1094,8 @@ async def test_aiohttp_persona_dossier_is_two_level_and_rejects_session_selector
 
 
 @pytest.mark.asyncio
-async def test_scoped_websocket_emits_one_stale_marker_then_closes(tmp_path) -> None:
-    from aiohttp import ClientSession, WSMsgType
+async def test_scoped_websocket_fails_closed_without_a_principal_adapter(tmp_path) -> None:
+    from aiohttp import ClientSession
 
     from sylanne_alpha import webui_server
     from sylanne_alpha.scoped_api import SCOPE_NONCE_HEADER, scoped_api_path
@@ -908,29 +1122,29 @@ async def test_scoped_websocket_emits_one_stale_marker_then_closes(tmp_path) -> 
             ),
             "ws",
         )
-        nonce = service.issue_nonce(scope, relation, turn_generation=7)
+        nonce = service.issue_nonce(
+            scope,
+            relation,
+            turn_generation=7,
+            principal=_principal(),
+            endpoint="ws",
+        )
         async with ClientSession(headers={"Authorization": f"Bearer {token}"}) as client:
-            socket = None
+            response = None
             for _ in range(100):
                 try:
-                    socket = await client.ws_connect(
+                    response = await client.get(
                         f"http://127.0.0.1:{port}{path}",
                         headers={SCOPE_NONCE_HEADER: nonce},
                     )
                     break
                 except OSError:
                     await asyncio.sleep(0.01)
-            assert socket is not None
-            first = await socket.receive(timeout=2)
-            assert first.type is WSMsgType.TEXT
-            assert first.json()["event"] == "scope_status"
-            registry.release_session(scope)
-            stale = await socket.receive(timeout=2)
-            assert stale.type is WSMsgType.TEXT
-            assert stale.json() == {"event": "scope_stale", "data": {"error": "scope_stale"}}
-            closed = await socket.receive(timeout=2)
-            assert closed.type in {WSMsgType.CLOSE, WSMsgType.CLOSED}
-            assert socket.close_code == 4409
+            assert response is not None
+            async with response:
+                assert response.status == 403
+                assert await response.json() == {"error": "scope_principal_required"}
+            assert nonce in service._pending_nonces
     finally:
         task.cancel()
         await task
@@ -938,12 +1152,10 @@ async def test_scoped_websocket_emits_one_stale_marker_then_closes(tmp_path) -> 
 
 
 @pytest.mark.asyncio
-async def test_scoped_sse_revalidates_and_emits_one_stale_marker_then_closes(
+async def test_scoped_sse_fails_closed_without_a_principal_adapter(
     tmp_path,
 ) -> None:
     """The real SSE loop must fence every emission after the initial status."""
-
-    import json
 
     from aiohttp import ClientSession
 
@@ -972,7 +1184,13 @@ async def test_scoped_sse_revalidates_and_emits_one_stale_marker_then_closes(
             ),
             "stream",
         )
-        nonce = service.issue_nonce(scope, relation, turn_generation=7)
+        nonce = service.issue_nonce(
+            scope,
+            relation,
+            turn_generation=7,
+            principal=_principal(),
+            endpoint="stream",
+        )
         async with ClientSession(headers={"Authorization": f"Bearer {token}"}) as client:
             response = None
             for _ in range(100):
@@ -986,27 +1204,9 @@ async def test_scoped_sse_revalidates_and_emits_one_stale_marker_then_closes(
                     await asyncio.sleep(0.01)
             assert response is not None
             async with response:
-                assert response.status == 200
-                assert await asyncio.wait_for(response.content.readline(), timeout=2) == (
-                    b"event: scope_status\n"
-                )
-                assert json.loads(
-                    (await asyncio.wait_for(response.content.readline(), timeout=2)).decode()
-                    .removeprefix("data: ")
-                )["ok"] is True
-                assert await asyncio.wait_for(response.content.readline(), timeout=2) == b"\n"
-
-                registry.release_session(scope)
-
-                assert await asyncio.wait_for(response.content.readline(), timeout=2) == (
-                    b"event: scope_stale\n"
-                )
-                assert json.loads(
-                    (await asyncio.wait_for(response.content.readline(), timeout=2)).decode()
-                    .removeprefix("data: ")
-                ) == service.stream_stale_payload()
-                assert await asyncio.wait_for(response.content.readline(), timeout=2) == b"\n"
-                assert await asyncio.wait_for(response.content.readline(), timeout=2) == b""
+                assert response.status == 403
+                assert await response.json() == {"error": "scope_principal_required"}
+            assert nonce in service._pending_nonces
     finally:
         task.cancel()
         await task

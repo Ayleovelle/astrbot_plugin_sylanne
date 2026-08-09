@@ -195,6 +195,16 @@ class RelationRef:
 
 
 @dataclass(frozen=True, slots=True)
+class ScopedPrincipal:
+    """Opaque, host-authenticated authority identity for one scoped API request."""
+
+    token: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        _require_token(self.token, "principal_v1_")
+
+
+@dataclass(frozen=True, slots=True)
 class RelationScope:
     bot_ref: BotRef
     persona_ref: PersonaRevisionRef
@@ -538,6 +548,7 @@ __all__ = [
     "ScopeApiEcho",
     "ScopeApiPathEcho",
     "ScopeDiagnosticEcho",
+    "ScopedPrincipal",
     "SessionRef",
     "SessionScope",
     "TurnDeliveryLease",
