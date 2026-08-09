@@ -27,6 +27,7 @@ _QUARANTINE_SCHEMA = "sylanne.scope.legacy-quarantine.v1"
 _CAPABILITY_ISSUER = object()
 _SOURCE_ISSUER = object()
 _MAX_TEXT_BYTES = 4096
+_MAX_INVENTORY_LIST_LIMIT = 100
 
 
 class LegacyScopeClaimError(RuntimeError):
@@ -51,6 +52,16 @@ class LegacyInventorySource:
     payload_digest: str
     _service_nonce: object = field(repr=False, compare=False)
     _issuer: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyInventoryRecord:
+    """Opaque, safe metadata for one verified legacy source."""
+
+    record_id: str
+    source_kind: str
+    checksum: str
+    byte_size: int
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -628,6 +639,55 @@ class LegacyScopeClaimService:
                 )
                 raise LegacyClaimQuarantined("legacy source lookup was quarantined") from exc
 
+    def list_inventory(self, *, limit: int = _MAX_INVENTORY_LIST_LIMIT) -> tuple[LegacyInventoryRecord, ...]:
+        """Enumerate a bounded, read-only view of strictly verified source metadata."""
+
+        if type(limit) is not int or not 1 <= limit <= _MAX_INVENTORY_LIST_LIMIT:
+            raise ValueError(
+                f"limit must be an exact int from 1 to {_MAX_INVENTORY_LIST_LIMIT}"
+            )
+        records: list[LegacyInventoryRecord] = []
+        try:
+            with self._repository.transaction():
+                manifest = self._repository._read_legacy_unscoped_manifest_locked()
+                inventory = manifest["inventory"]
+                if type(inventory) is not dict:
+                    raise RepositoryCorruptionError("legacy inventory is invalid")
+                for fingerprint in sorted(inventory):
+                    record = inventory[fingerprint]
+                    _require_digest(fingerprint, "source_fingerprint")
+                    if type(record) is not dict or set(record) != {
+                        "actor_id",
+                        "source_id",
+                        "payload_digest",
+                        "source_path",
+                    }:
+                        raise RepositoryCorruptionError("legacy inventory record is invalid")
+                    actor = _require_text(record["actor_id"], "actor_id")
+                    source_id = _require_text(record["source_id"], "source_id")
+                    digest = _require_digest(record["payload_digest"], "payload_digest")
+                    if record["source_path"] != f"sources/{fingerprint}.json":
+                        raise RepositoryCorruptionError("legacy inventory source path is invalid")
+                    source = self._issue_source(
+                        fingerprint=fingerprint,
+                        actor_id=actor,
+                        source_id=source_id,
+                        payload_digest=digest,
+                    )
+                    _manifest, _payload, payload_bytes = self._verified_inventory_locked(source)
+                    if len(records) < limit:
+                        records.append(
+                            LegacyInventoryRecord(
+                                record_id=fingerprint,
+                                source_kind="explicit_memory_snapshot",
+                                checksum=digest,
+                                byte_size=len(payload_bytes),
+                            )
+                        )
+        except (LegacyScopeClaimError, OSError, RepositoryCorruptionError, ValueError) as exc:
+            raise LegacyClaimQuarantined("legacy inventory listing rejected unsafe record") from exc
+        return tuple(records)
+
     def read_inventory_payload(self, source: LegacyInventorySource) -> dict[str, object]:
         """Return a detached source copy for diagnostics; source bytes stay immutable."""
 
@@ -922,6 +982,7 @@ __all__ = [
     "LegacyClaimQuarantined",
     "LegacyClaimResult",
     "LegacyDestinationCapability",
+    "LegacyInventoryRecord",
     "LegacyInventorySource",
     "LegacyScopeClaimError",
     "LegacyScopeClaimService",

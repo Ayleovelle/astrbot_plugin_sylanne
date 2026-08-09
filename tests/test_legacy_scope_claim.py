@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import fields
 
 import pytest
 
@@ -326,3 +327,95 @@ def test_drifted_inventory_source_is_quarantined_without_target_mutation(
         )
     assert repository.read_component(scope, "memory") is None
     assert any((repository.legacy_unscoped_root / "quarantine").glob("*.json"))
+
+
+def test_inventory_list_returns_only_bounded_opaque_metadata_without_mutation(
+    tmp_path,
+    scopes,
+) -> None:
+    """Enumeration never leaks source identifiers, bytes, or target ownership."""
+
+    from sylanne_alpha.legacy_scope_claim import LegacyScopeClaimService
+
+    repository = ScopeRepository(tmp_path / "scope-v1")
+    scope = repository.create_scope(scopes.bot_a_persona_a, expected_absent=True)
+    service = LegacyScopeClaimService(repository)
+    payload = _memory_payload()
+    first = service.inventory_memory(
+        actor_id="platform:operator-a",
+        source_id="self:manual-export-001",
+        payload=payload,
+    )
+    second_payload = _memory_payload()
+    second_payload["tick"] = 1
+    second = service.inventory_memory(
+        actor_id="platform:operator-b",
+        source_id="target:manual-export-002",
+        payload=second_payload,
+    )
+    manifest_before = repository.legacy_unscoped_manifest_path.read_bytes()
+
+    listed = service.list_inventory(limit=1)
+
+    assert len(listed) == 1
+    record = listed[0]
+    assert record.record_id in {first.source_fingerprint, second.source_fingerprint}
+    assert record.source_kind == "explicit_memory_snapshot"
+    assert record.checksum == record.record_id
+    assert record.byte_size > 0
+    assert {field.name for field in fields(type(record))} == {
+        "record_id",
+        "source_kind",
+        "checksum",
+        "byte_size",
+    }
+    rendered = repr(record)
+    assert "platform:operator-a" not in rendered
+    assert "self:manual-export-001" not in rendered
+    assert "target:manual-export-002" not in rendered
+    assert "payload" not in rendered
+    assert "source_path" not in rendered
+    assert repository.legacy_unscoped_manifest_path.read_bytes() == manifest_before
+    assert repository.read_component(scope, "memory") is None
+    assert not (repository.legacy_unscoped_root / "quarantine").exists()
+
+
+def test_inventory_list_fails_closed_on_malformed_source_without_quarantine_mutation(
+    tmp_path,
+    scopes,
+) -> None:
+    """A read-only listing rejects malformed durable bytes without side effects."""
+
+    from sylanne_alpha.legacy_scope_claim import (
+        LegacyClaimQuarantined,
+        LegacyScopeClaimService,
+    )
+
+    repository = ScopeRepository(tmp_path / "scope-v1")
+    scope = repository.create_scope(scopes.bot_a_persona_a, expected_absent=True)
+    service = LegacyScopeClaimService(repository)
+    source = service.inventory_memory(
+        actor_id="operator-a",
+        source_id="manual-export-001",
+        payload=_memory_payload(),
+    )
+    with repository.transaction():
+        repository._write_legacy_unscoped_source_locked(
+            source.source_fingerprint,
+            {
+                "schema_version": "sylanne.scope.legacy-source.v1",
+                "source_fingerprint": source.source_fingerprint,
+                "actor_id": source.actor_id,
+                "source_id": source.source_id,
+                "payload_digest": source.payload_digest,
+                "payload": {"not": "a strict memory snapshot"},
+            },
+        )
+    manifest_before = repository.legacy_unscoped_manifest_path.read_bytes()
+
+    with pytest.raises(LegacyClaimQuarantined, match="legacy inventory listing"):
+        service.list_inventory()
+
+    assert repository.legacy_unscoped_manifest_path.read_bytes() == manifest_before
+    assert repository.read_component(scope, "memory") is None
+    assert not (repository.legacy_unscoped_root / "quarantine").exists()
