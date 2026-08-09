@@ -159,7 +159,7 @@ def test_using_llm_tool_hook_is_not_an_llm_function_tool() -> None:
     tree = _tree(MAIN_PATH)
     hook = _function(tree, "on_using_llm_tool")
     decorators = _decorator_names(hook)
-    assert decorators == {"_optional_tool_use_filter"}
+    assert decorators == {"_optional_tool_use_filter", "_scoped_private_event_hook"}
 
     resolver = _function(tree, "_optional_tool_use_filter")
     string_constants = {

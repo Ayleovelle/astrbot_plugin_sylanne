@@ -14,6 +14,7 @@ import pytest
 
 from sylanne_alpha.scope_contracts import PersonaScope, ScopeApiPathEcho, ScopedPrincipal
 from sylanne_alpha.scoped_api import (
+    PERSONA_DOSSIER_ROUTE_SPEC,
     SCOPE_NONCE_HEADER,
     ScopedApiError,
     scoped_api_path,
@@ -74,7 +75,7 @@ def test_host_grant_is_fail_closed_without_an_authority_mapping() -> None:
     assert plugin._scoped_api_principal_persona_grant(
         principal,
         PersonaScope(bot_ref=scope.bot_ref, persona_ref=scope.persona_ref),
-        "GET:dossier",
+        PERSONA_DOSSIER_ROUTE_SPEC.action,
     ) is None
 
 
@@ -354,6 +355,238 @@ async def test_pages_sse_emits_one_scope_invalidated_frame_then_closes() -> None
     assert frames == [
         'event: scope_invalidated\ndata: {"event":"scope_invalidated","data":{"error":"scope_invalidated"}}\n\n'
     ]
+
+
+@pytest.mark.asyncio
+async def test_pages_dossier_delegates_trusted_principal_to_the_core_service(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pages must not replace the core Persona grant/error contract itself."""
+
+    from tests.test_scoped_api import _principal, _service
+    from sylanne_alpha.webui_routes import WebUIRoutes
+
+    service, _repository, registry, scope, _relation = _service(tmp_path)
+    principal = _principal("principal_v1_pages_dossier")
+
+    class Plugin:
+        _scoped_api_service = service
+        _scope_runtime_registry = registry
+        _scoped_api_principal_scope_grant = staticmethod(lambda *_args: None)
+        _scoped_api_principal_persona_grant = staticmethod(lambda *_args: None)
+
+        @staticmethod
+        def _scoped_api_principal_from_authenticated_host(
+            host: object,
+            identity: object,
+        ) -> ScopedPrincipal | None:
+            return principal if (host, identity) == ("pages", "dashboard-user") else None
+
+    plugin = Plugin()
+    service._principal_scope_grant = plugin._scoped_api_principal_scope_grant
+    service._principal_persona_grant = plugin._scoped_api_principal_persona_grant
+    core_dossier = service.persona_dossier_payload
+    calls: list[tuple[object, object, object]] = []
+
+    def delegated_dossier(
+        bot_ref: object,
+        persona_ref: object,
+        *,
+        principal: object,
+    ) -> dict[str, object]:
+        calls.append((bot_ref, persona_ref, principal))
+        return {"ok": True, "delegated": "pages"}
+
+    monkeypatch.setattr(service, "persona_dossier_payload", delegated_dossier)
+    web = ModuleType("astrbot.api.web")
+    web.request = SimpleNamespace(
+        username="dashboard-user",
+        path_params={
+            "bot_ref": scope.bot_ref.token,
+            "persona_ref": scope.persona_ref.token,
+        },
+        query={},
+    )
+    monkeypatch.setitem(sys.modules, "astrbot.api.web", web)
+
+    routes = WebUIRoutes(plugin)
+    assert await routes.persona_dossier_handler() == {"ok": True, "delegated": "pages"}
+    assert calls == [(scope.bot_ref.token, scope.persona_ref.token, principal)]
+
+    expected_principal = principal
+
+    def delegated_error(
+        _bot_ref: object,
+        _persona_ref: object,
+        *,
+        principal: object,
+    ) -> ScopedApiError:
+        assert principal == expected_principal
+        return ScopedApiError(403, "scope_persona_not_owned")
+
+    monkeypatch.setattr(service, "persona_dossier_payload", delegated_error)
+    assert await routes.persona_dossier_handler() == {
+        "error": "scope_persona_not_owned",
+        "status": 403,
+    }
+
+    def read_must_not_run(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("an ungranted principal must not read the dossier")
+
+    monkeypatch.setattr(_repository, "read_persona_dossier", read_must_not_run)
+    monkeypatch.setattr(service, "persona_dossier_payload", core_dossier)
+    assert await routes.persona_dossier_handler() == {
+        "error": "scope_principal_forbidden",
+        "status": 403,
+    }
+
+    service._principal_persona_grant = lambda *_args: None
+    assert await routes.persona_dossier_handler() == {
+        "error": "scope_principal_forbidden",
+        "status": 403,
+    }
+    assert calls == [(scope.bot_ref.token, scope.persona_ref.token, principal)]
+
+
+@pytest.mark.asyncio
+async def test_aiohttp_dossier_delegates_trusted_principal_to_the_core_service(
+    tmp_path,
+) -> None:
+    from aiohttp import ClientSession
+
+    from sylanne_alpha import webui_server
+    from tests.test_scoped_api import _principal, _service
+
+    service, _repository, registry, scope, _relation = _service(tmp_path)
+    principal = _principal("principal_v1_aiohttp_dossier")
+    bearer = "aiohttp-dossier-token"
+
+    class Plugin:
+        _scoped_api_service = service
+        _scope_runtime_registry = registry
+        _scoped_api_principal_scope_grant = staticmethod(lambda *_args: None)
+        _scoped_api_principal_persona_grant = staticmethod(lambda *_args: None)
+
+        @staticmethod
+        def _scoped_api_principal_from_authenticated_host(
+            host: object,
+            identity: object,
+        ) -> ScopedPrincipal | None:
+            return principal if (host, identity) == ("standalone", bearer) else None
+
+    plugin = Plugin()
+    service._principal_scope_grant = plugin._scoped_api_principal_scope_grant
+    service._principal_persona_grant = plugin._scoped_api_principal_persona_grant
+    calls: list[tuple[object, object, object]] = []
+
+    def delegated_dossier(
+        bot_ref: object,
+        persona_ref: object,
+        *,
+        principal: object,
+    ) -> dict[str, object]:
+        calls.append((bot_ref, persona_ref, principal))
+        return {"ok": True, "delegated": "aiohttp"}
+
+    service.persona_dossier_payload = delegated_dossier
+    path = (
+        f"/api/v1/bots/{scope.bot_ref.token}/personas/{scope.persona_ref.token}/dossier"
+    )
+    port = _unused_local_port()
+    previous_token = webui_server._active_token
+    previous_plugin = webui_server._active_plugin
+    webui_server._active_token = bearer
+    task = asyncio.create_task(
+        webui_server.start_webui_server(plugin, host="127.0.0.1", port=port)
+    )
+    try:
+        async with ClientSession() as client:
+            response = None
+            for _ in range(100):
+                try:
+                    response = await client.get(
+                        f"http://127.0.0.1:{port}{path}",
+                        headers={"Authorization": f"Bearer {bearer}"},
+                    )
+                    break
+                except OSError:
+                    await asyncio.sleep(0.01)
+            assert response is not None
+            async with response:
+                assert response.status == 200
+                assert await response.json() == {"ok": True, "delegated": "aiohttp"}
+        assert calls == [(scope.bot_ref.token, scope.persona_ref.token, principal)]
+    finally:
+        task.cancel()
+        await task
+        webui_server._active_token = previous_token
+        webui_server._active_plugin = previous_plugin
+
+
+def test_stdlib_dossier_delegates_trusted_principal_to_the_core_service(tmp_path) -> None:
+    from sylanne_alpha import webui_server
+    from tests.test_scoped_api import _principal, _service
+
+    service, _repository, registry, scope, _relation = _service(tmp_path)
+    principal = _principal("principal_v1_stdlib_dossier")
+    bearer = "stdlib-dossier-token"
+
+    class Plugin:
+        _scoped_api_service = service
+        _scope_runtime_registry = registry
+        _scoped_api_principal_scope_grant = staticmethod(lambda *_args: None)
+        _scoped_api_principal_persona_grant = staticmethod(lambda *_args: None)
+
+        @staticmethod
+        def _scoped_api_principal_from_authenticated_host(
+            host: object,
+            identity: object,
+        ) -> ScopedPrincipal | None:
+            return principal if (host, identity) == ("standalone", bearer) else None
+
+    plugin = Plugin()
+    service._principal_scope_grant = plugin._scoped_api_principal_scope_grant
+    service._principal_persona_grant = plugin._scoped_api_principal_persona_grant
+    calls: list[tuple[object, object, object]] = []
+
+    def delegated_dossier(
+        bot_ref: object,
+        persona_ref: object,
+        *,
+        principal: object,
+    ) -> dict[str, object]:
+        calls.append((bot_ref, persona_ref, principal))
+        return {"ok": True, "delegated": "stdlib"}
+
+    service.persona_dossier_payload = delegated_dossier
+    path = (
+        f"/api/v1/bots/{scope.bot_ref.token}/personas/{scope.persona_ref.token}/dossier"
+    )
+    previous_token = webui_server._active_token
+    previous_plugin = webui_server._active_plugin
+    webui_server._active_token = bearer
+    webui_server.start_webui_thread_server(plugin, host="127.0.0.1", port=0)
+    try:
+        assert webui_server._httpd is not None
+        port = int(webui_server._httpd.server_address[1])
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        try:
+            connection.request(
+                "GET",
+                path,
+                headers={"Authorization": f"Bearer {bearer}"},
+            )
+            response = connection.getresponse()
+            assert response.status == 200
+            assert json.loads(response.read()) == {"ok": True, "delegated": "stdlib"}
+        finally:
+            connection.close()
+        assert calls == [(scope.bot_ref.token, scope.persona_ref.token, principal)]
+    finally:
+        asyncio.run(webui_server.stop_webui_server())
+        webui_server._active_token = previous_token
+        webui_server._active_plugin = previous_plugin
 
 
 @pytest.mark.asyncio

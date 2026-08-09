@@ -298,6 +298,18 @@ def _standalone_service_uses_plugin_scope_grant(
     )
 
 
+def _standalone_service_uses_plugin_persona_grant(
+    plugin: object,
+    service: object,
+) -> bool:
+    """Fence a dossier service that is not bound to this plugin authority hook."""
+
+    return same_scoped_authority_callback(
+        getattr(service, "_principal_persona_grant", None),
+        getattr(plugin, "_scoped_api_principal_persona_grant", None),
+    )
+
+
 def _bootstrap_scoped_route_spec(query: object) -> ScopeRouteSpec:
     """Resolve the nonce target only through the core immutable route table."""
 
@@ -458,17 +470,25 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
     async def handle_persona_dossier(request: web.Request) -> web.Response:
         """Serve one Persona-owned public projection without a Session selector."""
 
-        service = scoped_api_service_for_plugin(_plugin(plugin))
+        current_plugin = _plugin(plugin)
+        service = scoped_api_service_for_plugin(current_plugin)
         if service is None:
             return scoped_error(ScopedApiError(410, "scope_required"))
         if "session" in request.query:
             return scoped_error(ScopedApiError(400, "legacy_session_selector_forbidden"))
-        if scoped_principal(request) is None:
+        principal = scoped_principal(request)
+        if principal is None:
             return scoped_error(ScopedApiError(403, "scope_principal_required"))
-        # Persona grants become a core-owned immutable action in the follow-up
-        # contract.  There is no audited standalone principal-to-relation map
-        # yet, so do not perform the repository read through the old dossier API.
-        return scoped_error(ScopedApiError(403, "scope_principal_forbidden"))
+        if not _standalone_service_uses_plugin_persona_grant(current_plugin, service):
+            return scoped_error(ScopedApiError(403, "scope_principal_forbidden"))
+        result = service.persona_dossier_payload(
+            request.match_info.get("bot_ref"),
+            request.match_info.get("persona_ref"),
+            principal=principal,
+        )
+        if isinstance(result, ScopedApiError):
+            return scoped_error(result)
+        return web.json_response(result)
 
     async def handle_scope_bootstrap(request: web.Request) -> web.Response:
         current_plugin = _plugin(plugin)
@@ -2266,16 +2286,38 @@ def start_webui_thread_server(
                 if self.command != "GET":
                     self._send_scoped_error(ScopedApiError(400, "invalid_scoped_request"))
                     return True
-                if self._authenticated_scoped_principal() is None:
+                if "session" in query:
+                    self._send_scoped_error(
+                        ScopedApiError(400, "legacy_session_selector_forbidden")
+                    )
+                    return True
+                principal = self._authenticated_scoped_principal()
+                if principal is None:
                     self._send_scoped_error(
                         ScopedApiError(403, "scope_principal_required")
                     )
                     return True
-                # The typed persona grant is core-owned in the follow-up.  Until
-                # then do not let the old no-principal method read a dossier.
-                self._send_scoped_error(
-                    ScopedApiError(403, "scope_principal_forbidden")
+                service = scoped_api_service_for_plugin(current_plugin)
+                if service is None:
+                    self._send_scoped_error(ScopedApiError(410, "scope_required"))
+                    return True
+                if not _standalone_service_uses_plugin_persona_grant(
+                    current_plugin,
+                    service,
+                ):
+                    self._send_scoped_error(
+                        ScopedApiError(403, "scope_principal_forbidden")
+                    )
+                    return True
+                result = service.persona_dossier_payload(
+                    dossier[4],
+                    dossier[6],
+                    principal=principal,
                 )
+                if isinstance(result, ScopedApiError):
+                    self._send_scoped_error(result)
+                    return True
+                self._send_json(result)
                 return True
 
             bootstrap = path.split("/")

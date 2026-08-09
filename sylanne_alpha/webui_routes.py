@@ -831,6 +831,14 @@ class WebUIRoutes:
             getattr(self._p, "_scoped_api_principal_scope_grant", None),
         )
 
+    def _service_uses_plugin_persona_grant(self, service: object) -> bool:
+        """Require the core dossier service to use this plugin's authority hook."""
+
+        return same_scoped_authority_callback(
+            getattr(service, "_principal_persona_grant", None),
+            getattr(self._p, "_scoped_api_principal_persona_grant", None),
+        )
+
     @staticmethod
     def _bootstrap_route_spec(query: object) -> ScopeRouteSpec:
         """Validate an explicit nonce target through the core route table."""
@@ -1011,10 +1019,24 @@ class WebUIRoutes:
         principal = self._scoped_principal_from_pages_request(request)
         if principal is None:
             return self._scoped_native_error(ScopedApiError(403, "scope_principal_required"))
-        # The core dossier grant becomes available with the typed Persona grant
-        # follow-up.  Until then, a trusted WebUI principal still has no audited
-        # relation mapping, so never perform the repository read.
-        return self._scoped_native_error(ScopedApiError(403, "scope_principal_forbidden"))
+        if not self._service_uses_plugin_persona_grant(service):
+            return self._scoped_native_error(
+                ScopedApiError(403, "scope_principal_forbidden")
+            )
+        try:
+            params = getattr(request, "path_params", {})
+            result = service.persona_dossier_payload(
+                params.get("bot_ref"),
+                params.get("persona_ref"),
+                principal=principal,
+            )
+        except (AttributeError, TypeError, ValueError):
+            return self._scoped_native_error(
+                ScopedApiError(400, "invalid_persona_request")
+            )
+        if isinstance(result, ScopedApiError):
+            return self._scoped_native_error(result)
+        return result
 
     async def scope_bootstrap_handler(self) -> Any:
         """Mint a fresh one-use nonce for one live exact catalog entry."""
