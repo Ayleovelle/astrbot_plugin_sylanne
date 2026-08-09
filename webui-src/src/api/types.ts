@@ -49,6 +49,40 @@ export interface ScopeSelection {
   sessionRef: string
 }
 
+export interface PersonaPath {
+  bot_ref: string
+  persona_ref: string
+}
+
+export interface PersonaRequestSnapshot {
+  selection: {
+    botRef: string
+    personaRef: string
+  }
+  personaEpoch: number
+  botGeneration: number
+  personaLifecycleGeneration: number
+}
+
+export interface PersonaDossierResponse {
+  ok: boolean
+  persona_scope: PersonaPath
+  generations: Pick<ScopeGenerations, 'bot' | 'persona_lifecycle'>
+  persona: {
+    display: string
+    ref_short: string
+    fingerprint_short: string
+    resolution: 'active'
+    genesis: {
+      state: 'active' | 'awaiting'
+      priors?: Record<string, unknown>
+      growth_enabled?: true
+      accepted_at_ms?: number
+    }
+    updated_at_ms: number
+  }
+}
+
 export interface ScopeRequestSnapshot {
   selection: Required<ScopeSelection>
   selectionEpoch: number

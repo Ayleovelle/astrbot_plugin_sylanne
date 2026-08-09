@@ -9,6 +9,9 @@
 import { devMock } from './devMock'
 import { bridgeFetch, getAstrBotBridge } from './astrBotBridge'
 import type {
+  PersonaDossierResponse,
+  PersonaPath,
+  PersonaRequestSnapshot,
   ScopeBootstrapResponse,
   ScopeCatalogResponse,
   ScopePath,
@@ -187,6 +190,17 @@ function snapshotScope(snapshot: ScopeRequestSnapshot): ScopePath {
   return scope
 }
 
+function snapshotPersona(snapshot: PersonaRequestSnapshot): PersonaPath {
+  const persona = {
+    bot_ref: snapshot.selection.botRef,
+    persona_ref: snapshot.selection.personaRef,
+  }
+  if (!persona.bot_ref || !persona.persona_ref) {
+    throw new ApiError(400, 'complete Persona scope required')
+  }
+  return persona
+}
+
 function sameScope(left: ScopePath, right: ScopePath): boolean {
   return (
     left.bot_ref === right.bot_ref &&
@@ -214,6 +228,13 @@ export function scopedApiPath(snapshot: ScopeRequestSnapshot, endpoint = ''): st
     scope.persona_ref,
   )}/sessions/${encodeURIComponent(scope.session_ref)}`
   return endpoint ? `${root}/${endpoint.replace(/^\/+|\/+$/g, '')}` : root
+}
+
+export function personaApiPath(snapshot: PersonaRequestSnapshot): string {
+  const persona = snapshotPersona(snapshot)
+  return `/api/v1/bots/${encodeURIComponent(persona.bot_ref)}/personas/${encodeURIComponent(
+    persona.persona_ref,
+  )}/dossier`
 }
 
 export function scopeBootstrapPath(snapshot: ScopeRequestSnapshot): string {
@@ -258,4 +279,22 @@ export async function scopedApiFetch<T extends ScopedApiResponse>(
       [SCOPE_NONCE_HEADER]: bootstrap.scope_nonce,
     },
   })
+}
+
+export async function personaApiFetch<T extends PersonaDossierResponse = PersonaDossierResponse>(
+  snapshot: PersonaRequestSnapshot,
+  options: ApiOptions = {},
+): Promise<T> {
+  if ((options.method || 'GET').toUpperCase() !== 'GET' || options.body !== undefined) {
+    throw new ApiError(400, 'Persona dossier is read-only')
+  }
+  const bridge = getAstrBotBridge()
+  if (bridge) {
+    if (options.signal?.aborted) {
+      throw new ApiError(0, 'Persona dossier request aborted')
+    }
+    const { signal: _signal, ...bridgeOptions } = options
+    return apiFetch<T>(personaApiPath(snapshot), bridgeOptions)
+  }
+  return apiFetch<T>(personaApiPath(snapshot), options)
 }

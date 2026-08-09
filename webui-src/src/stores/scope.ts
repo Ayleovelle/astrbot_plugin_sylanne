@@ -2,6 +2,8 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { fetchScopeCatalog } from '../api/client'
 import type {
+  PersonaDossierResponse,
+  PersonaRequestSnapshot,
   ScopeCatalogEntry,
   ScopeCatalogResponse,
   ScopeRequestSnapshot,
@@ -17,11 +19,38 @@ const EMPTY_SELECTION: ScopeSelection = {
   sessionRef: '',
 }
 
+interface PersonaSelection {
+  botRef: string
+  personaRef: string
+}
+
+interface PersonaGenerations {
+  botGeneration: number
+  personaLifecycleGeneration: number
+}
+
 function sameSelection(left: ScopeSelection, right: ScopeSelection): boolean {
   return (
     left.botRef === right.botRef &&
     left.personaRef === right.personaRef &&
     left.sessionRef === right.sessionRef
+  )
+}
+
+function samePersonaSelection(left: PersonaSelection, right: PersonaSelection): boolean {
+  return left.botRef === right.botRef && left.personaRef === right.personaRef
+}
+
+function samePersonaGenerations(
+  left: PersonaGenerations | null,
+  right: PersonaGenerations | null,
+): boolean {
+  return (
+    left === right ||
+    (left !== null &&
+      right !== null &&
+      left.botGeneration === right.botGeneration &&
+      left.personaLifecycleGeneration === right.personaLifecycleGeneration)
   )
 }
 
@@ -78,6 +107,33 @@ function matchingEntry(
   )
 }
 
+function personaGenerations(
+  entries: ScopeCatalogEntry[],
+  selection: PersonaSelection,
+): PersonaGenerations | null {
+  if (!selection.botRef || !selection.personaRef) return null
+  const matching = entries.filter(
+    (entry) =>
+      entry.scope.bot_ref === selection.botRef &&
+      entry.scope.persona_ref === selection.personaRef,
+  )
+  if (!matching.length) return null
+  const first = matching[0].generations
+  if (
+    matching.some(
+      (entry) =>
+        entry.generations.bot !== first.bot ||
+        entry.generations.persona_lifecycle !== first.persona_lifecycle,
+    )
+  ) {
+    return null
+  }
+  return {
+    botGeneration: first.bot,
+    personaLifecycleGeneration: first.persona_lifecycle,
+  }
+}
+
 function reconciledSelection(
   entries: ScopeCatalogEntry[],
   previous: ScopeSelection,
@@ -122,10 +178,17 @@ export const useScopeStore = defineStore('scope', () => {
   const catalog = ref<ScopeCatalogEntry[]>([])
   const selection = ref<ScopeSelection>(readStoredSelection())
   const selectionEpoch = ref(0)
+  const personaEpoch = ref(0)
 
   const selectedEntry = computed(() => matchingEntry(catalog.value, selection.value))
   const selectedScopeGeneration = computed<number | null>(
     () => selectedEntry.value?.generations.scope ?? null,
+  )
+  const selectedPersonaGenerations = computed<PersonaGenerations | null>(() =>
+    personaGenerations(catalog.value, selection.value),
+  )
+  const selectedPersonaGeneration = computed<number | null>(
+    () => selectedPersonaGenerations.value?.personaLifecycleGeneration ?? null,
   )
   const bots = computed(() => unique(catalog.value.map((entry) => entry.scope.bot_ref)))
   const personas = computed(() =>
@@ -153,13 +216,22 @@ export const useScopeStore = defineStore('scope', () => {
 
   function setSelection(next: ScopeSelection): void {
     if (sameSelection(selection.value, next)) return
+    const previousPersona: PersonaSelection = {
+      botRef: selection.value.botRef,
+      personaRef: selection.value.personaRef,
+    }
     selection.value = next
     selectionEpoch.value += 1
+    if (!samePersonaSelection(previousPersona, next)) {
+      personaEpoch.value += 1
+    }
     persistSelection(next)
   }
 
   function setCatalog(response: ScopeCatalogResponse): void {
+    const previousSelection = { ...selection.value }
     const previousGeneration = selectedScopeGeneration.value
+    const previousPersonaGenerations = selectedPersonaGenerations.value
     catalog.value = Array.isArray(response.scopes) ? response.scopes : []
     const next = reconciledSelection(catalog.value, selection.value)
     const changedSelection = !sameSelection(selection.value, next)
@@ -168,9 +240,20 @@ export const useScopeStore = defineStore('scope', () => {
       selection.value = next
       persistSelection(next)
     }
-    if (changedSelection || previousGeneration !== nextGeneration) {
+    const nextPersonaGenerations = selectedPersonaGenerations.value
+    const personaChanged = !samePersonaSelection(previousSelection, next)
+    const personaGenerationsChanged = !samePersonaGenerations(
+      previousPersonaGenerations,
+      nextPersonaGenerations,
+    )
+    if (
+      changedSelection ||
+      previousGeneration !== nextGeneration ||
+      personaGenerationsChanged
+    ) {
       selectionEpoch.value += 1
     }
+    if (personaChanged || personaGenerationsChanged) personaEpoch.value += 1
   }
 
   async function refreshCatalog(): Promise<void> {
@@ -243,11 +326,50 @@ export const useScopeStore = defineStore('scope', () => {
     )
   }
 
+  function personaSnapshot(): PersonaRequestSnapshot | null {
+    const generations = selectedPersonaGenerations.value
+    if (!generations || !selection.value.botRef || !selection.value.personaRef) return null
+    return {
+      selection: {
+        botRef: selection.value.botRef,
+        personaRef: selection.value.personaRef,
+      },
+      personaEpoch: personaEpoch.value,
+      botGeneration: generations.botGeneration,
+      personaLifecycleGeneration: generations.personaLifecycleGeneration,
+    }
+  }
+
+  function isPersonaCurrent(
+    snapshotValue: PersonaRequestSnapshot,
+    response?: PersonaDossierResponse,
+  ): boolean {
+    const current = personaSnapshot()
+    if (
+      !current ||
+      current.personaEpoch !== snapshotValue.personaEpoch ||
+      current.botGeneration !== snapshotValue.botGeneration ||
+      current.personaLifecycleGeneration !== snapshotValue.personaLifecycleGeneration ||
+      !samePersonaSelection(current.selection, snapshotValue.selection)
+    ) {
+      return false
+    }
+    if (!response) return true
+    return (
+      response.persona_scope.bot_ref === snapshotValue.selection.botRef &&
+      response.persona_scope.persona_ref === snapshotValue.selection.personaRef &&
+      response.generations.bot === snapshotValue.botGeneration &&
+      response.generations.persona_lifecycle === snapshotValue.personaLifecycleGeneration
+    )
+  }
+
   return {
     catalog,
     selection,
     selectionEpoch,
+    personaEpoch,
     selectedScopeGeneration,
+    selectedPersonaGeneration,
     bots,
     personas,
     sessions,
@@ -258,5 +380,7 @@ export const useScopeStore = defineStore('scope', () => {
     selectSession,
     snapshot,
     isCurrent,
+    personaSnapshot,
+    isPersonaCurrent,
   }
 })

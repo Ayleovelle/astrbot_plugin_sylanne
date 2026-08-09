@@ -4,10 +4,17 @@ import {
   apiBase,
   apiFetch,
   fetchScopeCatalog,
+  personaApiFetch,
+  personaApiPath,
   scopedApiFetch,
   usesHostAuthentication,
 } from './client'
-import type { ScopeRequestSnapshot, ScopedApiResponse } from './types'
+import type {
+  PersonaDossierResponse,
+  PersonaRequestSnapshot,
+  ScopeRequestSnapshot,
+  ScopedApiResponse,
+} from './types'
 
 function stubToken(token = 'standalone-secret'): void {
   vi.stubGlobal('localStorage', {
@@ -44,6 +51,37 @@ function scopeSnapshot(): ScopeRequestSnapshot {
     },
     selectionEpoch: 3,
     scopeGeneration: 7,
+  }
+}
+
+function personaSnapshot(): PersonaRequestSnapshot {
+  return {
+    selection: {
+      botRef: 'bot_v1_A',
+      personaRef: 'persona_v1_P',
+    },
+    personaEpoch: 5,
+    botGeneration: 2,
+    personaLifecycleGeneration: 3,
+  }
+}
+
+function dossierResponse(): PersonaDossierResponse {
+  return {
+    ok: true,
+    persona_scope: {
+      bot_ref: 'bot_v1_A',
+      persona_ref: 'persona_v1_P',
+    },
+    generations: { bot: 2, persona_lifecycle: 3 },
+    persona: {
+      display: 'Persona v1_P',
+      ref_short: 'v1_P',
+      fingerprint_short: 'fingerprint12',
+      resolution: 'active',
+      genesis: { state: 'awaiting' },
+      updated_at_ms: 1,
+    },
   }
 }
 
@@ -152,6 +190,47 @@ describe('apiBase', () => {
       { scope_nonce: 'scope_nonce_v1_test' },
     )
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('routes a Persona dossier GET through AstrBot Pages without a session nonce', async () => {
+    const apiGet = vi.fn().mockResolvedValue(dossierResponse())
+    const apiPost = vi.fn()
+    const fetchMock = vi.fn()
+    vi.stubGlobal('window', { AstrBotPluginPage: { apiGet, apiPost } })
+    vi.stubGlobal('location', {
+      pathname: '/api/plugin/page/content/astrbot_plugin_sylanne/dashboard/index.html',
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+
+    expect(personaApiPath(personaSnapshot())).toBe(
+      '/api/v1/bots/bot_v1_A/personas/persona_v1_P/dossier',
+    )
+    await expect(personaApiFetch(personaSnapshot(), { signal: controller.signal })).resolves.toEqual(
+      dossierResponse(),
+    )
+
+    expect(apiGet).toHaveBeenCalledWith(
+      'api/v1/bots/bot_v1_A/personas/persona_v1_P/dossier',
+      {},
+    )
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('rejects an already-aborted Persona dossier request before calling AstrBot Pages', async () => {
+    const apiGet = vi.fn()
+    vi.stubGlobal('window', { AstrBotPluginPage: { apiGet, apiPost: vi.fn() } })
+    vi.stubGlobal('location', {
+      pathname: '/api/plugin/page/content/astrbot_plugin_sylanne/dashboard/index.html',
+    })
+    const controller = new AbortController()
+    controller.abort()
+
+    await expect(personaApiFetch(personaSnapshot(), { signal: controller.signal })).rejects.toMatchObject({
+      status: 0,
+    })
+    expect(apiGet).not.toHaveBeenCalled()
   })
 
   it('routes a scoped POST through AstrBot Pages with its nonce in the request body', async () => {
