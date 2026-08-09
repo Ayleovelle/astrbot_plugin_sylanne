@@ -98,6 +98,102 @@ def _request(scope: SessionScope, nonce: str | None) -> ScopedApiRequest:
     )
 
 
+def _safe_genesis_profile() -> dict[str, object]:
+    return {
+        "traits_prior": {},
+        "voice_prior": {},
+        "boundary_prior": {},
+        "proactivity_prior": {},
+        "circadian_prior": {},
+    }
+
+
+def test_persona_dossier_projects_only_safe_active_genesis(tmp_path) -> None:
+    service, repository, _registry, scope, _relation = _service(tmp_path)
+    profile = _safe_genesis_profile()
+    lease = repository.claim_persona_genesis(
+        scope.persona_ref,
+        source_fingerprint=scope.persona_ref.source_fingerprint,
+        origin_turn_generation=7,
+        now_ms=1_000,
+    )
+    assert lease is not None
+    repository.commit_persona_genesis_activation(
+        scope.persona_ref,
+        lease,
+        profile=profile,
+        source_fingerprint=scope.persona_ref.source_fingerprint,
+        origin_turn_generation=7,
+        now_ms=1_001,
+    )
+
+    payload = service.persona_dossier_payload(
+        scope.bot_ref.token,
+        scope.persona_ref.token,
+    )
+
+    assert not isinstance(payload, ScopedApiError)
+    assert payload["ok"] is True
+    assert payload["persona_scope"] == {
+        "bot_ref": scope.bot_ref.token,
+        "persona_ref": scope.persona_ref.token,
+    }
+    assert payload["generations"] == {
+        "bot": scope.bot_ref.generation,
+        "persona_lifecycle": scope.persona_ref.lifecycle_generation,
+    }
+    assert payload["persona"] == {
+        "display": f"Persona {scope.persona_ref.token[-8:]}",
+        "ref_short": scope.persona_ref.token[-8:],
+        "fingerprint_short": scope.persona_ref.source_fingerprint[-12:],
+        "resolution": "active",
+        "genesis": {
+            "state": "active",
+            "priors": profile,
+            "growth_enabled": True,
+            "accepted_at_ms": 1_001,
+        },
+        "updated_at_ms": payload["persona"]["updated_at_ms"],
+    }
+    assert isinstance(payload["persona"]["updated_at_ms"], int)
+    rendered = repr(payload)
+    for forbidden in (
+        "prompt",
+        "begin_dialog",
+        "persona_id",
+        "session_ref",
+        "storage_token",
+        "provider",
+        "address",
+    ):
+        assert forbidden not in rendered
+
+
+def test_persona_dossier_is_two_level_and_fail_closed(tmp_path, monkeypatch) -> None:
+    service, repository, _registry, scope, _relation = _service(tmp_path)
+
+    def no_session_catalog() -> tuple[SessionScope, ...]:
+        raise AssertionError("Persona dossier must not enumerate session scopes")
+
+    monkeypatch.setattr(repository, "list_active_scopes", no_session_catalog)
+    payload = service.persona_dossier_payload(
+        scope.bot_ref.token,
+        scope.persona_ref.token,
+    )
+    assert not isinstance(payload, ScopedApiError)
+    assert payload["persona"]["genesis"] == {"state": "awaiting"}
+
+    missing = service.persona_dossier_payload(scope.bot_ref.token, "persona_v1_missing")
+    assert isinstance(missing, ScopedApiError)
+    assert missing.status == 404
+    assert missing.public_payload() == {"error": "persona_not_found"}
+
+    malformed = service.persona_dossier_payload("not_a_bot_ref", scope.persona_ref.token)
+    assert isinstance(malformed, ScopedApiError)
+    assert malformed.status == 400
+    assert malformed.public_payload() == {"error": "invalid_persona_request"}
+
+
 def test_scoped_nonce_is_single_use_and_returns_only_scope_echo(tmp_path) -> None:
     service, _repository, _registry, scope, relation = _service(tmp_path)
 

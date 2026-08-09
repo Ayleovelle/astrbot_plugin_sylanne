@@ -110,6 +110,15 @@ class Snapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class PersonaDossierSnapshot:
+    """Read-only Persona-owned projection without a Session dependency."""
+
+    persona_ref: PersonaRevisionRef = field(repr=False)
+    updated_at_ms: int
+    genesis: Snapshot | None = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
 class PersonaGenesisLease:
     """One durable, fenced authority to make a paid Persona Genesis attempt."""
 
@@ -984,6 +993,47 @@ class ScopeRepository:
             return
         self._validate_bot_ref_locked(bot_ref)
 
+    def _resolve_active_persona_tokens_locked(
+        self,
+        bot_token: str,
+        persona_token: str,
+    ) -> tuple[PersonaRevisionRef, dict[str, object]]:
+        """Resolve an active Persona directly from its durable parent manifests."""
+
+        resolved_bot_token = _require_token(bot_token, "bot_v1_")
+        loaded_bot = self._read_json(
+            self._bot_directory(resolved_bot_token) / "manifest.json",
+            error_label="bot manifest",
+        )
+        if loaded_bot is None:
+            raise KeyError("persona not found")
+        _raw_bot, bot_document = loaded_bot
+        bot_generation = bot_document.get("bot_generation")
+        if type(bot_generation) is not int or bot_generation < 0:
+            raise RepositoryCorruptionError("bot manifest is invalid")
+        bot = BotRef(token=resolved_bot_token, generation=bot_generation)
+        self._validate_bot_ref_locked(bot)
+
+        resolved_persona_token = _require_token(persona_token, "persona_v1_")
+        stub = PersonaRevisionRef(
+            token=resolved_persona_token,
+            bot_ref=bot,
+            persona_id_digest="0" * 64,
+            source_fingerprint="0" * 64,
+            lifecycle_generation=0,
+        )
+        manifest = self._load_persona_manifest_locked(stub, validate_material=False)
+        if manifest is None:
+            raise KeyError("persona not found")
+        persona = PersonaRevisionRef(
+            token=resolved_persona_token,
+            bot_ref=bot,
+            persona_id_digest=str(manifest["persona_id_digest"]),
+            source_fingerprint=str(manifest["source_fingerprint"]),
+            lifecycle_generation=int(manifest["lifecycle_generation"]),
+        )
+        return self._require_active_persona_locked(persona), manifest
+
     def _load_persona_manifest_locked(
         self,
         persona_ref: PersonaRevisionRef,
@@ -1465,6 +1515,30 @@ class ScopeRepository:
                     raise RepositoryCorruptionError("scope catalog parent is invalid")
                 active.append(scope)
             return tuple(active)
+
+    def read_persona_dossier(
+        self,
+        bot_token: str,
+        persona_token: str,
+    ) -> PersonaDossierSnapshot:
+        """Read one active Persona and Genesis record without resolving a Session."""
+
+        with self._repository_lock():
+            active, manifest = self._resolve_active_persona_tokens_locked(
+                bot_token,
+                persona_token,
+            )
+            genesis = self._read_genesis_locked(active)
+            if genesis is not None and not self._payload_matches_persona(
+                genesis.payload,
+                active,
+            ):
+                genesis = None
+            return PersonaDossierSnapshot(
+                persona_ref=active,
+                updated_at_ms=int(manifest["updated_at_ms"]),
+                genesis=genesis,
+            )
 
     def current_scope_generation(self, storage_token: str) -> int | None:
         try:

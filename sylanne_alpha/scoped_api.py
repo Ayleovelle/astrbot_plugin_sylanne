@@ -292,6 +292,66 @@ class ScopedApiService:
             )
         return {"ok": True, "scopes": entries}
 
+    def persona_dossier_payload(
+        self,
+        bot_ref: object,
+        persona_ref: object,
+    ) -> dict[str, object] | ScopedApiError:
+        """Project one active Persona without selecting or inspecting a Session."""
+
+        if type(bot_ref) is not str or type(persona_ref) is not str:
+            return ScopedApiError(400, "invalid_persona_request")
+        try:
+            dossier = self._repository.read_persona_dossier(bot_ref, persona_ref)
+        except (KeyError, StaleScopeWrite):
+            return ScopedApiError(404, "persona_not_found")
+        except ValueError:
+            return ScopedApiError(400, "invalid_persona_request")
+        except (OSError, RepositoryCorruptionError, TypeError):
+            return ScopedApiError(503, "scope_repository_unavailable")
+
+        genesis: dict[str, object] = {"state": "awaiting"}
+        genesis_snapshot = dossier.genesis
+        genesis_payload = None if genesis_snapshot is None else genesis_snapshot.payload
+        if type(genesis_payload) is dict and genesis_payload.get("state") == "active":
+            profile = genesis_payload.get("accepted_profile")
+            metadata = genesis_payload.get("safe_metadata")
+            accepted_at_ms = metadata.get("accepted_at_ms") if type(metadata) is dict else None
+            if (
+                type(profile) is dict
+                and genesis_payload.get("growth_enabled") is True
+                and type(accepted_at_ms) is int
+                and accepted_at_ms >= 0
+            ):
+                genesis = {
+                    "state": "active",
+                    "priors": profile,
+                    "growth_enabled": True,
+                    "accepted_at_ms": accepted_at_ms,
+                }
+
+        active = dossier.persona_ref
+        short_ref = active.token[-8:]
+        return {
+            "ok": True,
+            "persona_scope": {
+                "bot_ref": active.bot_ref.token,
+                "persona_ref": active.token,
+            },
+            "generations": {
+                "bot": active.bot_ref.generation,
+                "persona_lifecycle": active.lifecycle_generation,
+            },
+            "persona": {
+                "display": f"Persona {short_ref}",
+                "ref_short": short_ref,
+                "fingerprint_short": active.source_fingerprint[-12:],
+                "resolution": "active",
+                "genesis": genesis,
+                "updated_at_ms": dossier.updated_at_ms,
+            },
+        }
+
     def bootstrap_nonce(self, path: ScopeApiPathEcho) -> str | ScopedApiError:
         """Mint or refresh one nonce for a live, uniquely owned exact scope."""
 
