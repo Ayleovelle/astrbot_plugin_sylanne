@@ -179,6 +179,34 @@ def test_scoped_method_and_route_contracts_cannot_mutate_at_runtime() -> None:
     assert SCOPED_API_METHODS["legacy-claim"] == "POST"
 
 
+def test_runtime_fence_rejects_a_retired_session_without_repository_access(tmp_path) -> None:
+    service, _repository, registry, scope, relation = _service(tmp_path)
+    nonce = service.issue_nonce(
+        scope,
+        relation,
+        turn_generation=7,
+        principal=_principal(),
+        endpoint="legacy-claim",
+        method="POST",
+    )
+    authorized = service.authorize(
+        ScopedApiRequest.from_tokens(
+            bot_ref=scope.bot_ref.token,
+            persona_ref=scope.persona_ref.token,
+            session_ref=scope.session_ref.token,
+            nonce=nonce,
+            endpoint="legacy-claim",
+            method="POST",
+            principal=_principal(),
+        )
+    )
+
+    assert isinstance(authorized, ScopedApiAuthorization)
+    assert service.runtime_fence(authorized)
+    registry.release_session(scope)
+    assert not service.runtime_fence(authorized)
+
+
 def test_principal_scope_grant_is_required_and_revalidated_before_relation_runtime(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

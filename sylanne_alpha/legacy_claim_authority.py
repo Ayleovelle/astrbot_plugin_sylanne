@@ -485,6 +485,7 @@ class LegacyClaimAuthority:
         """Recheck the exact durable ACL while ``ScopeRepository.transaction`` is held."""
 
         try:
+            self.repository._validate_relation_scope_locked(relation_scope)
             loaded = self._document_locked()
         except Exception:  # noqa: BLE001 - a durable ACL fence always fails closed
             return False

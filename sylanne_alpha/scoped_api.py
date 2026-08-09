@@ -699,6 +699,32 @@ class ScopedApiService:
         result = self._authorize_record(record, self._clock_ms(), stream=True)
         return authorization if isinstance(result, ScopedApiAuthorization) else result
 
+    def runtime_fence(self, authorization: ScopedApiAuthorization) -> bool:
+        """Check only live runtime/turn state without repository or nonce access.
+
+        This is deliberately safe to invoke from a repository transaction's
+        authorization guard: the durable scope/relation fence is owned by that
+        transaction, while this method supplies the non-durable runtime fence.
+        """
+
+        if type(authorization) is not ScopedApiAuthorization:
+            return False
+        try:
+            if self._clock_ms() > authorization.expires_at_ms:
+                return False
+            if not self._registry.is_live_session(authorization.scope):
+                return False
+            if self._registry.relation_or_none(authorization.relation_scope) is None:
+                return False
+            turn = self._turn_lookup(authorization.scope)
+        except Exception:  # noqa: BLE001 - runtime authority must fail closed
+            return False
+        return self._turn_matches(
+            turn,
+            authorization.scope,
+            authorization.turn_generation,
+        )
+
     def stream_stale_payload(self) -> dict[str, object]:
         """Return the sole marker a streaming host may emit before closing."""
 

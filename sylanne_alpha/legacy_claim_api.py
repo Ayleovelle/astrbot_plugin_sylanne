@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Callable
 from typing import Any
 
 from .legacy_claim_authority import LEGACY_CLAIM_ACTION, LegacyClaimAuthority, LegacyClaimIntent
@@ -67,7 +68,11 @@ class LegacyClaimApi:
         record_id: str,
         scope: SessionScope,
         relation_scope: RelationScope,
+        post_lookup_revalidate: Callable[[], bool],
+        runtime_fence: Callable[[], bool],
     ) -> dict[str, object] | LegacyClaimApiError:
+        if not callable(post_lookup_revalidate) or not callable(runtime_fence):
+            return LegacyClaimApiError(409, "scope_stale")
         if not self.authority.revalidate_pre_source(
             intent, principal=principal, record_id=record_id, scope=scope,
             relation_scope=relation_scope, action=LEGACY_CLAIM_ACTION,
@@ -77,23 +82,40 @@ class LegacyClaimApi:
             source = self.claims.lookup_memory_source(record_id)
         except (LegacyClaimQuarantined, LegacyClaimConflict, OSError, ValueError):
             return LegacyClaimApiError(409, "legacy_claim_unavailable")
+        try:
+            if post_lookup_revalidate() is not True:
+                return LegacyClaimApiError(409, "scope_stale")
+        except Exception:  # noqa: BLE001 - host runtime revalidation fails closed
+            return LegacyClaimApiError(409, "scope_stale")
         if not self.authority.revalidate_claim(
             intent, principal=principal, record_id=record_id, scope=scope,
             relation_scope=relation_scope, action=LEGACY_CLAIM_ACTION, actor_id=source.actor_id,
         ):
             return LegacyClaimApiError(403, "scope_principal_forbidden")
         destination = self.claims.issue_destination(scope, actor_id=source.actor_id)
+        runtime_stale = False
 
         def guard() -> bool:
-            return self.authority.revalidate_claim_locked(
-                intent, principal=principal, record_id=record_id, scope=scope,
-                relation_scope=relation_scope, action=LEGACY_CLAIM_ACTION, actor_id=source.actor_id,
-            )
+            nonlocal runtime_stale
+            try:
+                if runtime_fence() is not True:
+                    runtime_stale = True
+                    return False
+                return self.authority.revalidate_claim_locked(
+                    intent, principal=principal, record_id=record_id, scope=scope,
+                    relation_scope=relation_scope, action=LEGACY_CLAIM_ACTION, actor_id=source.actor_id,
+                )
+            except Exception:  # noqa: BLE001 - final authorization fence fails closed
+                runtime_stale = True
+                return False
 
         try:
             result = self.claims.claim_memory(destination, source, authorization_guard=guard)
         except LegacyClaimAuthorizationDenied:
-            return LegacyClaimApiError(403, "scope_principal_forbidden")
+            return LegacyClaimApiError(
+                409 if runtime_stale else 403,
+                "scope_stale" if runtime_stale else "scope_principal_forbidden",
+            )
         except (LegacyClaimQuarantined, LegacyClaimConflict, OSError, ValueError):
             return LegacyClaimApiError(409, "legacy_claim_unavailable")
         return {

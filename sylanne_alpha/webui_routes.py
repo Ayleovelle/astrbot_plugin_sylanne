@@ -880,6 +880,11 @@ class WebUIRoutes:
 
         from astrbot.api.web import request
 
+        query = getattr(request, "query", {})
+        if isinstance(query, Mapping) and "session" in query:
+            return self._scoped_native_error(
+                ScopedApiError(400, "legacy_session_selector_forbidden")
+            )
         principal = self._scoped_principal_from_pages_request(request)
         if principal is None:
             return self._scoped_native_error(ScopedApiError(403, "scope_principal_required"))
@@ -966,6 +971,11 @@ class WebUIRoutes:
                 record_id=body["record_id"],
                 scope=checked.scope,
                 relation_scope=checked.relation_scope,
+                post_lookup_revalidate=lambda: isinstance(
+                    service.revalidate(checked),
+                    ScopedApiAuthorization,
+                ),
+                runtime_fence=lambda: service.runtime_fence(checked),
             )
             if isinstance(result, LegacyClaimApiError):
                 return self._scoped_native_error(ScopedApiError(result.status, result.code))

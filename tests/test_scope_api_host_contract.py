@@ -27,6 +27,85 @@ def _unused_local_port() -> int:
         return int(stream.getsockname()[1])
 
 
+class _LegacyClaimProbe:
+    """Real adapter dependencies with observable legacy-side-effect boundaries."""
+
+    def __init__(self) -> None:
+        self.list_calls = 0
+        self.lookup_calls = 0
+        self.issue_calls = 0
+        self.claim_calls = 0
+
+    def list_inventory(self):
+        self.list_calls += 1
+        return ()
+
+    def lookup_memory_source(self, _record_id: str):
+        self.lookup_calls += 1
+        return SimpleNamespace(actor_id="actor-1", source_fingerprint="c" * 64)
+
+    def issue_destination(self, scope: object, *, actor_id: str):
+        self.issue_calls += 1
+        return SimpleNamespace(scope=scope, actor_id=actor_id)
+
+    def claim_memory(self, _destination: object, _source: object, *, authorization_guard):
+        self.claim_calls += 1
+        assert authorization_guard() is True
+        return SimpleNamespace(idempotent=False, recovered=False)
+
+
+def _legacy_claim_probe_api(
+    repository: object,
+    principal: ScopedPrincipal,
+    scope: object,
+    relation: object,
+    *,
+    allow_claim: bool,
+    allow_inventory: bool,
+):
+    from sylanne_alpha.legacy_claim_api import LegacyClaimApi
+    from sylanne_alpha.legacy_claim_authority import LegacyClaimAuthority
+
+    authority = LegacyClaimAuthority(repository, clock_ms=lambda: 1_000)
+    inventory_grants = ()
+    claim_grants = ()
+    if allow_inventory:
+        inventory_grants = (
+            authority.enroll_inventory_view_grant(
+                principal=principal,
+                audit_id="audit_v1_host_inventory",
+            ),
+        )
+    if allow_claim:
+        claim_grants = (
+            authority.enroll_claim_grant(
+                principal=principal,
+                scope=scope,
+                relation_scope=relation,
+                record_id="c" * 64,
+                actor_id="actor-1",
+                audit_id="audit_v1_host_claim",
+            ),
+        )
+    authority.replace_grants(
+        inventory_grants=inventory_grants,
+        claim_grants=claim_grants,
+    )
+    claims = _LegacyClaimProbe()
+    return LegacyClaimApi(authority, claims), claims
+
+
+def _legacy_claim_path(scope: object) -> str:
+    return scoped_api_path(
+        ScopeApiPathEcho(
+            bot_ref=scope.bot_ref.token,
+            persona_ref=scope.persona_ref.token,
+            session_ref=scope.session_ref.token,
+        ),
+        "legacy-claim",
+    )
+
+
 def test_host_principal_uses_only_a_published_resolver_key_and_is_domain_separated(tmp_path) -> None:
     import main
     from sylanne_alpha.scope_repository import ScopeRepository
@@ -1185,6 +1264,450 @@ def test_stdlib_scoped_http_uses_bearer_and_header_nonce_only(tmp_path) -> None:
                 for value in options.getheader("Access-Control-Allow-Headers", "").split(",")
             }
             assert options.read() == b""
+        finally:
+            connection.close()
+    finally:
+        asyncio.run(webui_server.stop_webui_server())
+        webui_server._active_token = previous_token
+        webui_server._active_plugin = previous_plugin
+        webui_server._csrf_token = previous_csrf
+
+
+@pytest.mark.asyncio
+async def test_pages_legacy_claim_rejects_session_and_injected_nonce_without_legacy_calls(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_scoped_api import _principal, _service
+    from sylanne_alpha import webui_routes
+    from sylanne_alpha.webui_routes import WebUIRoutes
+
+    service, repository, registry, scope, relation = _service(tmp_path)
+    principal = _principal("principal_v1_pages_legacy_claim")
+
+    class Plugin:
+        _scoped_api_service = service
+        _scope_runtime_registry = registry
+
+        @staticmethod
+        def _scoped_api_principal_from_authenticated_host(
+            host: object,
+            identity: object,
+        ) -> ScopedPrincipal | None:
+            return principal if (host, identity) == ("pages", "dashboard-user") else None
+
+        @staticmethod
+        def _scoped_api_principal_scope_grant(
+            candidate_principal: object,
+            candidate_scope: object,
+            action: object,
+        ) -> object | None:
+            if (
+                candidate_principal == principal
+                and candidate_scope == scope
+                and action == "POST:legacy-claim"
+            ):
+                return relation
+            return None
+
+        _scoped_api_principal_persona_grant = staticmethod(lambda *_args: None)
+
+    plugin = Plugin()
+    service._principal_scope_grant = plugin._scoped_api_principal_scope_grant
+    service._principal_persona_grant = plugin._scoped_api_principal_persona_grant
+    denied_api, denied_claims = _legacy_claim_probe_api(
+        repository,
+        principal,
+        scope,
+        relation,
+        allow_claim=False,
+        allow_inventory=False,
+    )
+    active_api = {"value": denied_api}
+    monkeypatch.setattr(
+        webui_routes,
+        "legacy_claim_api_for_plugin",
+        lambda _plugin: active_api["value"],
+    )
+
+    async def parsed(value: object) -> object:
+        return value
+
+    def set_request(*, nonce: str | None, body: object, query: dict[str, str]) -> None:
+        web = ModuleType("astrbot.api.web")
+        web.request = SimpleNamespace(
+            username="dashboard-user",
+            headers={} if nonce is None else {SCOPE_NONCE_HEADER: nonce},
+            path_params={
+                "bot_ref": scope.bot_ref.token,
+                "persona_ref": scope.persona_ref.token,
+                "session_ref": scope.session_ref.token,
+            },
+            query=query,
+            method="POST",
+            json=lambda: parsed(body),
+        )
+        monkeypatch.setitem(sys.modules, "astrbot.api.web", web)
+
+    def issue_nonce() -> str:
+        return service.issue_nonce(
+            scope,
+            relation,
+            turn_generation=7,
+            principal=principal,
+            endpoint="legacy-claim",
+            method="POST",
+        )
+
+    no_acl_nonce = issue_nonce()
+    set_request(nonce=no_acl_nonce, body={"record_id": "c" * 64}, query={})
+    assert await WebUIRoutes(plugin).scoped_api_handler("legacy-claim") == {
+        "error": "scope_principal_forbidden",
+        "status": 403,
+    }
+    assert no_acl_nonce in service._pending_nonces
+    assert (denied_claims.lookup_calls, denied_claims.issue_calls, denied_claims.claim_calls) == (0, 0, 0)
+
+    allowed_api, allowed_claims = _legacy_claim_probe_api(
+        repository,
+        principal,
+        scope,
+        relation,
+        allow_claim=True,
+        allow_inventory=True,
+    )
+    active_api["value"] = allowed_api
+    malformed_nonce = issue_nonce()
+    set_request(nonce=malformed_nonce, body={"record_id": "c" * 64, "nonce": malformed_nonce}, query={})
+    assert await WebUIRoutes(plugin).scoped_api_handler("legacy-claim") == {
+        "error": "invalid_legacy_claim_request",
+        "status": 400,
+    }
+    assert malformed_nonce in service._pending_nonces
+
+    query_nonce = issue_nonce()
+    set_request(nonce=None, body={"record_id": "c" * 64}, query={"scope_nonce": query_nonce})
+    assert await WebUIRoutes(plugin).scoped_api_handler("legacy-claim") == {
+        "error": "scope_nonce_required",
+        "status": 400,
+    }
+    assert query_nonce in service._pending_nonces
+    assert (allowed_claims.lookup_calls, allowed_claims.issue_calls, allowed_claims.claim_calls) == (0, 0, 0)
+
+    inventory_web = ModuleType("astrbot.api.web")
+    inventory_web.request = SimpleNamespace(username="dashboard-user", query={"session": "forged"})
+    monkeypatch.setitem(sys.modules, "astrbot.api.web", inventory_web)
+    assert await WebUIRoutes(plugin).legacy_inventory_handler() == {
+        "error": "legacy_session_selector_forbidden",
+        "status": 400,
+    }
+    assert allowed_claims.list_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_aiohttp_legacy_claim_rejects_session_and_injected_nonce_without_legacy_calls(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aiohttp import ClientSession
+
+    from sylanne_alpha import webui_server
+    from tests.test_scoped_api import _principal, _service
+
+    service, repository, registry, scope, relation = _service(tmp_path)
+    principal = _principal("principal_v1_aiohttp_legacy_claim")
+    bearer = "aiohttp-legacy-claim-token"
+
+    class Plugin:
+        _scoped_api_service = service
+        _scope_runtime_registry = registry
+
+        @staticmethod
+        def _scoped_api_principal_from_authenticated_host(
+            host: object,
+            identity: object,
+        ) -> ScopedPrincipal | None:
+            return principal if (host, identity) == ("standalone", bearer) else None
+
+        @staticmethod
+        def _scoped_api_principal_scope_grant(
+            candidate_principal: object,
+            candidate_scope: object,
+            action: object,
+        ) -> object | None:
+            if (
+                candidate_principal == principal
+                and candidate_scope == scope
+                and action == "POST:legacy-claim"
+            ):
+                return relation
+            return None
+
+        _scoped_api_principal_persona_grant = staticmethod(lambda *_args: None)
+
+    plugin = Plugin()
+    service._principal_scope_grant = plugin._scoped_api_principal_scope_grant
+    service._principal_persona_grant = plugin._scoped_api_principal_persona_grant
+    allowed_api, allowed_claims = _legacy_claim_probe_api(
+        repository,
+        principal,
+        scope,
+        relation,
+        allow_claim=True,
+        allow_inventory=True,
+    )
+    active_api = {"value": allowed_api}
+    monkeypatch.setattr(
+        webui_server,
+        "legacy_claim_api_for_plugin",
+        lambda _plugin: active_api["value"],
+    )
+    path = _legacy_claim_path(scope)
+    port = _unused_local_port()
+    previous_token = webui_server._active_token
+    previous_plugin = webui_server._active_plugin
+    previous_csrf = webui_server._csrf_token
+    webui_server._active_token = bearer
+    webui_server._csrf_token = "aiohttp-legacy-claim-csrf"
+    task = asyncio.create_task(webui_server.start_webui_server(plugin, host="127.0.0.1", port=port))
+    headers = {
+        "Authorization": f"Bearer {bearer}",
+        "X-CSRF-Token": "aiohttp-legacy-claim-csrf",
+    }
+
+    def issue_nonce() -> str:
+        return service.issue_nonce(
+            scope,
+            relation,
+            turn_generation=7,
+            principal=principal,
+            endpoint="legacy-claim",
+            method="POST",
+        )
+
+    try:
+        async with ClientSession() as client:
+            response = None
+            for _ in range(100):
+                try:
+                    response = await client.get(
+                        f"http://127.0.0.1:{port}/api/v1/legacy/inventory?session=forged",
+                        headers={"Authorization": f"Bearer {bearer}"},
+                    )
+                    break
+                except OSError:
+                    await asyncio.sleep(0.01)
+            assert response is not None
+            async with response:
+                assert response.status == 400
+                assert await response.json() == {"error": "legacy_session_selector_forbidden"}
+            assert allowed_claims.list_calls == 0
+
+            denied_api, denied_claims = _legacy_claim_probe_api(
+                repository,
+                principal,
+                scope,
+                relation,
+                allow_claim=False,
+                allow_inventory=False,
+            )
+            active_api["value"] = denied_api
+            no_acl_nonce = issue_nonce()
+            async with client.post(
+                f"http://127.0.0.1:{port}{path}",
+                json={"record_id": "c" * 64},
+                headers={**headers, SCOPE_NONCE_HEADER: no_acl_nonce},
+            ) as no_acl:
+                assert no_acl.status == 403
+                assert await no_acl.json() == {"error": "scope_principal_forbidden"}
+            assert no_acl_nonce in service._pending_nonces
+            assert (denied_claims.lookup_calls, denied_claims.issue_calls, denied_claims.claim_calls) == (0, 0, 0)
+
+            allowed_api, allowed_claims = _legacy_claim_probe_api(
+                repository,
+                principal,
+                scope,
+                relation,
+                allow_claim=True,
+                allow_inventory=True,
+            )
+            active_api["value"] = allowed_api
+            malformed_nonce = issue_nonce()
+            async with client.post(
+                f"http://127.0.0.1:{port}{path}",
+                data=b'{"record_id":"' + b"c" * 64 + b'","scope_nonce":"forged"}',
+                headers={**headers, SCOPE_NONCE_HEADER: malformed_nonce, "Content-Type": "application/json"},
+            ) as malformed:
+                assert malformed.status == 400
+                assert await malformed.json() == {"error": "invalid_legacy_claim_request"}
+            assert malformed_nonce in service._pending_nonces
+
+            query_nonce = issue_nonce()
+            async with client.post(
+                f"http://127.0.0.1:{port}{path}?scope_nonce={query_nonce}",
+                json={"record_id": "c" * 64},
+                headers=headers,
+            ) as query_nonce_response:
+                assert query_nonce_response.status == 400
+                assert await query_nonce_response.json() == {"error": "scope_nonce_required"}
+            assert query_nonce in service._pending_nonces
+            assert (allowed_claims.lookup_calls, allowed_claims.issue_calls, allowed_claims.claim_calls) == (0, 0, 0)
+    finally:
+        task.cancel()
+        await task
+        webui_server._active_token = previous_token
+        webui_server._active_plugin = previous_plugin
+        webui_server._csrf_token = previous_csrf
+
+
+def test_stdlib_legacy_claim_rejects_session_and_injected_nonce_without_legacy_calls(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sylanne_alpha import webui_server
+    from tests.test_scoped_api import _principal, _service
+
+    service, repository, registry, scope, relation = _service(tmp_path)
+    principal = _principal("principal_v1_stdlib_legacy_claim")
+    bearer = "stdlib-legacy-claim-token"
+
+    class Plugin:
+        _scoped_api_service = service
+        _scope_runtime_registry = registry
+
+        @staticmethod
+        def _scoped_api_principal_from_authenticated_host(
+            host: object,
+            identity: object,
+        ) -> ScopedPrincipal | None:
+            return principal if (host, identity) == ("standalone", bearer) else None
+
+        @staticmethod
+        def _scoped_api_principal_scope_grant(
+            candidate_principal: object,
+            candidate_scope: object,
+            action: object,
+        ) -> object | None:
+            if (
+                candidate_principal == principal
+                and candidate_scope == scope
+                and action == "POST:legacy-claim"
+            ):
+                return relation
+            return None
+
+        _scoped_api_principal_persona_grant = staticmethod(lambda *_args: None)
+
+    plugin = Plugin()
+    service._principal_scope_grant = plugin._scoped_api_principal_scope_grant
+    service._principal_persona_grant = plugin._scoped_api_principal_persona_grant
+    allowed_api, allowed_claims = _legacy_claim_probe_api(
+        repository,
+        principal,
+        scope,
+        relation,
+        allow_claim=True,
+        allow_inventory=True,
+    )
+    active_api = {"value": allowed_api}
+    monkeypatch.setattr(
+        webui_server,
+        "legacy_claim_api_for_plugin",
+        lambda _plugin: active_api["value"],
+    )
+    path = _legacy_claim_path(scope)
+    previous_token = webui_server._active_token
+    previous_plugin = webui_server._active_plugin
+    previous_csrf = webui_server._csrf_token
+    webui_server._active_token = bearer
+    webui_server._csrf_token = "stdlib-legacy-claim-csrf"
+    webui_server.start_webui_thread_server(plugin, host="127.0.0.1", port=0)
+    headers = {
+        "Authorization": f"Bearer {bearer}",
+        "X-CSRF-Token": "stdlib-legacy-claim-csrf",
+        "Content-Type": "application/json",
+    }
+
+    def issue_nonce() -> str:
+        return service.issue_nonce(
+            scope,
+            relation,
+            turn_generation=7,
+            principal=principal,
+            endpoint="legacy-claim",
+            method="POST",
+        )
+
+    try:
+        assert webui_server._httpd is not None
+        port = int(webui_server._httpd.server_address[1])
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        try:
+            connection.request(
+                "GET",
+                "/api/v1/legacy/inventory?session=forged",
+                headers={"Authorization": f"Bearer {bearer}"},
+            )
+            inventory = connection.getresponse()
+            assert inventory.status == 400
+            assert json.loads(inventory.read()) == {"error": "legacy_session_selector_forbidden"}
+            assert allowed_claims.list_calls == 0
+
+            denied_api, denied_claims = _legacy_claim_probe_api(
+                repository,
+                principal,
+                scope,
+                relation,
+                allow_claim=False,
+                allow_inventory=False,
+            )
+            active_api["value"] = denied_api
+            no_acl_nonce = issue_nonce()
+            connection.request(
+                "POST",
+                path,
+                body=json.dumps({"record_id": "c" * 64}).encode(),
+                headers={**headers, SCOPE_NONCE_HEADER: no_acl_nonce},
+            )
+            no_acl = connection.getresponse()
+            assert no_acl.status == 403
+            assert json.loads(no_acl.read()) == {"error": "scope_principal_forbidden"}
+            assert no_acl_nonce in service._pending_nonces
+            assert (denied_claims.lookup_calls, denied_claims.issue_calls, denied_claims.claim_calls) == (0, 0, 0)
+
+            allowed_api, allowed_claims = _legacy_claim_probe_api(
+                repository,
+                principal,
+                scope,
+                relation,
+                allow_claim=True,
+                allow_inventory=True,
+            )
+            active_api["value"] = allowed_api
+            malformed_nonce = issue_nonce()
+            connection.request(
+                "POST",
+                path,
+                body=json.dumps({"record_id": "c" * 64, "scope_nonce": "forged"}).encode(),
+                headers={**headers, SCOPE_NONCE_HEADER: malformed_nonce},
+            )
+            malformed = connection.getresponse()
+            assert malformed.status == 400
+            assert json.loads(malformed.read()) == {"error": "invalid_legacy_claim_request"}
+            assert malformed_nonce in service._pending_nonces
+
+            query_nonce = issue_nonce()
+            connection.request(
+                "POST",
+                f"{path}?scope_nonce={query_nonce}",
+                body=json.dumps({"record_id": "c" * 64}).encode(),
+                headers=headers,
+            )
+            query_nonce_response = connection.getresponse()
+            assert query_nonce_response.status == 400
+            assert json.loads(query_nonce_response.read()) == {"error": "scope_nonce_required"}
+            assert query_nonce in service._pending_nonces
+            assert (allowed_claims.lookup_calls, allowed_claims.issue_calls, allowed_claims.claim_calls) == (0, 0, 0)
         finally:
             connection.close()
     finally:

@@ -39,11 +39,12 @@ def _relation(scope: SessionScope) -> RelationScope:
 
 
 class _Claims:
-    def __init__(self) -> None:
+    def __init__(self, repository: ScopeRepository | None = None) -> None:
         self.list_calls = 0
         self.lookup_calls = 0
         self.issue_calls = 0
         self.claim_calls = 0
+        self.repository = repository
 
     def list_inventory(self):
         self.list_calls += 1
@@ -61,7 +62,11 @@ class _Claims:
 
     def claim_memory(self, _destination, _source, *, authorization_guard):
         self.claim_calls += 1
-        assert authorization_guard() is True
+        if self.repository is None:
+            assert authorization_guard() is True
+        else:
+            with self.repository.transaction():
+                assert authorization_guard() is True
         return SimpleNamespace(idempotent=False, recovered=False)
 
 
@@ -108,11 +113,12 @@ def test_exact_claim_returns_only_scope_safe_status_after_authorization(tmp_path
     from sylanne_alpha.legacy_claim_api import LegacyClaimApi
     from sylanne_alpha.legacy_claim_authority import LegacyClaimAuthority
 
-    authority = LegacyClaimAuthority(ScopeRepository(tmp_path), clock_ms=lambda: 1_000)
-    claims = _Claims()
+    repository = ScopeRepository(tmp_path)
+    scope = repository.create_scope(_scope(), expected_absent=True)
+    relation = repository.create_relation_scope(_relation(scope), expected_absent=True)
+    authority = LegacyClaimAuthority(repository, clock_ms=lambda: 1_000)
+    claims = _Claims(repository)
     api = LegacyClaimApi(authority, claims)
-    scope = _scope()
-    relation = _relation(scope)
     principal = ScopedPrincipal("principal_v1_admin")
     grant = authority.enroll_claim_grant(
         principal=principal,
@@ -135,5 +141,100 @@ def test_exact_claim_returns_only_scope_safe_status_after_authorization(tmp_path
         record_id="c" * 64,
         scope=scope,
         relation_scope=relation,
+        post_lookup_revalidate=lambda: True,
+        runtime_fence=lambda: True,
     ) == {"ok": True, "claim": {"record_id": "c" * 64, "status": "copied"}}
     assert (claims.lookup_calls, claims.issue_calls, claims.claim_calls) == (1, 1, 1)
+
+
+def test_post_lookup_runtime_fence_aborts_before_destination_write(tmp_path) -> None:
+    from sylanne_alpha.legacy_claim_api import LegacyClaimApi, LegacyClaimApiError
+    from sylanne_alpha.legacy_claim_authority import LegacyClaimAuthority
+
+    repository = ScopeRepository(tmp_path)
+    scope = repository.create_scope(_scope(), expected_absent=True)
+    relation = repository.create_relation_scope(_relation(scope), expected_absent=True)
+    authority = LegacyClaimAuthority(repository, clock_ms=lambda: 1_000)
+    claims = _Claims(repository)
+    api = LegacyClaimApi(authority, claims)
+    principal = ScopedPrincipal("principal_v1_runtime_fence")
+    grant = authority.enroll_claim_grant(
+        principal=principal,
+        scope=scope,
+        relation_scope=relation,
+        record_id="c" * 64,
+        actor_id="actor-1",
+        audit_id="audit_v1_runtime_fence",
+    )
+    authority.replace_grants(inventory_grants=(), claim_grants=(grant,))
+    intent = api.preflight(
+        principal,
+        "c" * 64,
+        ScopeApiPathEcho(scope.bot_ref.token, scope.persona_ref.token, scope.session_ref.token),
+    )
+
+    result = api.claim_after_authorization(
+        intent,
+        principal=principal,
+        record_id="c" * 64,
+        scope=scope,
+        relation_scope=relation,
+        post_lookup_revalidate=lambda: False,
+        runtime_fence=lambda: True,
+    )
+
+    assert isinstance(result, LegacyClaimApiError)
+    assert (result.status, result.code) == (409, "scope_stale")
+    assert (claims.lookup_calls, claims.issue_calls, claims.claim_calls) == (1, 0, 0)
+
+
+def test_locked_claim_fence_rejects_a_retired_durable_relation(tmp_path) -> None:
+    from sylanne_alpha.legacy_claim_authority import LEGACY_CLAIM_ACTION, LegacyClaimAuthority
+
+    repository = ScopeRepository(tmp_path)
+    scope = repository.create_scope(_scope(), expected_absent=True)
+    relation = repository.create_relation_scope(_relation(scope), expected_absent=True)
+    authority = LegacyClaimAuthority(repository, clock_ms=lambda: 1_000)
+    principal = ScopedPrincipal("principal_v1_retired_relation")
+    grant = authority.enroll_claim_grant(
+        principal=principal,
+        scope=scope,
+        relation_scope=relation,
+        record_id="c" * 64,
+        actor_id="actor-1",
+        audit_id="audit_v1_retired_relation",
+    )
+    authority.replace_grants(inventory_grants=(), claim_grants=(grant,))
+    intent = authority.preflight_claim(
+        principal,
+        "c" * 64,
+        ScopeApiPathEcho(scope.bot_ref.token, scope.persona_ref.token, scope.session_ref.token),
+    )
+    assert intent is not None
+    with repository.transaction():
+        assert authority.revalidate_claim_locked(
+            intent,
+            principal=principal,
+            record_id="c" * 64,
+            scope=scope,
+            relation_scope=relation,
+            action=LEGACY_CLAIM_ACTION,
+            actor_id="actor-1",
+        )
+
+    repository.retire_persona_revision(
+        scope.persona_ref,
+        expected_lifecycle_generation=scope.persona_ref.lifecycle_generation,
+        reason="test-retire-relation",
+    )
+
+    with repository.transaction():
+        assert not authority.revalidate_claim_locked(
+            intent,
+            principal=principal,
+            record_id="c" * 64,
+            scope=scope,
+            relation_scope=relation,
+            action=LEGACY_CLAIM_ACTION,
+            actor_id="actor-1",
+        )

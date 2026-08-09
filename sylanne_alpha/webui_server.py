@@ -473,6 +473,8 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
 
     async def handle_legacy_inventory(request: web.Request) -> web.Response:
         current_plugin = _plugin(plugin)
+        if "session" in request.query:
+            return scoped_error(ScopedApiError(400, "legacy_session_selector_forbidden"))
         principal = scoped_principal(request)
         if principal is None:
             return scoped_error(ScopedApiError(403, "scope_principal_required"))
@@ -617,6 +619,11 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
                 record_id=body["record_id"],
                 scope=checked.scope,
                 relation_scope=checked.relation_scope,
+                post_lookup_revalidate=lambda: isinstance(
+                    service.revalidate(checked),
+                    ScopedApiAuthorization,
+                ),
+                runtime_fence=lambda: service.runtime_fence(checked),
             )
             if isinstance(result, LegacyClaimApiError):
                 return scoped_error(ScopedApiError(result.status, result.code))
@@ -2286,7 +2293,11 @@ def start_webui_thread_server(
             self._send_json(error.public_payload(), status=error.status)
 
         def _read_scoped_json_body(self) -> object:
-            """Read a scoped mutation body only after the core nonce gate passes."""
+            """Read an ordinary scoped mutation body after its nonce gate.
+
+            ``legacy-claim`` is the sole exception: its adapter invokes this
+            parser earlier to validate the exact record body before preflight.
+            """
 
             try:
                 length = int(self.headers.get("Content-Length", "0") or "0")
@@ -2311,6 +2322,11 @@ def start_webui_thread_server(
             if path == "/api/v1/legacy/inventory":
                 if self.command != "GET":
                     self._send_scoped_error(ScopedApiError(400, "invalid_scoped_request"))
+                    return True
+                if "session" in query:
+                    self._send_scoped_error(
+                        ScopedApiError(400, "legacy_session_selector_forbidden")
+                    )
                     return True
                 principal = self._authenticated_scoped_principal()
                 if principal is None:
@@ -2540,6 +2556,11 @@ def start_webui_thread_server(
                     record_id=body["record_id"],
                     scope=checked.scope,
                     relation_scope=checked.relation_scope,
+                    post_lookup_revalidate=lambda: isinstance(
+                        service.revalidate(checked),
+                        ScopedApiAuthorization,
+                    ),
+                    runtime_fence=lambda: service.runtime_fence(checked),
                 )
                 if isinstance(result, LegacyClaimApiError):
                     self._send_scoped_error(ScopedApiError(result.status, result.code))
