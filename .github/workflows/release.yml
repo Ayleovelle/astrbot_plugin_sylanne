@@ -27,12 +27,25 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Extracted version: $VERSION"
 
+      - name: Resolve release channel
+        id: release-channel
+        run: |
+          CHANNEL=$(python -c "from pathlib import Path; from scripts.package_plugin import _metadata_channel_for_version, _read_metadata_version; print(_metadata_channel_for_version(_read_metadata_version(Path('metadata.yaml').read_bytes())))")
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+          if [ "$CHANNEL" = "grey" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Grey metadata detected; stable release is intentionally skipped."
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Check if release already exists
+        if: steps.release-channel.outputs.publish == 'true'
         id: check
         run: |
-          if gh release view "v${{ steps.version.outputs.version }}" &>/dev/null; then
+          if gh release view "Embodiment-${{ steps.version.outputs.version }}" &>/dev/null; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Release v${{ steps.version.outputs.version }} already exists, skipping"
+            echo "Release Embodiment-${{ steps.version.outputs.version }} already exists, skipping"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
@@ -40,7 +53,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract changelog for version
-        if: steps.check.outputs.exists == 'false'
+        if: steps.release-channel.outputs.publish == 'true' && steps.check.outputs.exists == 'false'
         id: changelog
         run: |
           VERSION="${{ steps.version.outputs.version }}"
@@ -56,8 +69,10 @@ jobs:
               print('修复了一些已知问题')
               sys.exit(0)
 
-          # Try new format: ## [vX.Y.Z] - YYYY-MM-DD
-          pattern = rf'## \[v{re.escape(version)}\]\s*-\s*\d{{4}}-\d{{2}}-\d{{2}}\s*\n(.*?)(?=\n## \[|\n## \d|\Z)'
+          # Try new format: ## [vX.Y.Z] - YYYY-MM-DD  或  ## [Embodiment-X.Y.Z] - YYYY-MM-DD
+          # （前缀两收；日期后允许尾注如「（灰度测试版 / grey）」，用 [^\n]* 吃掉，避免掉到
+          #   fallback 正则误抓文件里遗留的旧线裸 ## X.Y.Z 条目）
+          pattern = rf'## \[(?:v|Embodiment-){re.escape(version)}\]\s*-\s*\d{{4}}-\d{{2}}-\d{{2}}[^\n]*\n(.*?)(?=\n## \[|\n## \d|\Z)'
           match = re.search(pattern, content, re.DOTALL)
 
           if not match:
@@ -89,15 +104,15 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Install deps
-        if: steps.check.outputs.exists == 'false'
-        run: pip install aiohttp
+        if: steps.release-channel.outputs.publish == 'true' && steps.check.outputs.exists == 'false'
+        run: pip install -r requirements.txt
 
       - name: Build plugin zip
-        if: steps.check.outputs.exists == 'false'
-        run: python scripts/package_plugin.py --output dist/astrbot_plugin_sylanne-${{ steps.version.outputs.version }}.zip
+        if: steps.release-channel.outputs.publish == 'true' && steps.check.outputs.exists == 'false'
+        run: python scripts/package_plugin.py --channel stable --output dist/astrbot_plugin_sylanne-${{ steps.version.outputs.version }}.zip
 
       - name: Verify zip contents
-        if: steps.check.outputs.exists == 'false'
+        if: steps.release-channel.outputs.publish == 'true' && steps.check.outputs.exists == 'false'
         run: |
           python -c "
           import zipfile, sys
@@ -125,7 +140,7 @@ jobs:
           "
 
       - name: Import smoke test from zip
-        if: steps.check.outputs.exists == 'false'
+        if: steps.release-channel.outputs.publish == 'true' && steps.check.outputs.exists == 'false'
         run: |
           mkdir -p /tmp/verify && cd /tmp/verify
           unzip -q $GITHUB_WORKSPACE/dist/astrbot_plugin_sylanne-${{ steps.version.outputs.version }}.zip
@@ -143,10 +158,10 @@ jobs:
           "
 
       - name: Create tag and release
-        if: steps.check.outputs.exists == 'false'
+        if: steps.release-channel.outputs.publish == 'true' && steps.check.outputs.exists == 'false'
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: "v${{ steps.version.outputs.version }}"
+          tag_name: "Embodiment-${{ steps.version.outputs.version }}"
           name: "Sylanne-Embodiment ${{ steps.version.outputs.version }}"
           body: ${{ steps.changelog.outputs.body }}
           generate_release_notes: false

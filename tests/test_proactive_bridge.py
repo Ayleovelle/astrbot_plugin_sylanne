@@ -13,8 +13,10 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import unittest
 
+from sylanne_alpha.memory_system import MemorySystem
 from sylanne_alpha.proactive_bridge import ProactiveBridge
 
 
@@ -120,7 +122,7 @@ class FakeSylanne:
 
     def __init__(
         self, context, *, ritual=None, reason_code=None, origins=None,
-        body=None, guard_allowed=True,
+        body=None, guard_allowed=True, memory_system=None,
     ) -> None:
         self.context = context
         # 真实路径：映射存在 _store.session_origins（收消息时 pipeline 写入）
@@ -132,6 +134,12 @@ class FakeSylanne:
         self._body = body
         self._guard_allowed = guard_allowed
         self.proactive_calls = 0
+        # T2-05②：可选注入的 memory_system，供 infer_reason_code/build_motivation_text
+        # 查待跟进线索（不传则 _memory_system_for_session 不存在，行为与改动前一致）。
+        self._memory_system = memory_system
+
+    def _memory_system_for_session(self, session_key: str):
+        return self._memory_system
 
     async def proactive_sylanne(self, *, session_key: str, now: float = 0.0) -> dict:
         self.proactive_calls += 1
@@ -158,9 +166,9 @@ class TestDispatch(unittest.TestCase):
         res = asyncio.run(bridge.dispatch("aiocqhttp:GroupMessage:123::agent:u1", "素材A"))
         self.assertTrue(res["dispatched"])
         self.assertEqual(plugin.received, "素材A")
-        # 调用序：get → set → check → del
+        # 调用序（issue#43 Wave2 三段式）：get(基线) → set(注入) → check → get(RMW还原读) → del
         kinds = [c[0] for c in plugin.session_override_manager.calls]
-        self.assertEqual(kinds, ["get", "set", "check", "del"])
+        self.assertEqual(kinds, ["get", "set", "check", "get", "del"])
         # session_id 已剥后缀
         for c in plugin.session_override_manager.calls:
             if len(c) > 1:
@@ -286,6 +294,45 @@ class TestInferReasonCode(unittest.TestCase):
         rc = asyncio.run(bridge.infer_reason_code("s:1:1", surface=surface))
         self.assertEqual(rc, "ritual")
 
+    # -- T2-05②：跟进线索到期 reason_code --------------------------------
+
+    def test_user_followup_beats_computation_stack(self):
+        """跟进线索到期时，优先于计算栈缘由（void/scar）返回 user_followup。"""
+        mem = MemorySystem()
+        mem.write_summary("我答应你明天一定去面试", source_turns=2, temperature=0.5)
+        # 强制到期（写入时的模糊估计通常在未来，这里直接改到过去以模拟"已到期"）。
+        mem._pending_followups[0]["due_ts_estimate"] = time.time() - 10.0
+        syl = FakeSylanne(
+            FakeContext(FakeProactivePlugin()), ritual=None, reason_code="void",
+            memory_system=mem,
+        )
+        rc = asyncio.run(ProactiveBridge(syl).infer_reason_code("s:1:1"))
+        self.assertEqual(rc, "user_followup")
+
+    def test_ritual_priority_over_user_followup(self):
+        """仪式缺席仍然优先于跟进线索（既有优先级不因新增检查而改变）。"""
+        mem = MemorySystem()
+        mem.write_summary("我答应你明天一定去面试", source_turns=2, temperature=0.5)
+        mem._pending_followups[0]["due_ts_estimate"] = time.time() - 10.0
+        syl = FakeSylanne(
+            FakeContext(FakeProactivePlugin()), ritual="晚安", reason_code="void",
+            memory_system=mem,
+        )
+        rc = asyncio.run(ProactiveBridge(syl).infer_reason_code("s:1:1"))
+        self.assertEqual(rc, "ritual")
+
+    def test_no_due_followup_falls_through_to_computation_stack(self):
+        """跟进线索存在但未到期 → 不应命中 user_followup，继续走计算栈缘由。"""
+        mem = MemorySystem()
+        mem.write_summary("我答应你明天一定去面试", source_turns=2, temperature=0.5)
+        # 保留写入时估计的未来到期时间（未过期）
+        syl = FakeSylanne(
+            FakeContext(FakeProactivePlugin()), ritual=None, reason_code="scar",
+            memory_system=mem,
+        )
+        rc = asyncio.run(ProactiveBridge(syl).infer_reason_code("s:1:1"))
+        self.assertEqual(rc, "scar")
+
 
 class TestBuildMotivationText(unittest.TestCase):
     def test_contains_persona_reason_event_context(self):
@@ -313,6 +360,145 @@ class TestBuildMotivationText(unittest.TestCase):
         )
         self.assertIn("知花", text)
         self.assertIn("随便走走", text)
+
+    def test_user_followup_includes_topic(self):
+        """T2-05②：user_followup 缘由应带上到期线索的话题片段。"""
+        mem = MemorySystem()
+        mem.write_summary("我答应你明天一定去面试", source_turns=2, temperature=0.5)
+        mem._pending_followups[0]["due_ts_estimate"] = time.time() - 10.0
+        syl = FakeSylanne(FakeContext(FakeProactivePlugin()), memory_system=mem)
+        text = ProactiveBridge(syl).build_motivation_text(
+            "随便走走", "平静", reason_code="user_followup", session_key="s:1:1",
+        )
+        self.assertIn("面试", text)
+        self.assertIn("想问问后来怎么样了", text)
+
+    def test_user_followup_without_topic_uses_generic_phrase(self):
+        """无法取到 topic（无 memory_system）时退化为通用措辞，不报错。"""
+        syl = FakeSylanne(FakeContext(FakeProactivePlugin()))
+        text = ProactiveBridge(syl).build_motivation_text(
+            "随便走走", "平静", reason_code="user_followup", session_key="s:1:1",
+        )
+        self.assertIn("想问问后来怎么样了", text)
+
+
+class _HasGuardStore:
+    """MINOR(b) 专用替身：提供 .memory_systems.has()，可控制返回 True/False，
+    并记录 _memory_system_for_session 是否真的被调用过（懒创建探针）。"""
+
+    def __init__(self, has_result: bool) -> None:
+        self._has_result = has_result
+        self.has_calls: list[str] = []
+
+        class _Map:
+            def __init__(self, outer: "_HasGuardStore") -> None:
+                self._outer = outer
+
+            def has(self, session_key: str) -> bool:
+                self._outer.has_calls.append(session_key)
+                return self._outer._has_result
+
+        self.memory_systems = _Map(self)
+
+
+class TestInferReasonCodeMemorySystemGuard(unittest.TestCase):
+    """MINOR(b)：infer_reason_code 的跟进线索检查经 .has() 守卫，不该为没有
+    memory_system 的会话触发 _memory_system_for_session 的懒创建。"""
+
+    def test_has_false_skips_getter_no_phantom_session(self):
+        """store 报告该会话【没有】memory_system → 直接跳过，getter 压根不被调用。"""
+        store = _HasGuardStore(has_result=False)
+        getter_calls: list[str] = []
+
+        def _mem_getter(sk: str):
+            getter_calls.append(sk)
+            raise AssertionError("不该为 has()=False 的会话调用懒创建 getter")
+
+        syl = FakeSylanne(FakeContext(FakeProactivePlugin()), ritual=None, reason_code="scar")
+        syl._store = store
+        syl._memory_system_for_session = _mem_getter
+        rc = asyncio.run(ProactiveBridge(syl).infer_reason_code("brand_new"))
+        # 跳过 user_followup 检查，落回计算栈缘由
+        self.assertEqual(rc, "scar")
+        self.assertEqual(getter_calls, [])
+        self.assertIn("brand_new", store.has_calls)
+
+    def test_has_true_still_checks_due_followup(self):
+        """store 报告该会话【已有】memory_system → 正常经 getter 查到期线索。"""
+        mem = MemorySystem()
+        mem.write_summary("我答应你明天一定去面试", source_turns=2, temperature=0.5)
+        mem._pending_followups[0]["due_ts_estimate"] = time.time() - 10.0
+
+        store = _HasGuardStore(has_result=True)
+        syl = FakeSylanne(
+            FakeContext(FakeProactivePlugin()), ritual=None, reason_code="void",
+            memory_system=mem,
+        )
+        syl._store = store
+        rc = asyncio.run(ProactiveBridge(syl).infer_reason_code("s:1:1"))
+        self.assertEqual(rc, "user_followup")
+        self.assertIn("s:1:1", store.has_calls)
+
+    def test_no_guard_capability_falls_back_to_direct_getter_call(self):
+        """测试替身若不提供 _store.memory_systems（没有守卫能力，如既有 FakeSylanne
+        默认的 _FakeStore）→ 退化为直接调用 getter，行为与改动前一致（不因新增
+        守卫而破坏没有该能力的调用方）。"""
+        mem = MemorySystem()
+        mem.write_summary("我答应你明天一定去面试", source_turns=2, temperature=0.5)
+        mem._pending_followups[0]["due_ts_estimate"] = time.time() - 10.0
+        syl = FakeSylanne(
+            FakeContext(FakeProactivePlugin()), ritual=None, reason_code="void",
+            memory_system=mem,
+        )
+        rc = asyncio.run(ProactiveBridge(syl).infer_reason_code("s:1:1"))
+        self.assertEqual(rc, "user_followup")
+
+
+class TestConsumeFollowupOnDispatch(unittest.TestCase):
+    """MAJOR-1：user_followup 标签的消息真正发出后，消费掉产生该标签的那条
+    待跟进线索（bridge.consume_followup_on_dispatch，供两条 dispatch 路径调用）。
+    """
+
+    def test_consumes_due_entry_when_reason_code_is_user_followup(self):
+        mem = MemorySystem()
+        mem.write_summary("我答应你明天一定去面试", source_turns=2, temperature=0.5)
+        mem._pending_followups[0]["due_ts_estimate"] = time.time() - 10.0
+        syl = FakeSylanne(FakeContext(FakeProactivePlugin()), memory_system=mem)
+        bridge = ProactiveBridge(syl)
+
+        bridge.consume_followup_on_dispatch("s:1:1", "user_followup")
+
+        self.assertEqual(mem._pending_followups, [])
+
+    def test_noop_when_reason_code_is_not_user_followup(self):
+        """标签不是 user_followup 时是 no-op——不该误删跟这次发言无关的线索。"""
+        mem = MemorySystem()
+        mem.write_summary("我答应你明天一定去面试", source_turns=2, temperature=0.5)
+        mem._pending_followups[0]["due_ts_estimate"] = time.time() - 10.0
+        syl = FakeSylanne(FakeContext(FakeProactivePlugin()), memory_system=mem)
+        bridge = ProactiveBridge(syl)
+
+        bridge.consume_followup_on_dispatch("s:1:1", "void")
+
+        self.assertEqual(len(mem._pending_followups), 1)
+
+    def test_noop_when_no_memory_system(self):
+        """没有 memory_system 时静默 no-op，不报错。"""
+        syl = FakeSylanne(FakeContext(FakeProactivePlugin()))
+        bridge = ProactiveBridge(syl)
+        bridge.consume_followup_on_dispatch("s:1:1", "user_followup")  # 不应抛异常
+
+    def test_noop_when_no_due_entry(self):
+        """有 memory_system 但没有到期线索时是 no-op（防误删未到期的线索）。"""
+        mem = MemorySystem()
+        mem.write_summary("我答应你明天一定去面试", source_turns=2, temperature=0.5)
+        # 保留写入时估计的未来到期时间（未过期）
+        syl = FakeSylanne(FakeContext(FakeProactivePlugin()), memory_system=mem)
+        bridge = ProactiveBridge(syl)
+
+        bridge.consume_followup_on_dispatch("s:1:1", "user_followup")
+
+        self.assertEqual(len(mem._pending_followups), 1)
 
 
 class TestEndToEnd(unittest.TestCase):

@@ -1,7 +1,7 @@
 """WebUI 路由处理器模块（AstrBot register_web_api 版本）。
 
 封装所有通过 AstrBot 内置 Web 服务器注册的 HTTP 路由处理函数。
-这些路由运行在 AstrBot 的 Quart 应用内，受 AstrBot 自身的认证保护。
+这些路由运行在 AstrBot 的 FastAPI 应用内，受 AstrBot 自身的认证保护。
 
 与 webui_server.py 的区别：
 - 本模块的路由注册在 AstrBot 的 Web 服务器上（共享端口）
@@ -53,6 +53,70 @@ GLOSSARY: dict[str, str] = {
 }
 
 
+def build_model_routing_payload(
+    config: dict[str, Any],
+    schema: dict[str, Any],
+    providers: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Derive the compact routing summary without mutating stored values."""
+
+    def provider_id(key: str) -> str:
+        return str(config.get(key, "") or "").strip()
+
+    auxiliary_id = provider_id("sylanne_alpha_aux_provider_id")
+    transcription_id = provider_id("sylanne_alpha_transcription_provider_id")
+    embedding_id = provider_id("sylanne_alpha_embedding_memory_provider_id")
+
+    auxiliary: dict[str, Any] = {"mode": "inherit"}
+    if auxiliary_id:
+        auxiliary = {"mode": "explicit", "provider_id": auxiliary_id}
+
+    transcription: dict[str, Any] = {"mode": "auto"}
+    if transcription_id:
+        transcription = {"mode": "explicit", "provider_id": transcription_id}
+
+    embedding_enabled = bool(
+        config.get(
+            "sylanne_alpha_embedding_memory_enabled",
+            schema.get("sylanne_alpha_embedding_memory_enabled", {}).get(
+                "default", False
+            ),
+        )
+    )
+    embedding_providers = [
+        item
+        for item in providers
+        if str(item.get("type", "") or "").strip().lower() == "embedding"
+    ]
+    if not embedding_enabled:
+        embedding: dict[str, Any] = {"mode": "disabled"}
+    elif embedding_id:
+        embedding = {"mode": "explicit", "provider_id": embedding_id}
+    elif len(embedding_providers) == 1:
+        embedding = {
+            "mode": "auto",
+            "provider_id": str(embedding_providers[0].get("id", "") or ""),
+        }
+    elif embedding_providers:
+        embedding = {"mode": "selection_required"}
+    else:
+        embedding = {"mode": "unavailable"}
+
+    advanced_override_count = sum(
+        1
+        for key, meta in schema.items()
+        if meta.get("ui_tier") == "advanced_provider" and provider_id(key)
+    )
+    return {
+        "chat": {"mode": "current_conversation"},
+        "auxiliary": auxiliary,
+        "image_understanding": {"mode": "auto"},
+        "transcription": transcription,
+        "embedding": embedding,
+        "advanced_override_count": advanced_override_count,
+    }
+
+
 CONFIG_PRESETS: dict[str, dict[str, Any]] = {
     "gentle": {
         "name": "温柔型",
@@ -91,39 +155,83 @@ CONFIG_PRESETS: dict[str, dict[str, Any]] = {
 
 
 def _comp_gate_dict(comp: object) -> dict:
-    """取计算层 gate.to_dict()，兼容旧 .gate(公有) 与共振场 _gate(私有)。"""
-    g = getattr(comp, "gate", None) or getattr(comp, "_gate", None)
-    if g is not None and hasattr(g, "to_dict"):
-        try:
-            return g.to_dict()
-        except Exception:
-            return {}
-    return {}
+    """取 ResonanceSpine gate 的可观测状态。"""
+    try:
+        return comp.gate.to_dict()  # type: ignore[attr-defined]
+    except Exception:
+        return {}
 
 
 def _comp_boundary_dict(comp: object) -> dict:
-    """取计算层 boundary.to_dict()，兼容旧 .boundary 与共振场 _boundary。
+    """取 ResonanceSpine boundary 的可观测状态。
 
     共振场字段名为 boundary_integrity/internal_entropy，补 integrity/entropy
     别名以兼容下游(state_handler 读 integrity/entropy)。
     """
-    b = getattr(comp, "boundary", None) or getattr(comp, "_boundary", None)
-    if b is not None and hasattr(b, "to_dict"):
+    try:
+        d = dict(comp.boundary.to_dict())  # type: ignore[attr-defined]
+        d.setdefault("integrity", d.get("boundary_integrity", 1.0))
+        d.setdefault("entropy", d.get("internal_entropy", 0.0))
+        return d
+    except Exception:
+        return {}
+
+
+def _comp_route_stats(comp: object, history: object = None) -> tuple[dict[str, int], dict[str, int]]:
+    """Return the active computation backend's route counters in API/UI forms."""
+    counts: dict[str, Any] = {}
+    diagnostics = getattr(comp, "diagnostics", None)
+    if callable(diagnostics):
         try:
-            d = dict(b.to_dict())
-            d.setdefault("integrity", d.get("boundary_integrity", 1.0))
-            d.setdefault("entropy", d.get("internal_entropy", 0.0))
-            return d
+            raw = diagnostics()
+            if isinstance(raw, dict) and isinstance(raw.get("route_counts"), dict):
+                counts = raw["route_counts"]
         except Exception:
-            return {}
-    return {}
+            counts = {}
+
+    if not counts and isinstance(history, list):
+        for entry in history:
+            if not isinstance(entry, dict):
+                continue
+            route = str(entry.get("route") or "").strip().lower()
+            if route:
+                counts[route] = int(counts.get(route, 0)) + 1
+
+    route_stats: dict[str, int] = {}
+    for name, value in counts.items():
+        route = str(name).strip().lower()
+        if not route:
+            continue
+        try:
+            route_stats[route] = int(value)
+        except (TypeError, ValueError):
+            route_stats[route] = 0
+    if not route_stats:
+        route_stats = {"resonance": 0, "skip": 0}
+    route_distribution = {name.upper(): count for name, count in route_stats.items()}
+    return route_stats, route_distribution
+
+
+def _webui_session_items(plugin: object, session_keys: list[str]) -> list[dict[str, Any]]:
+    """Normalize session identifiers into the object contract consumed by the SPA."""
+    hosts = getattr(plugin, "_hosts", {}) or {}
+    items: list[dict[str, Any]] = []
+    for session_key in session_keys:
+        ticks = 0
+        host = hosts.get(session_key) if isinstance(hosts, dict) else None
+        if host is not None:
+            kernel = getattr(host, "kernel", None)
+            comp = getattr(kernel, "computation", None)
+            ticks = int(getattr(comp, "_tick_count", 0) or 0)
+        items.append({"id": session_key, "name": session_key, "tick_count": ticks})
+    return items
 
 
 class WebUIRoutes:
     """封装所有 WebUI HTTP 路由处理器。
 
     通过 self._p 引用插件实例，访问 hosts/config/memory 等资源。
-    所有 handler 方法都是 async，返回 dict 由 Quart 自动序列化为 JSON。
+    所有 handler 方法都是 async，返回 dict 由 FastAPI 自动序列化为 JSON。
     """
 
     def __init__(self, plugin: PluginHost) -> None:
@@ -137,9 +245,9 @@ class WebUIRoutes:
         return await self._p._sylanne_memory_settings_page_payload()
 
     async def memory_settings_post_handler(self) -> dict[str, Any]:
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        body = await quart_request.get_json(silent=True) or {}
+        body = await request.json() or {}
         return await self._p._update_sylanne_memory_settings_from_page(body)
 
     async def lineage_observatory_handler(self) -> dict[str, Any]:
@@ -152,13 +260,20 @@ class WebUIRoutes:
 
     async def page_handler(self) -> Any:
         """Return the full WebUI HTML page."""
-        from quart import Response
+        from astrbot.api.web import file_response, stream_response
 
         # WEBUI_HTML is a module-level constant in main.py; access via plugin module
         import main as _main_mod
 
+        dashboard_path = Path(self._plugin_dir) / "UI" / "index.html"
+        if dashboard_path.exists():
+            return file_response(
+                dashboard_path, content_type="text/html; charset=utf-8"
+            )
         html = getattr(_main_mod, "WEBUI_HTML", "<html><body>unavailable</body></html>")
-        return Response(html, content_type="text/html; charset=utf-8")
+        return stream_response(
+            [html], content_type="text/html; charset=utf-8"
+        )
 
     async def state_handler(self) -> dict[str, Any]:
         """返回完整状态 JSON，供 WebUI dashboard 渲染。
@@ -168,9 +283,9 @@ class WebUIRoutes:
         支持 ?session= 参数指定会话，默认选择最活跃的会话。
         """
         logger.debug("Sylanne WebUI: /api/state handler HIT")
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        requested_session = str(quart_request.args.get("session") or "").strip()
+        requested_session = str(request.query.get("session") or "").strip()
         all_sessions = self._p._known_webui_sessions(requested_session)
         # For overview (empty/default), use the most recently active session
         if (
@@ -219,17 +334,13 @@ class WebUIRoutes:
         gate_info = {
             "precision": round(gate_dict.get("precision", 0.0), 4),
             "mean_surprise": round(gate_dict.get("mean_surprise", 0.0), 4),
+            "threshold": round(gate_dict.get("threshold", 0.5), 4),
+            "route": str(getattr(comp, "_last_route", "") or "resonance").upper(),
             "history_len": gate_dict.get("history_len", 0),
             "history": history[-60:] if isinstance(history, list) else [],
         }
 
-        # Route stats
-        route_stats = {"fast": 0, "normal": 0, "full": 0, "skip": 0}
-        if isinstance(history, list):
-            for entry in history:
-                r = entry.get("route", "fast") if isinstance(entry, dict) else "fast"
-                if r in route_stats:
-                    route_stats[r] += 1
+        route_stats, route_distribution = _comp_route_stats(comp, history)
 
         # Void-Scar state as memory equivalent
         engine_diag = comp.engine.diagnostics()
@@ -342,19 +453,14 @@ class WebUIRoutes:
         }
 
         return {
-            "schema_version": "sylanne.webui.state.v1",
+            "schema_version": "sylanne.webui.state.v2",
             "runtime": self._p._webui_runtime_info(),
             "current_session": session_key,
             "session_id": session_key,
             "emotion": {k: round(v, 4) for k, v in emotion.items()},
             "gate": gate_info,
             "route_stats": route_stats,
-            "route_distribution": {
-                "FAST": route_stats.get("fast", 0),
-                "NORMAL": route_stats.get("normal", 0),
-                "FULL": route_stats.get("full", 0),
-                "SKIP": route_stats.get("skip", 0),
-            },
+            "route_distribution": route_distribution,
             "boundary": boundary_info,
             "expression": expr_info,
             "timing": timing,
@@ -365,7 +471,7 @@ class WebUIRoutes:
             "spine_layers": self._frontend_spine_layers(comp),
             "theme": {"base": "#F3A7C8", "source": "emotion", "mode": "soft"},
             "feedback": feedback,
-            "sessions": all_sessions,
+            "sessions": _webui_session_items(self._p, all_sessions),
             "life_simulation": self._p._life_simulator.to_dict(),
         }
 
@@ -378,12 +484,26 @@ class WebUIRoutes:
         schema = self._p._load_conf_schema()
         values = {}
         for key in schema:
-            values[key] = self._p._config.get(key, schema[key].get("default"))
+            raw = self._p._config.get(key, schema[key].get("default"))
+            # 敏感字段(cookie/token/密钥…)不明文下发到设置面板;有值则以哨兵替代。
+            if self._is_sensitive_key(key) and raw:
+                values[key] = self._MASKED_VALUE
+            else:
+                values[key] = raw
+        providers = await self.provider_items()
         return {
             "schema": schema,
             "values": values,
-            "providers": await self.provider_items(),
+            "providers": providers,
+            "model_routing": self._model_routing_payload(schema, providers),
         }
+
+    def _model_routing_payload(
+        self,
+        schema: dict[str, Any],
+        providers: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return build_model_routing_payload(self._p._config, schema, providers)
 
     async def provider_items(self) -> list[dict[str, Any]]:
         """尽力获取 AstrBot 已注册的 LLM/Embedding provider 列表，供设置面板下拉选择。"""
@@ -423,10 +543,12 @@ class WebUIRoutes:
                 }
             )
 
+        # Specific registries first: a generic registry may contain both kinds,
+        # and deduplication must not accidentally relabel an embedding model as LLM.
         for method_name, provider_type in (
-            ("get_all_providers", "llm"),
-            ("get_all_llm_providers", "llm"),
             ("get_all_embedding_providers", "embedding"),
+            ("get_all_llm_providers", "llm"),
+            ("get_all_providers", ""),
         ):
             getter = getattr(context, method_name, None)
             if not callable(getter):
@@ -446,13 +568,16 @@ class WebUIRoutes:
 
     async def settings_post_handler(self) -> dict[str, Any]:
         """接收设置面板提交的配置更新，按 schema 做类型强转后持久化。"""
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        body = await quart_request.get_json(silent=True) or {}
+        body = await request.json() or {}
         schema = self._p._load_conf_schema()
         updated: list[str] = []
         for key, value in body.items():
             if key not in schema:
+                continue
+            # 面板回传脱敏哨兵 = 用户未改动该敏感字段;跳过,绝不用 "***" 覆盖真凭据。
+            if self._is_sensitive_key(key) and value == self._MASKED_VALUE:
                 continue
             meta = schema[key]
             # Type coercion
@@ -488,13 +613,13 @@ class WebUIRoutes:
 
     async def computation_logs_handler(self) -> dict[str, Any]:
         """返回最近的计算日志条目，支持 ?limit= 和 ?session= 过滤。"""
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
         try:
-            limit = max(1, min(200, int(quart_request.args.get("limit", "50"))))
+            limit = max(1, min(200, int(request.query.get("limit", "50"))))
         except (TypeError, ValueError):
             limit = 50
-        requested_session = str(quart_request.args.get("session") or "").strip()
+        requested_session = str(request.query.get("session") or "").strip()
         logs = list(self._p._computation_logs)
         if requested_session:
             logs = [
@@ -520,7 +645,7 @@ class WebUIRoutes:
         支持跨会话聚合（overview 模式）或单会话查看。
         自动适配新版 MemorySystem 三层架构和旧版 body.memory.traces。
         """
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
         def _bounded_limit(raw: Any) -> int:
             try:
@@ -586,8 +711,8 @@ class WebUIRoutes:
                 )
             return bool(list(getattr(state, "records", []) or []))
 
-        limit = _bounded_limit(quart_request.args.get("limit", "50"))
-        session_key = str(quart_request.args.get("session") or "").strip()
+        limit = _bounded_limit(request.query.get("limit", "50"))
+        session_key = str(request.query.get("session") or "").strip()
         all_sessions = self._p._known_webui_sessions(session_key)
         overview_requested = not session_key or session_key == "default"
         if session_key and session_key not in all_sessions:
@@ -910,10 +1035,10 @@ class WebUIRoutes:
 
     async def memory_meltdown_handler(self) -> dict[str, Any]:
         """清除指定会话的所有记忆池。需要 token 验证（仅服务端 nonce）。"""
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
         try:
-            body = await quart_request.get_json()
+            body = await request.json()
         except Exception:
             body = {}
         if not isinstance(body, dict):
@@ -939,6 +1064,12 @@ class WebUIRoutes:
             mem_sys._l3_nodes.clear()
             mem_sys._l3_edges.clear()
             mem_sys._tick = 0
+            # MEM-02②/①: 显式擦除是唯一允许"空对象覆盖 KV"的路径——标记为已补水，
+            # 使 save_sylanne_memory_state 的空对象保护闸门不拦这次之后的写入；
+            # 同时若一次尚未完成的后台补水任务此刻正好读完 KV 准备合并，它会在
+            # merge 前重新检查 _hydrated 并发现已被这里设为 True，从而放弃合并，
+            # 避免把刚清除的记忆从 KV 旧档里复活回来。
+            mem_sys._hydrated = True
         # Also clear legacy body traces
         hosts = getattr(self._p, "_hosts", {}) or {}
         if session in hosts:
@@ -962,9 +1093,9 @@ class WebUIRoutes:
 
     async def meltdown_nonce_handler(self) -> dict[str, Any]:
         """GET /api/meltdown_nonce — 生成并返回一次性 nonce。"""
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        session = str(quart_request.args.get("session") or "").strip()
+        session = str(request.query.get("session") or "").strip()
         nonce = self.generate_meltdown_nonce(session)
         return {"nonce": nonce}
 
@@ -978,9 +1109,9 @@ class WebUIRoutes:
         异步启动 LLM 评估流程，立即返回预估时间。
         评估完成后 consolidation_candidates() 会有已确认条目可供下沉。
         """
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        body = await quart_request.get_json(silent=True) or {}
+        body = await request.json() or {}
         session = str(body.get("session", "")).strip()
         if not session:
             return {"ok": False, "error": "missing session param"}
@@ -1011,9 +1142,9 @@ class WebUIRoutes:
             {"ok": true, "sunk": <下沉条目数>}
             {"ok": false, "error": "..."}  — 无可下沉条目或会话无效时
         """
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        session = str(quart_request.args.get("session") or "").strip()
+        session = str(request.query.get("session") or "").strip()
         if not session:
             return {"ok": False, "error": "missing session param"}
 
@@ -1203,12 +1334,12 @@ class WebUIRoutes:
 
     async def life_controls_handler(self) -> dict[str, Any]:
         """POST /api/life/controls — 用户控制（开关 / 强度 / 清除 journal/projects/plan）。"""
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
         life_sim = getattr(self._p, "_life_simulator", None)
         if life_sim is None:
             return {"error": "life sim not available"}
-        body = await quart_request.get_json(silent=True) or {}
+        body = await request.json() or {}
         if not isinstance(body, dict):
             return {"error": "invalid body"}
         action = str(body.get("action", "") or "").strip()
@@ -1279,9 +1410,9 @@ class WebUIRoutes:
 
         导出内容包括：记忆系统状态、人格参数、伤痕/虚空状态、计算栈快照。
         """
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        session_key = str(quart_request.args.get("session_key") or "").strip()
+        session_key = str(request.query.get("session_key") or "").strip()
         if not session_key:
             return {"ok": False, "error": "missing session_key param"}
 
@@ -1343,9 +1474,9 @@ class WebUIRoutes:
 
         删除内容：记忆系统、持久化 KV 状态、host 实例、对话缓冲。
         """
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        session_key = str(quart_request.args.get("session_key") or "").strip()
+        session_key = str(request.query.get("session_key") or "").strip()
         if not session_key:
             return {"ok": False, "error": "missing session_key param"}
 
@@ -1363,6 +1494,12 @@ class WebUIRoutes:
             mem_sys._l3_nodes.clear()
             mem_sys._l3_edges.clear()
             mem_sys._tick = 0
+            # FIX(F1，完整性复审)：与 meltdown 同理——显式擦除必须把 _hydrated 置 True，
+            # 否则 _memory_system_for_session 懒创建时排的后台补水任务会在本 handler 的
+            # 后续 await 期间跑起来、从尚未删除的 KV 旧档把刚清空的记忆合并回活体，随后
+            # 一次周期 save 又把它写回 KV——显式清除被自己的补水复活。置 True 让补水的
+            # 二次 _hydrated 检查放弃合并。
+            mem_sys._hydrated = True
             purged.append("memory_system")
 
         # Remove host instance
@@ -1438,27 +1575,38 @@ class WebUIRoutes:
     def _frontend_spine_layers(self, comp: Any) -> list[dict[str, Any]]:
         """将计时数据转换为前端期望的 spine_layers 数组。"""
         layer_meta = [
-            ("L1", "HDC Perception", "Hyperdimensional binary encoding. Converts text to 2048-bit vectors."),
-            ("L2", "Predictive Coding Gate", "Computes Hamming surprise against prediction. Routes processing path."),
-            ("L3", "Void-Scar Engine", "Irreversible scar state tracking. Wounds heal through stages."),
-            ("L4", "Relational Sheaf", "Cross-relationship propagation via sheaf Laplacian."),
-            ("L5", "MoE-HGT", "Mixture-of-Experts + Heterogeneous Graph Transformer."),
-            ("L6", "Autopoietic Boundary", "32-dim identity kernel with orthogonal projection."),
-            ("L7", "Phase Transition", "Pressure accumulation to threshold. Expression modes."),
+            ("L1", "perception", "HDC Perception", "Hyperdimensional binary encoding. Converts text to 2048-bit vectors."),
+            ("L2", "gate", "Predictive Coding Gate", "Computes Hamming surprise against prediction. Routes processing path."),
+            ("L3", "void_scar", "Void-Scar Engine", "Irreversible scar state tracking. Wounds heal through stages."),
+            ("L4", "sheaf", "Relational Sheaf", "Cross-relationship propagation via sheaf Laplacian."),
+            ("L5", "hgt", "MoE-HGT", "Mixture-of-Experts + Heterogeneous Graph Transformer."),
+            ("L6", "boundary", "Autopoietic Boundary", "32-dim identity kernel with orthogonal projection."),
+            ("L7", "expression", "Phase Transition", "Pressure accumulation to threshold. Expression modes."),
         ]
         timing_raw = comp.timing_stats() if hasattr(comp, "timing_stats") else {}
         result = []
-        for lid, name, desc in layer_meta:
-            stats = timing_raw.get(lid, timing_raw.get(lid.replace("L", "layer_"), {}))
+        for lid, internal_key, name, desc in layer_meta:
+            stats = timing_raw.get(
+                internal_key,
+                timing_raw.get(lid, timing_raw.get(lid.replace("L", "layer_"), {})),
+            )
             if not isinstance(stats, dict):
                 stats = {}
-            avg_ms = round(stats.get("mean_ns", stats.get("p50_ns", 0)) / 1_000_000, 1)
-            p50_ms = round(stats.get("p50_ns", 0) / 1_000_000, 1)
-            p99_ms = round(stats.get("p99_ns", stats.get("p95_ns", 0)) / 1_000_000, 1)
+            avg_ms = round(
+                stats.get("mean_ns", stats.get("p50_ns", 0)) / 1_000_000, 6
+            )
+            p50_ms = round(stats.get("p50_ns", 0) / 1_000_000, 6)
+            p95_ms = round(
+                stats.get("p95_ns", stats.get("p99_ns", 0)) / 1_000_000, 6
+            )
+            p99_ms = round(
+                stats.get("p99_ns", stats.get("p95_ns", 0)) / 1_000_000, 6
+            )
             count = int(stats.get("count", 0))
             result.append({
                 "id": lid, "name": name, "status": "active" if count > 0 else "idle",
-                "avg": avg_ms, "p50": p50_ms, "p99": p99_ms, "count": count, "desc": desc,
+                "avg": avg_ms, "p50": p50_ms, "p95": p95_ms, "p99": p99_ms,
+                "count": count, "desc": desc,
             })
         return result
 
@@ -1556,23 +1704,23 @@ class WebUIRoutes:
 
     async def logo_handler(self) -> Any:
         """返回插件 logo.png，设置正确的 Content-Type。"""
-        from quart import Response
+        from astrbot.api.web import error_response, file_response
 
         logo_path = Path(self._plugin_dir) / "logo.png"
         if not logo_path.exists():
-            return Response("Not Found", status=404)
-        data = logo_path.read_bytes()
-        return Response(data, content_type="image/png")
+            return error_response("Not Found", status_code=404)
+        return file_response(logo_path, content_type="image/png")
 
     async def dashboard_handler(self) -> Any:
         """通过 AstrBot 内置 Web 服务器提供 WebUI dashboard HTML 页面。"""
-        from quart import Response
+        from astrbot.api.web import error_response, file_response
 
         dashboard_path = Path(self._plugin_dir) / "UI" / "index.html"
         if not dashboard_path.exists():
-            return Response("Dashboard not found", status=404)
-        html = dashboard_path.read_text(encoding="utf-8")
-        return Response(html, content_type="text/html; charset=utf-8")
+            return error_response("Dashboard not found", status_code=404)
+        return file_response(
+            dashboard_path, content_type="text/html; charset=utf-8"
+        )
 
     # ------------------------------------------------------------------
     # Item 47: /health 健康检查（不需要认证）
@@ -1617,8 +1765,10 @@ class WebUIRoutes:
     _SENSITIVE_CONFIG_KEYS = frozenset({
         "sylanne_webui_token", "api_key", "secret", "token",
         "password", "credential", "auth_key", "openai_key",
-        "anthropic_key", "gemini_key",
+        "anthropic_key", "gemini_key", "cookie",
     })
+    # GET 侧脱敏用的哨兵；POST 侧收到该值表示"未改动",不覆盖已存凭据。
+    _MASKED_VALUE = "***"
 
     def _is_sensitive_key(self, key: str) -> bool:
         lower = key.lower()
@@ -1634,9 +1784,9 @@ class WebUIRoutes:
 
     async def config_import_handler(self) -> dict[str, Any]:
         """POST /api/config_import — 接收 JSON body 覆盖写入配置（安全字段保护）。"""
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        body = await quart_request.get_json(silent=True)
+        body = await request.json()
         if not isinstance(body, dict) or not body:
             return {"ok": False, "error": "expected_object"}
         config = getattr(self._p, "_config", None)
@@ -1664,14 +1814,56 @@ class WebUIRoutes:
         return _build_widget_state(self._p)
 
     # ------------------------------------------------------------------
+    # 认知核页镜像：GET /api/v2core_state（与独立 webui_server 共用同一 builder）
+    # ------------------------------------------------------------------
+
+    async def v2core_state_handler(self) -> dict[str, Any]:
+        """v2core 认知核状态（嵌入式 AstrBot Web 服务器镜像，纯只读）。"""
+        from astrbot.api.web import request
+
+        from sylanne_alpha.webui_server import _v2core_state_payload
+
+        session = str(request.query.get("session") or "").strip()
+        return _v2core_state_payload(self._p, session=session)
+
+    # ------------------------------------------------------------------
+    # MEM-03 PR-7：三只读 admin 端点（嵌入式镜像，与独立 webui_server 共用
+    # 同一批 _admin_* builder，见 webui_server.py 同名函数注释）。
+    # ------------------------------------------------------------------
+
+    async def admin_inspect_handler(self) -> dict[str, Any]:
+        """GET /api/admin/inspect — 单 session 记忆诊断（纯只读）。"""
+        from astrbot.api.web import request
+
+        from sylanne_alpha.webui_server import _admin_inspect_payload
+
+        session = str(request.query.get("session") or "").strip()
+        return await _admin_inspect_payload(self._p, session=session)
+
+    async def admin_quarantine_view_handler(self) -> dict[str, Any]:
+        """GET /api/admin/quarantine_view — quarantine 侧车只读视图。"""
+        from astrbot.api.web import request
+
+        from sylanne_alpha.webui_server import _admin_quarantine_view_payload
+
+        session = str(request.query.get("session") or "").strip()
+        return await _admin_quarantine_view_payload(self._p, session=session)
+
+    async def admin_pending_deletes_handler(self) -> dict[str, Any]:
+        """GET /api/admin/pending_deletes — 跨重启 pending-delete 索引镜像快照。"""
+        from sylanne_alpha.webui_server import _admin_pending_deletes_payload
+
+        return _admin_pending_deletes_payload(self._p)
+
+    # ------------------------------------------------------------------
     # Item 6: POST /api/proactive_feedback 主动发言反馈
     # ------------------------------------------------------------------
 
     async def proactive_feedback_handler(self) -> dict[str, Any]:
         """接收用户对主动发言的反馈（positive/negative）。"""
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        body = await quart_request.get_json(silent=True) or {}
+        body = await request.json() or {}
         session_key = str(body.get("session_key", "")).strip()
         timestamp = float(body.get("timestamp", 0))
         rating = str(body.get("rating", "")).strip()
@@ -1700,9 +1892,9 @@ class WebUIRoutes:
         """GET /api/memory/decay_curve?memory_id=xxx — 返回记忆衰减时间序列。"""
         import math as _math
 
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        memory_id = str(quart_request.args.get("memory_id") or "").strip()
+        memory_id = str(request.query.get("memory_id") or "").strip()
         if not memory_id:
             return {"ok": False, "error": "missing memory_id param"}
 
@@ -1808,9 +2000,9 @@ class WebUIRoutes:
 
         期望格式：{"embodiment_five": {...}, "sylanne_six": {...}, "description": "..."}
         """
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        body = await quart_request.get_json(silent=True)
+        body = await request.json()
         if not isinstance(body, dict):
             return {"ok": False, "error": "expected JSON object"}
 

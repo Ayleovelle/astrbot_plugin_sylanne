@@ -21,7 +21,7 @@ class ReconsolidationCapability:
     phases = (Phase.EVOLVE,)
 
     def evolve(self, ctx: BeatContext) -> None:
-        recalled = ctx.scratch.get("recalled")
+        recalled = ctx.scratch.get("recalled_deliberate") or ctx.scratch.get("recalled")
         if not recalled:
             return                      # 本轮没召回 → 无重固化窗口
         memory = ctx.domain("memory")
@@ -64,7 +64,11 @@ def _mean_recalled_warmth(recalled: list) -> float | None:
     vals = []
     for r in recalled:
         if isinstance(r, dict):
-            v = r.get("temperature", r.get("warmth"))
+            # dict.get 的 default 只在缺键时生效：temperature 键存在但值为 None 时
+            # r.get("temperature", r.get("warmth")) 会拿到 None 而非回退 warmth。显式判 None。
+            v = r.get("temperature")
+            if v is None:
+                v = r.get("warmth")
             if v is not None:
                 try:
                     vals.append(float(v))

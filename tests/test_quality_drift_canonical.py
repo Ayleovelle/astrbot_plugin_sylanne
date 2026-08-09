@@ -16,7 +16,7 @@ from sylanne_alpha.v2core.integration import consume_pending_quality
 
 def _plugin_with_rt(pending_quality) -> SimpleNamespace:  # noqa: ANN001
     p = SimpleNamespace()
-    p._config = {"sylanne_enable_v2core": True}
+    p._config = {}
     p._v2core_runtimes = {
         "s": {"pending_quality": pending_quality},
     }
@@ -57,11 +57,12 @@ def test_consume_stale_dict_dropped() -> None:
     assert p._v2core_runtimes["s"]["pending_quality"] is None  # 仍取出即清
 
 
-def test_consume_disabled_returns_none() -> None:
-    """v2core 关 → None（绞杀式回退，不碰新通道）。"""
+def test_legacy_disable_key_is_ignored() -> None:
+    """已退役的 false 配置值不阻止消费 canonical 质量分。"""
     p = _plugin_with_rt(0.9)
     p._config = {"sylanne_enable_v2core": False}
-    assert consume_pending_quality(p, "s") is None
+    assert consume_pending_quality(p, "s") == 0.9
+    assert p._v2core_runtimes["s"]["pending_quality"] is None
 
 
 def test_consume_bad_value_safe() -> None:
@@ -73,7 +74,7 @@ def test_consume_bad_value_safe() -> None:
 def test_consume_no_runtime_safe() -> None:
     """会话无 runtime → None（容错）。"""
     p = SimpleNamespace()
-    p._config = {"sylanne_enable_v2core": True}
+    p._config = {}
     p._v2core_runtimes = {}
     assert consume_pending_quality(p, "missing") is None
 

@@ -162,6 +162,15 @@ def test_injection_tot_hides_content():
     assert "情绪有点低落" in out  # 负向情感线索
 
 
+def test_injection_carries_discipline_line():
+    """T4-03①：注入卫生——[记忆参考] 块要带一句纪律提示，别照抄前缀/报时间戳/说
+    "你上次说过"，防止 LLM 把召回内容当播报稿念出来。"""
+    m = _sys()
+    out = m.format_recall_injection([_mk("你喜欢拿铁", "clear")], max_items=3)
+    assert "自己记起来的事" in out
+    assert "别用" in out and "你上次说过" in out
+
+
 def test_injection_legacy_unchanged():
     """LEGACY 结果（confidence 默认 clear）注入行为不变。"""
     m = _sys()

@@ -17,7 +17,7 @@ AlphaKernel 是 Sylanne-Embodiment 的中枢调度器，驱动 7 层计算管线
 
 与其他组件的关系：
 - SylanneAlphaHost 持有一个 AlphaKernel 实例
-- ComputationSpine 负责 Void-Scar Engine / HDC / HGT 等底层计算
+- ResonanceSpine 负责 Void-Scar Engine / HDC / HGT 等底层计算
 - prompt_surface 模块负责将 kernel 状态渲染为 prompt fragment
 - personality 模块负责人格特质的初始化和漂移
 """
@@ -32,9 +32,7 @@ from typing import TYPE_CHECKING, Any
 
 from .attention import focus_information_flood
 from .body import SCHEMA_VERSION, AlphaBodyState
-from .computation_spine import ComputationSpine
 from .hot_pool import HotPool
-from .importer import import_legacy_body
 from .personality import drift_sylanne_traits, initial_personality
 from .prompt_surface import (
     render_diagnostics,
@@ -43,17 +41,11 @@ from .prompt_surface import (
     render_prompt_fragment,
 )
 from .workset import build_fragment_workset
-
-try:
-    from .resonance_integration import ResonanceSpine
-
-    _DEFAULT_SPINE: type = ResonanceSpine
-except ImportError:
-    ResonanceSpine = ComputationSpine  # type: ignore[assignment, misc]
-    _DEFAULT_SPINE = ComputationSpine
+from .resonance_integration import ResonanceSpine
 
 if TYPE_CHECKING:
     from ..config import DimensionProfile
+    from ..telemetry import DistillationSink
 
 logger = logging.getLogger("sylanne_core")
 
@@ -120,27 +112,33 @@ class AlphaKernel:
     personality: dict[str, Any] = field(default_factory=dict)
     moral_repair: dict[str, Any] = field(default_factory=dict)
     fallibility: dict[str, Any] = field(default_factory=dict)
-    computation: ComputationSpine | ResonanceSpine = field(default_factory=_DEFAULT_SPINE)
+    computation: ResonanceSpine = field(default_factory=ResonanceSpine)
     hot_pool: HotPool = field(default_factory=HotPool)
     _last_computation_result: dict[str, Any] = field(default_factory=dict)
     _cached_vector_summary: dict[str, float] | None = field(default=None, repr=False)
-    _last_injected_state: dict[str, float] | None = field(default=None, repr=False)
+    # Unresolved emotional pressure (allostatic threshold bias for proactive reach-out).
+    # Asymmetric-leak scalar: spikes on a hurtful/negative read, leaks slowly, clears
+    # when soothed or after a successful reach-out. Lowers reach_out's need_contact
+    # threshold so a bruised exchange brings her back sooner than flat silence would —
+    # but never bypasses _guard (opt-in/cooldown/budget/sovereignty all stay in front).
+    _affect_debt: float = 0.0
+    # Optional distillation corpus sink (runtime-only; never serialized). Attached
+    # by the host after load when SylanneConfig.training_data_sink is on; otherwise
+    # stays None so the per-tick guard is a single None check (zero cost when off).
+    _telemetry_sink: DistillationSink | None = field(default=None, repr=False, compare=False)
 
     @classmethod
     def boot(
         cls,
         session_key: str,
-        legacy: dict[str, Any] | None = None,
         profile: DimensionProfile | None = None,
+        *,
+        pel_enabled: bool = False,
     ) -> AlphaKernel:
-        """从零创建或从旧版数据迁移创建 kernel。"""
-        if legacy is None:
-            kernel = cls(session_key=session_key)
-        else:
-            body, audit, turns = import_legacy_body(legacy)
-            kernel = cls(session_key=session_key, body=body, audit=audit, turns=turns)
+        """从当前配置创建全新 kernel。"""
+        kernel = cls(session_key=session_key)
         if profile is not None:
-            kernel.computation = _DEFAULT_SPINE(profile=profile)
+            kernel.computation = ResonanceSpine(profile=profile, pel_enabled=pel_enabled)
             kernel.hot_pool = HotPool(n_dims=profile.emotion_dim, mode=profile.mode)
         return kernel
 
@@ -149,6 +147,8 @@ class AlphaKernel:
         cls,
         snapshot: dict[str, Any],
         profile: DimensionProfile | None = None,
+        *,
+        pel_enabled: bool = False,
     ) -> AlphaKernel:
         """从持久化快照恢复 kernel，对每个字段做类型安全的反序列化。"""
         kernel = cls(
@@ -166,7 +166,7 @@ class AlphaKernel:
             fallibility=_as_dict(snapshot.get("fallibility")),
         )
         if profile is not None:
-            kernel.computation = _DEFAULT_SPINE(profile=profile)
+            kernel.computation = ResonanceSpine(profile=profile, pel_enabled=pel_enabled)
             kernel.hot_pool = HotPool(n_dims=profile.emotion_dim, mode=profile.mode)
         if "computation" in snapshot and isinstance(snapshot["computation"], dict):
             kernel.computation.from_dict(snapshot["computation"])
@@ -178,6 +178,10 @@ class AlphaKernel:
             snapshot["_last_computation_result"], dict
         ):
             kernel._last_computation_result = snapshot["_last_computation_result"]
+        try:
+            kernel._affect_debt = max(0.0, min(1.0, float(snapshot.get("_affect_debt", 0.0))))
+        except (TypeError, ValueError):
+            kernel._affect_debt = 0.0
         return kernel
 
     def tick(
@@ -221,6 +225,12 @@ class AlphaKernel:
         event: AlphaKernelEvent,
         assessment: dict[str, Any] | None,
     ) -> dict[str, Any]:
+        # Container guard for the public host.on_request(assessment=...) boundary: a
+        # non-dict assessment would AttributeError in _update_affect_debt (its except
+        # catches only TypeError/ValueError) and in the spine. Normalize once so all
+        # downstream consumers treat a malformed container as "no assessment".
+        if assessment is not None and not isinstance(assessment, dict):
+            assessment = None
         self.body.apply(
             text=event.text,
             flags=event.flags,
@@ -254,6 +264,10 @@ class AlphaKernel:
             assessment=assessment,
             dialogue_quality=_dq,
         )
+        # Emotional debt is updated from this tick's read before _decide reads the
+        # reach_out threshold — a bruising exchange brings her back sooner than flat
+        # silence. Only biases the threshold; _guard still gates every outward action.
+        self._update_affect_debt(assessment)
         collapse_record = self.hot_pool.tick(body=self.body, spine=self.computation)
         if collapse_record is not None:
             self._apply_collapse(collapse_record)
@@ -274,6 +288,10 @@ class AlphaKernel:
         )
         self.last_decision = self._decide()
         self.last_guard = self._guard(self.last_decision)
+        # Distillation corpus capture (par1): assessed ticks only, numeric-only,
+        # never the raw text. A None sink is a single is-check — zero cost when off.
+        if self._telemetry_sink is not None and assessment is not None:
+            self._capture_telemetry(assessment)
         return {
             "state": self.body,
             "decision": self.last_decision,
@@ -332,6 +350,7 @@ class AlphaKernel:
             "computation": self.computation.to_dict(),
             "hot_pool": self.hot_pool.to_dict(),
             "_last_computation_result": self._last_computation_result,
+            "_affect_debt": self._affect_debt,
         }
 
     def _diagnostics(
@@ -831,6 +850,137 @@ class AlphaKernel:
         self._cached_vector_summary = summary
         return summary
 
+    def _trait_view(self) -> dict[str, Any]:
+        """Effective Big-Five traits for this session (handles the optional
+        ``{"traits": {...}}`` wrapper). Per-relationship and drifts over time, so
+        affect-driven timing is her temperament, not a global knob."""
+        p = self._personality()
+        if not isinstance(p, dict):
+            return {}
+        inner = p.get("traits", p)
+        return inner if isinstance(inner, dict) else {}
+
+    def _update_affect_debt(self, assessment: dict[str, Any] | None) -> None:
+        """Accumulate unresolved emotional pressure (allostatic threshold bias).
+
+        Asymmetric leak, paced by personality so the behaviour emerges from her
+        traits rather than a hardcoded knob: a bruising read spikes it fast, calm
+        leaks it slowly, being soothed clears it. Reads ONLY the raw assessment
+        (valence/wound_risk); with no assessment (idle / proactive checks) it merely
+        leaks. Never touches ``body.needs`` or ``_guard`` — it only biases the
+        reach_out threshold in ``_decide``; the safety gates stay fully in front.
+        """
+        t = self._trait_view()
+        neuro = max(0.0, min(1.0, float(t.get("neuroticism", 0.5))))
+        leak = max(0.02, min(0.14, 0.08 - 0.05 * (neuro - 0.5)))  # high neuroticism holds longer
+        debt = self._affect_debt * (1.0 - leak)
+        if assessment:
+            try:
+                valence = max(-1.0, min(1.0, float(assessment.get("valence", 0.0))))
+                wound = max(0.0, min(1.0, float(assessment.get("wound_risk", 0.0))))
+            except (TypeError, ValueError):
+                valence, wound = 0.0, 0.0
+            raw = max(0.0, -valence) * 0.6 + wound * 0.4  # unresolved negative pressure [0,1]
+            if raw > debt:
+                alpha_up = max(0.3, min(0.9, 0.6 + 0.3 * (neuro - 0.5)))  # reactive spike
+                debt += alpha_up * (raw - debt)
+            if valence > 0.5:  # being soothed discharges
+                debt *= max(0.0, 1.0 - (valence - 0.5) * 2.0)
+        self._affect_debt = max(0.0, min(1.0, debt))
+
+    def _reach_threshold(self, *, proactive: bool) -> float:
+        """need_contact threshold for reach_out, lowered by unresolved emotional debt.
+
+        Extraversion (plus a little anxious neuroticism) makes her come back sooner
+        after a bruise. At ``affect_debt == 0`` this returns the original literals
+        (0.1 proactive / 0.2 reactive) exactly, so behaviour is unchanged absent
+        any emotional charge.
+        """
+        t = self._trait_view()
+        extra = max(0.0, min(1.0, float(t.get("extraversion", 0.5))))
+        neuro = max(0.0, min(1.0, float(t.get("neuroticism", 0.5))))
+        aggr = max(0.04, min(0.24, 0.12 + 0.10 * (extra - 0.5) + 0.06 * (neuro - 0.5)))
+        pull = aggr * self._affect_debt
+        if proactive:
+            return max(0.04, 0.1 - pull)
+        return max(0.08, 0.2 - pull)
+
+    def discharge_affect_debt(self) -> None:
+        """Spend emotional debt after a successful reach-out, so it cannot keep
+        re-firing each time cooldown recovers (the delayed-talkative hole). How much
+        lingers is set by agreeableness: an agreeable read is soothed by acting, a
+        guarded one stays a little sulky even after reaching out."""
+        t = self._trait_view()
+        agree = max(0.0, min(1.0, float(t.get("agreeableness", 0.5))))
+        keep = max(0.1, min(0.6, 0.3 - 0.2 * (agree - 0.5)))
+        self._affect_debt *= keep
+
+    def set_telemetry(self, sink: DistillationSink | None) -> None:
+        """Attach (or detach) the distillation corpus sink. Runtime-only — the
+        sink is never part of snapshot()/restore()."""
+        self._telemetry_sink = sink
+
+    def _capture_telemetry(self, assessment: dict[str, Any]) -> None:
+        """Append one numeric training tuple (features + assessor affect) for the
+        distillation corpus. Pulls only numeric fields by explicit key — never the
+        raw message text (``result['text']``) or assessor free-text flags. Any
+        failure is logged at debug and never disrupts the tick."""
+        sink = self._telemetry_sink
+        if sink is None or not sink.enabled:
+            return
+        try:
+            result = self._last_computation_result
+            raw_emotion = result.get("emotion")
+            emotion = raw_emotion if isinstance(raw_emotion, dict) else {}
+            raw_resonance = result.get("resonance")
+            resonance = raw_resonance if isinstance(raw_resonance, dict) else {}
+            needs = self.body.needs
+            imm = self.body.immunity
+
+            def _f(value: Any) -> float:
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            row: dict[str, Any] = {
+                "tick": self.turns,
+                "f_warmth": _f(emotion.get("warmth")),
+                "f_arousal": _f(emotion.get("arousal")),
+                "f_valence": _f(emotion.get("valence")),
+                "f_tension": _f(emotion.get("tension")),
+                "f_curiosity": _f(emotion.get("curiosity")),
+                "f_repair_pressure": _f(emotion.get("repair_pressure")),
+                "f_expression_drive": _f(emotion.get("expression_drive")),
+                "f_boundary_firmness": _f(emotion.get("boundary_firmness")),
+                "f_coherence": _f(emotion.get("coherence")),
+                "f_void_pressure": _f(emotion.get("void_pressure")),
+                "f_active_voids": _f(emotion.get("active_voids")),
+                "f_surprise": _f(result.get("surprise")),
+                "f_boundary_stability": _f(result.get("boundary_stability")),
+                "f_resonance_energy": _f(resonance.get("energy")),
+                "f_sync_order": _f(resonance.get("sync_order")),
+                "f_phi": _f(resonance.get("phi")),
+                "f_plasticity_ratio": _f(resonance.get("plasticity_ratio")),
+                "f_need_contact": _f(needs.get("need_contact")),
+                "f_need_quiet": _f(needs.get("need_quiet")),
+                "f_need_repair": _f(needs.get("need_repair")),
+                "f_need_expression": _f(needs.get("need_expression")),
+                "f_boundary_pressure": _f(imm.boundary_pressure),
+                "f_sovereignty": _f(imm.sovereignty),
+                "f_interruption_budget": _f(imm.interruption_budget),
+                "f_cooldown": _f(imm.cooldown),
+                "f_affect_debt": _f(self._affect_debt),
+                "a_valence": _f(assessment.get("valence")),
+                "a_arousal": _f(assessment.get("arousal")),
+                "a_wound_risk": _f(assessment.get("wound_risk")),
+                "a_confidence": _f(assessment.get("confidence")),
+                "decision_action": str(self.last_decision.get("action", "")),
+            }
+            sink.record_tick(session_key=self.session_key, row=row)
+        except Exception:
+            logger.debug("telemetry capture skipped", exc_info=True)
+
     def _decide(self) -> dict[str, Any]:
         """基于身体需求的行动决策。
 
@@ -851,7 +1001,8 @@ class AlphaKernel:
             reason = "boundary asks for distance"
             reason_code = "boundary_pressure"
         elif (
-            (proactive and needs["need_contact"] >= 0.1) or needs["need_contact"] > 0.2
+            (proactive and needs["need_contact"] >= self._reach_threshold(proactive=True))
+            or needs["need_contact"] > self._reach_threshold(proactive=False)
         ) and self.body.muscle.fatigue < 0.8:
             action = "reach_out"
             reason = "contact need has accumulated"

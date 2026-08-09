@@ -35,7 +35,6 @@ PARAM_NAMES: list[str] = [
     "residual_decay",
     "hopfield_strength",
     "identity_inertia",
-    "kuramoto_k1",
     "broadcast_threshold",
 ]
 
@@ -48,7 +47,6 @@ PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "residual_decay": (0.4, 0.95),
     "hopfield_strength": (0.01, 0.12),
     "identity_inertia": (0.85, 1.0),
-    "kuramoto_k1": (0.3, 2.0),
     "broadcast_threshold": (0.4, 0.85),
 }
 
@@ -91,7 +89,6 @@ class MetaLearner:
       - residual_decay: memory persistence (higher = more persistent)
       - hopfield_strength: attractor pull (higher = more habitual patterns)
       - identity_inertia: personality stability (higher = more consistent)
-      - kuramoto_k1: coupling strength (higher = more inter-module influence)
       - broadcast_threshold: global ignition threshold (lower = easier ignition)
 
     Attributes:
@@ -172,7 +169,6 @@ class MetaLearner:
             "residual_decay": 0.6 + (1.0 - openness) * 0.2,
             "hopfield_strength": 0.03 + extraversion * 0.04,
             "identity_inertia": 0.9 + conscientiousness * 0.08,
-            "kuramoto_k1": 0.5 + openness * 1.0,
             "broadcast_threshold": 0.8 - agreeableness * 0.3,
         }
 
@@ -358,14 +354,16 @@ class MetaLearner:
         rel_drift = self.relative_drift
         abs_drift = self.drift_from_seed
         for name in PARAM_NAMES:
-            summary.append({
-                "name": name,
-                "seed": round(self.seed_values.get(name, 0.0), 6),
-                "current": round(self.current_values.get(name, 0.0), 6),
-                "drift": round(abs_drift.get(name, 0.0), 6),
-                "relative_drift": round(rel_drift.get(name, 0.0), 4),
-                "bounds": PARAM_BOUNDS[name],
-            })
+            summary.append(
+                {
+                    "name": name,
+                    "seed": round(self.seed_values.get(name, 0.0), 6),
+                    "current": round(self.current_values.get(name, 0.0), 6),
+                    "drift": round(abs_drift.get(name, 0.0), 6),
+                    "relative_drift": round(rel_drift.get(name, 0.0), 4),
+                    "bounds": PARAM_BOUNDS[name],
+                }
+            )
         return summary
 
     def diagnostics(self) -> dict[str, Any]:
@@ -388,12 +386,8 @@ class MetaLearner:
                 }
                 for name in PARAM_NAMES
             },
-            "total_drift": round(
-                sum(self.drift_from_seed.values()), 6
-            ),
-            "mean_relative_drift": round(
-                sum(self.relative_drift.values()) / max(1, N_PARAMS), 4
-            ),
+            "total_drift": round(sum(self.drift_from_seed.values()), 6),
+            "mean_relative_drift": round(sum(self.relative_drift.values()) / max(1, N_PARAMS), 4),
         }
 
     # ------------------------------------------------------------------
@@ -413,9 +407,7 @@ class MetaLearner:
             "base_adaptation_rate": self._base_adaptation_rate,
             "openness_mod": self._openness_mod,
             "feedback_counts": dict(self._feedback_counts),
-            "correlations": {
-                name: list(dq) for name, dq in self._correlations.items()
-            },
+            "correlations": {name: list(dq) for name, dq in self._correlations.items()},
             "reward_history": list(self._reward_history),
         }
 
@@ -454,9 +446,7 @@ class MetaLearner:
                     learner._correlations[name] = deque(values, maxlen=_CORRELATION_WINDOW)
         # Restore reward history
         if "reward_history" in data:
-            learner._reward_history = deque(
-                data["reward_history"], maxlen=_CORRELATION_WINDOW
-            )
+            learner._reward_history = deque(data["reward_history"], maxlen=_CORRELATION_WINDOW)
         return learner
 
     # ------------------------------------------------------------------

@@ -28,9 +28,9 @@ import asyncio
 import collections
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from sylanne_alpha.protocols import PluginHost
@@ -41,6 +41,12 @@ except ImportError:
     import logging as _logging
 
     logger = _logging.getLogger("astrbot_plugin_sylanne")  # type: ignore
+
+from sylanne_alpha.provider_routing import (
+    ProviderFeature,
+    resolve_embedding_provider,
+    resolve_text_provider,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1322,8 +1328,6 @@ class PublicAPI:
         observed_at: float = 0.0,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        from sylanne_alpha.compat import command_surface
-
         effective_now = observed_at or now
         await self.observe_request(
             session_key,
@@ -1332,7 +1336,8 @@ class PublicAPI:
             flags=["safe"],
             now=effective_now,
         )
-        return command_surface(self._host(session_key), "emotion")
+        # Legacy compat: command_surface removed; return empty dict
+        return {}
 
     async def observe_user_message_withdrawal(
         self, *args: Any, **kwargs: Any
@@ -1391,18 +1396,16 @@ class PublicAPI:
         observed_at: float = 0.0,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        from sylanne_alpha.compat import simulate_update
-
+        # Legacy compat: simulate_update removed
         host = self._host(session_key)
-        return simulate_update(host, text=text, flags=flags, confidence=confidence)
+        return {}
 
     async def get_emotion_snapshot(
         self, *, session_key: str, include_prompt_fragment: bool = False, **kwargs: Any
     ) -> dict[str, Any]:
-        from sylanne_alpha.compat import command_surface
-
+        # Legacy compat: command_surface removed
         host = self._host(session_key)
-        payload = command_surface(host, "emotion")
+        payload = {}
         payload["turns"] = host.kernel.turns
         return payload
 
@@ -1410,18 +1413,16 @@ class PublicAPI:
         self, *, session_key: str, as_dict: bool = True, **kwargs: Any
     ) -> Any:
         import copy
-        from sylanne_alpha.compat import emotion_values
 
         state = await self._p._load_state(session_key)
         if not as_dict and state is not None and not isinstance(state, dict):
             return copy.deepcopy(state)
-        values = emotion_values(self._host(session_key))
-        return {"values": values}
+        # Legacy compat: emotion_values removed
+        return {"values": {}}
 
     async def get_emotion_values(self, *, session_key: str) -> dict[str, float]:
-        from sylanne_alpha.compat import emotion_values
-
-        return emotion_values(self._host(session_key))
+        # Legacy compat: emotion_values removed
+        return {}
 
     async def build_emotion_memory_payload(
         self,
@@ -1450,19 +1451,7 @@ class PublicAPI:
         )
         host = self._host(sk)
         memory_system = p._memory_system_for_session(sk)
-        enabled = bool(p._config.get("sylanne_alpha_embedding_memory_enabled"))
-        provider_id = str(
-            p._config.get("sylanne_alpha_embedding_memory_provider_id") or ""
-        )
-
-        query_embedding: list[float] | None = None
-        if enabled and provider_id and query:
-            try:
-                provider = p._get_embedding_provider(provider_id)
-                if provider:
-                    query_embedding = await provider.get_embedding(query)
-            except Exception:
-                query_embedding = None
+        query_embedding = await self._resolve_query_embedding(query)
 
         current_warmth = host.kernel.computation.engine.observe().get("warmth", 0.0)
         results = memory_system.recall(
@@ -1507,6 +1496,30 @@ class PublicAPI:
             lines.append(f"- {text}")
         return "\n".join(lines)
 
+    async def _resolve_query_embedding(self, query: str) -> list[float] | None:
+        """在原 embedding 开关内，统一解析显式/单 provider 自动选择。"""
+
+        p = self._p
+        config = getattr(p, "config", None) or getattr(p, "_config", None) or {}
+        if not bool(config.get("sylanne_alpha_embedding_memory_enabled")) or not query:
+            return None
+        context = getattr(p, "context", None) or getattr(p, "_context", None)
+        if context is None:
+            return None
+        try:
+            resolved = await resolve_embedding_provider(config=config, context=context)
+            provider = resolved.provider
+            get_embedding = cast(
+                Callable[[str], Awaitable[Any]] | None,
+                getattr(provider, "get_embedding", None),
+            )
+            if not callable(get_embedding):
+                return None
+            vector = await get_embedding(query)
+            return vector if isinstance(vector, list) else None
+        except Exception:
+            return None
+
     # ------------------------------------------------------------------
     # Internal assessor
     # ------------------------------------------------------------------
@@ -1547,15 +1560,22 @@ class PublicAPI:
                 appraisal={"low_signal": True, "signal_kind": "short_ack"},
             )
         timeout = float(cfg.get("assessor_timeout_seconds", 0.0))
-        provider_id_fn = getattr(p, "_provider_id", None)
-        if provider_id_fn and callable(provider_id_fn):
+        context = getattr(p, "context", None) or getattr(p, "_context", None)
+        if context is not None:
             try:
+                resolve = resolve_text_provider(
+                    feature=ProviderFeature.ASSESSOR,
+                    config=cfg,
+                    context=context,
+                    umo=str(getattr(event, "unified_msg_origin", "") or "") or None,
+                )
                 if timeout > 0:
-                    provider_id = await asyncio.wait_for(
-                        provider_id_fn(event), timeout=timeout
-                    )
+                    resolved = await asyncio.wait_for(resolve, timeout=timeout)
                 else:
-                    provider_id = await provider_id_fn(event)
+                    resolved = await resolve
+                provider_id = (
+                    resolved.provider_id if resolved.provider is not None else ""
+                )
             except (asyncio.TimeoutError, Exception):
                 return SimpleNamespace(
                     values={
@@ -1575,7 +1595,10 @@ class PublicAPI:
                 )
         else:
             provider_id = ""
-        call_llm_fn = getattr(p, "_call_internal_assessor_llm", None)
+        call_llm_fn = cast(
+            Callable[..., Awaitable[Any]] | None,
+            getattr(p, "_call_internal_assessor_llm", None),
+        )
         if call_llm_fn and callable(call_llm_fn) and provider_id:
             try:
                 if timeout > 0:
@@ -1639,12 +1662,19 @@ class PublicAPI:
         )
 
     async def _call_internal_assessor_llm(self, *args: Any, **kwargs: Any) -> Any:
-        """调用内部评估器 LLM，带并发限制保护。"""
+        """调用内部评估器 LLM，带并发限制保护。
+
+        并发闸用 asyncio.Condition（替代旧 `asyncio.sleep(0.05)` 忙等轮询）：消除轮询
+        延迟与 inflight 计数竞态——计数的读-改-写全在条件锁内原子完成，动态 limit 每次
+        被唤醒时重新判定，槽位释放时精确唤醒一个等待者。
+        """
         p = self._p
-        limit = self._internal_assessor_llm_concurrency_limit()
-        while p._internal_assessor_llm_inflight >= limit:
-            await asyncio.sleep(0.001)
-        p._internal_assessor_llm_inflight += 1
+        cond = self._internal_assessor_llm_condition()
+        async with cond:
+            while (p._internal_assessor_llm_inflight
+                   >= self._internal_assessor_llm_concurrency_limit()):
+                await cond.wait()
+            p._internal_assessor_llm_inflight += 1
         try:
             context = getattr(p, "context", None) or getattr(p, "_context", None)
             if hasattr(context, "llm_generate"):
@@ -1652,7 +1682,18 @@ class PublicAPI:
                 return result
             return SimpleNamespace(completion_text="")
         finally:
-            p._internal_assessor_llm_inflight -= 1
+            async with cond:
+                p._internal_assessor_llm_inflight -= 1
+                cond.notify()
+
+    def _internal_assessor_llm_condition(self) -> asyncio.Condition:
+        """惰性创建并复用内部评估器并发闸的条件变量（绑定首次调用时的事件循环）。"""
+        p = self._p
+        cond = getattr(p, "_internal_assessor_llm_cond", None)
+        if cond is None:
+            cond = asyncio.Condition()
+            p._internal_assessor_llm_cond = cond
+        return cond
 
     def _internal_assessor_llm_concurrency_limit(self) -> int:
         return 2
@@ -1744,19 +1785,7 @@ class PublicAPI:
         p = self._p
         host = self._host(session_key)
         memory_system = p._memory_system_for_session(session_key)
-        enabled = bool(p._config.get("sylanne_alpha_embedding_memory_enabled"))
-        provider_id = str(
-            p._config.get("sylanne_alpha_embedding_memory_provider_id") or ""
-        )
-
-        query_embedding: list[float] | None = None
-        if enabled and provider_id and query:
-            try:
-                provider = p._get_embedding_provider(provider_id)
-                if provider:
-                    query_embedding = await provider.get_embedding(query)
-            except Exception:
-                query_embedding = None
+        query_embedding = await self._resolve_query_embedding(query)
 
         current_warmth = host.kernel.computation.engine.observe().get("warmth", 0.0)
         results = memory_system.recall(
@@ -1792,7 +1821,7 @@ class PublicAPI:
     async def get_realtime_chat_plan(
         self, session_key: str, text: str, **kwargs: Any
     ) -> dict[str, Any]:
-        from .compat import realtime_plan
+        from sylanne_alpha.message_dispatch import realtime_plan
 
         p = self._p
         cfg = getattr(p, "config", None) or getattr(p, "_config", {}) or {}
@@ -1854,7 +1883,7 @@ class PublicAPI:
         Returns:
             主动发言决策字典，包含 should_send、reason_code 等。
         """
-        from .compat import proactive_decision
+        from sylanne_alpha.diagnostics_surface import proactive_decision
         from .host import SylanneAlphaHostEvent
 
         p = self._p
@@ -1927,16 +1956,6 @@ class PublicAPI:
                 "provider_id": str(
                     cfg.get("sylanne_alpha_assessor_provider_id")
                     or cfg.get("emotion_provider_id")
-                    or ""
-                ),
-            },
-            "fast_assessor": {
-                "enabled": bool(cfg.get("sylanne_alpha_fast_assessor_enabled"))
-                if "sylanne_alpha_fast_assessor_enabled" in cfg
-                else bool(cfg.get("fast_assessor_enabled", True)),
-                "provider_id": str(
-                    cfg.get("sylanne_alpha_fast_assessor_provider_id")
-                    or cfg.get("fast_assessor_provider_id")
                     or ""
                 ),
             },

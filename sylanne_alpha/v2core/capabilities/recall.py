@@ -5,7 +5,7 @@
 
 纪律：
 - 无独占状态：召回结果只挂在 BeatContext.scratch / Intent.payload，不自存。
-- 内联同步直读 MemoryDomain.recall（热路径，不走 EventBus、不调 LLM）。
+- 内联同步直读 MemoryDomain.recall（热路径，不跨内部消息总线、不调 LLM）。
 - 只读：召回不写任何状态；记忆衰减(tick_decay)是 EVOLVE 拍 MemoryDomain 自己的事。
 - 受 SelfCore 的 budget_ms 时钟约束（超预算时本能力被跳过，不拖慢回复）。
 
@@ -38,8 +38,9 @@ class RecallCapability:
         memory: MemoryDomain | None = ctx.domain("memory")
         if memory is None:
             return None
-        # 关系够亲密才主动翻记忆（门控由领域 agent 按人格判定）
-        if not memory.intimacy_ok(ctx.body):
+        # 关系够亲密才主动翻记忆（门控由领域 agent 按人格判定）。
+        # #29：叠加学到的 memory.intimacy_threshold 进化偏置（更主动 → 更早愿意翻记忆）。
+        if not memory.intimacy_ok(ctx.body, bias=ctx.evo_bias("memory", "intimacy_threshold")):
             return None
         text = ctx.text
         if not text:
@@ -57,7 +58,7 @@ class RecallCapability:
         if not results:
             return None
         # 消费者：ReconsolidationCapability（重固化窗口）+ ExpressionCapability（has_recall）
-        ctx.scratch["recalled"] = results
+        ctx.scratch["recalled_deliberate"] = results
         return Intent(
             source=self.name,
             payload={"recalled": results},

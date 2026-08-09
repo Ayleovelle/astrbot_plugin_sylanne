@@ -33,9 +33,14 @@ def _evolve_ctx(body, text, *, now=0.0, dom) -> BeatContext:
     return c
 
 
+def _perceive_ctx(body, text) -> BeatContext:
+    """predict_you 现吃 ctx（复用 scratch signals）；不预置 signals 则回落 read_signals(text)。"""
+    return BeatContext(session_key="u", event=None, body=body, text=text)
+
+
 def test_predict_you_returns_userview() -> None:
     dom = UserModelDomain()
-    v = dom.predict_you(_body(surprise=0.4, warmth=0.3), "你好呀❤️")
+    v = dom.predict_you(_perceive_ctx(_body(surprise=0.4, warmth=0.3), "你好呀❤️"))
     assert isinstance(v, UserView)
     assert v.surprised_by_you == 0.4
     assert set(v.predicted_disposition) == {"warmth", "engagement", "defensiveness", "distress"}
@@ -60,10 +65,10 @@ def test_user_pe_converges_she_learns_you() -> None:
 def test_precision_rises_on_consistent_input() -> None:
     """一致输入 → 处置精度（grip）上升。"""
     dom = UserModelDomain()
-    g0 = dom.predict_you(_body(), "x").grip
+    g0 = dom.predict_you(_perceive_ctx(_body(), "x")).grip
     for i in range(8):
         dom.ingest(_evolve_ctx(_body(surprise=0.05, warmth=0.6), "想你啦抱抱❤️", now=float(i), dom=dom))
-    g1 = dom.predict_you(_body(), "x").grip
+    g1 = dom.predict_you(_perceive_ctx(_body(), "x")).grip
     assert g1 > g0
 
 

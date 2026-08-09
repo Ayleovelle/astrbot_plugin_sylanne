@@ -1,6 +1,6 @@
 {
   "include": ["sylanne_alpha/**/*.py"],
-  "exclude": ["**/tests/**", "experiments/**", "theory/**", "docs/**", "scripts/**"],
+  "exclude": ["**/tests/**", "docs/**", "scripts/**"],
   "reportMissingImports": "none",
   "reportMissingModuleSource": "none",
   "reportOptionalMemberAccess": "warning",

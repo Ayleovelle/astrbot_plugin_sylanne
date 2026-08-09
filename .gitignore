@@ -4,6 +4,11 @@ dist/
 Sylanne-embodiment.zip
 test_output.txt
 
+# v3 grey evaluation evidence (plan Task 15/17): encoded datasets, reports, and the
+# two evaluation keys. Real history exports and BOTH HMAC keys must never enter Git
+# or a package — the evaluation-link key is retained locally from G1 freeze to G4.
+artifacts/
+
 # Runtime data
 data/
 .sylanne_alpha_state*/
@@ -87,3 +92,8 @@ experiments/figures/
 
 docs/literature_kb.md
 docs/humanlike_agent_literature_kb.md
+
+# SylannEngine 2.3.2+ per-copy identity: minted at runtime INTO the vendored module dir
+# (by any shared() call, e.g. tests/test_body_port_v2.py) — machine-specific UUID, never commit.
+sylanne_alpha/_engine/sylanne_core/_identity.json
+sylanne_alpha/_engine/sylanne_core/_identity.json.tmp

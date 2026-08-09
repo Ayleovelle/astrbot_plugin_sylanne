@@ -1,5 +1,5 @@
 """计算层适配器 —— 把 vendored SylannEngine SDK 的 Surface 翻译成 Sylanne-next
-业务层期望的契约（兼容 surface 结构）。
+业务层期望的 BodyPort 兼容 surface 契约。
 
 深接入策略：业务层只通过本适配器拿计算结果，不再直穿计算内部。SDK 的 Surface
 字段命名与现有不同（needs.expression vs need_expression、boundary.pressure vs
@@ -21,13 +21,6 @@ from __future__ import annotations
 
 from typing import Any
 
-try:
-    from astrbot.api import logger  # type: ignore
-except ImportError:
-    import logging as _logging
-
-    logger = _logging.getLogger("astrbot_plugin_sylanne")  # type: ignore
-
 # decision.action 中代表"应该主动发出"的动作集合（用于推导 should_send）。
 # 注意：SDK adapter._ACTION_MAP 会把内部 "repair" 输出为 "recover"，故这里用 SDK
 # 真实输出的动作名 "recover"（不是 "repair"），否则 repair 意图的 should_send 恒 False。
@@ -48,7 +41,7 @@ def _f(d: Any, *keys: str, default: float = 0.0) -> float:
 
 
 def sdk_state_to_body(sdk_state: dict[str, Any]) -> dict[str, Any]:
-    """SDK Surface.state → 旧 body 结构（needs/immunity/temperature）。
+    """SDK Surface.state → BodyPort body 结构（needs/immunity/temperature）。
 
     只翻译业务层实际消费的字段（见模块 docstring 映射表）。
     """
@@ -124,70 +117,5 @@ def sdk_surface_to_compat(surface: dict[str, Any]) -> dict[str, Any]:
         # 透传 SDK 原始 surface 供需要新结构的下游用（WebUI 等）
         "sdk_surface": surface,
     }
-
-
-class EngineFacade:
-    """业务层访问计算的唯一入口。内部持 vendored SylannEngine，对外只给兼容 surface。
-
-    生命周期：构造 → await start() → await process(...) → await shutdown()。
-    懒初始化 SDK，避免无 event loop 时构造失败。
-    """
-
-    def __init__(self, data_dir: str, llm: Any, *, mode: str = "lite",
-                 force_backend: str = "python", assessor_enabled: bool = False) -> None:
-        self._data_dir = data_dir
-        self._llm = llm
-        self._mode = mode
-        self._force_backend = force_backend
-        self._assessor_enabled = assessor_enabled
-        self._engine: Any = None
-        self._started = False
-
-    async def start(self) -> None:
-        if self._started:
-            return
-        from sylanne_alpha._engine.sylanne_core import SylanneEngine, SylanneConfig
-
-        cfg = SylanneConfig(
-            mode=self._mode,
-            force_backend=self._force_backend,
-            assessor_enabled=self._assessor_enabled,
-        )
-        self._engine = SylanneEngine(data_dir=self._data_dir, llm=self._llm, config=cfg)
-        await self._engine.start()
-        self._started = True
-
-    @property
-    def available(self) -> bool:
-        return self._started and self._engine is not None
-
-    async def process(self, session_key: str, text: str, *, confidence: float | None = None,
-                      flags: list[str] | None = None, now: float | None = None,
-                      values: dict[str, float] | None = None) -> dict[str, Any]:
-        """处理一条消息，返回业务层兼容 surface。引擎未就绪时抛 RuntimeError。"""
-        if not self.available:
-            raise RuntimeError("EngineFacade not started")
-        surface = await self._engine.process(
-            session_key, text, confidence=confidence, flags=flags, now=now, values=values
-        )
-        return sdk_surface_to_compat(surface)
-
-    async def state(self, session_key: str) -> dict[str, Any]:
-        """取当前状态的兼容 surface（不推进 tick）。"""
-        if not self.available:
-            raise RuntimeError("EngineFacade not started")
-        surface = await self._engine.state(session_key)
-        return sdk_surface_to_compat(surface)
-
-    async def reset(self, session_key: str) -> None:
-        if self.available:
-            await self._engine.reset(session_key)
-
-    async def shutdown(self) -> None:
-        if self._engine is not None:
-            try:
-                await self._engine.shutdown()
-            finally:
-                self._started = False
 
 

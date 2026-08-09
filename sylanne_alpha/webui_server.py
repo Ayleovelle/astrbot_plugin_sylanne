@@ -33,6 +33,14 @@ from urllib.parse import parse_qs, urlparse
 
 from pathlib import Path
 
+from sylanne_alpha.webui_routes import (
+    _comp_boundary_dict,
+    _comp_gate_dict,
+    _comp_route_stats,
+    _webui_session_items,
+    build_model_routing_payload,
+)
+
 
 def _get_plugin_version() -> str:
     """从 metadata.yaml 读取版本号（缓存结果）。"""
@@ -65,12 +73,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# 模块级静态路径常量（__file__ 派生、恒定）：在 import 时算一次，避免在 async 处理器里
+# 调 Path.resolve()/os.path（ASYNC240：会在事件循环上做阻塞 FS 调用）。
+_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+_DASHBOARD_HTML_PATH = _PLUGIN_ROOT / "UI" / "index.html"
+_LOGO_PATH = _PLUGIN_ROOT / "logo.png"
+
 # 模块级全局状态：跨热重载保持监听器引用
 # 使用 globals().get() 是为了在 AstrBot hot-upload 重新 import 时保留已有值
 _server_task: asyncio.Task | None = globals().get("_server_task")
 _httpd: Any = globals().get("_httpd")
 _httpd_thread: threading.Thread | None = globals().get("_httpd_thread")
 _active_plugin: Any = globals().get("_active_plugin")
+# DATA-LOSS 修复：stdlib ThreadingHTTPServer 回退模式下，worker 线程没有自己的
+# running loop，`asyncio.get_event_loop()` 在线程里拿到的是新建的、从未 run 过的
+# loop——`call_soon_threadsafe` 排的回调永远不会执行，导致"永久删除"类操作
+# （meltdown 的持久化 purge）悄悄变成 no-op，却仍对用户回 {ok: True}。
+# 这里持有 AstrBot 进程级 persistent main loop 的引用（由 main.py 的 async
+# initialize() 在其运行的 loop 上调用 set_main_loop() 权威绑定，镜像
+# MemoryWriteThroat.bind_loop 的既有模式），供 stdlib handler 用
+# run_coroutine_threadsafe 提交到「真正在跑」的 loop。
+_main_loop: asyncio.AbstractEventLoop | None = globals().get("_main_loop")
 _active_token: str = ""
 _meltdown_nonces: dict[str, str] = {}
 # Item 24: CSRF token — 登录成功后生成，POST/DELETE 端点校验
@@ -78,8 +101,8 @@ _csrf_token: str = ""
 # 线程安全锁：stdlib HTTP server 的多线程 handler 访问插件状态时使用
 _plugin_access_lock = threading.Lock()
 
-# S1/S2: 敏感配置键保护
-_SENSITIVE_KEYS = frozenset({"token", "password", "secret", "api_key", "access_token", "auth_token", "bearer", "credential"})
+# S1/S2: 敏感配置键保护（子串匹配；"cookie" 覆盖 sylanne_alpha_qzone_cookie 登录凭据）
+_SENSITIVE_KEYS = frozenset({"token", "password", "secret", "api_key", "access_token", "auth_token", "bearer", "credential", "cookie"})
 
 
 def _is_sensitive_key(key: str) -> bool:
@@ -187,6 +210,30 @@ def _set_active_plugin(plugin: Any) -> None:
     _active_plugin = plugin
 
 
+def set_main_loop(loop: asyncio.AbstractEventLoop | None) -> None:
+    """绑定 AstrBot 进程级 persistent main loop（供 stdlib 回退路径提交持久化协程）。
+
+    必须在 main.py 的 async initialize()（保证运行在该 persistent loop 上）里调用；
+    调用点须早于 stdlib 服务器开始处理请求。插件卸载/停止时传 None 清除，防止
+    持有已关闭 loop 的悬垂引用。
+    """
+    global _main_loop
+    _main_loop = loop
+
+
+def _get_main_loop() -> asyncio.AbstractEventLoop | None:
+    """返回当前绑定的 persistent main loop（未绑定或已停止则返回 None）。"""
+    loop = _main_loop
+    if loop is None:
+        return None
+    try:
+        if loop.is_closed():
+            return None
+    except Exception:
+        return None
+    return loop
+
+
 def _plugin(default: Any = None) -> Any:
     return _active_plugin if _active_plugin is not None else default
 
@@ -232,7 +279,10 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
                     return web.json_response({"error": "unauthorized"}, status=401)
             return await handler(request)
         auth = request.headers.get("Authorization", "")
-        if not auth.startswith("Bearer ") or auth[7:] != _active_token:
+        # fail-closed：_active_token 为空（未配置 / setup 未跑）时一律 401，绝不让空 Bearer
+        # （Authorization: Bearer ）因 auth[7:]=="" == _active_token=="" 漏进受保护路由。
+        # 正常运行 token 必被自动生成（setup 处 secrets.token_urlsafe），故零回归。
+        if not _active_token or not auth.startswith("Bearer ") or auth[7:] != _active_token:
             return web.json_response({"error": "unauthorized"}, status=401)
         # Item 24: CSRF 防护 — POST/DELETE 需要 X-CSRF-Token header
         if request.method in ("POST", "DELETE"):
@@ -241,9 +291,8 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
                 return web.json_response({"error": "csrf_token_mismatch"}, status=403)
         return await handler(request)
 
-    # Serve the dashboard HTML from UI/index.html
-    plugin_root = Path(__file__).resolve().parent.parent
-    dashboard_path = plugin_root / "UI" / "index.html"
+    # Serve the dashboard HTML from UI/index.html（路径为模块级常量，避免 async 里 resolve）
+    dashboard_path = _DASHBOARD_HTML_PATH
     if dashboard_path.exists():
         dashboard_html = dashboard_path.read_text(encoding="utf-8")
         logger.info(
@@ -520,24 +569,7 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
 
     async def handle_settings_get(request: web.Request) -> web.Response:
         current_plugin = _plugin(plugin)
-        schema = _load_schema(current_plugin)
-        config = dict(getattr(current_plugin, "_config", {}) or {})
-        # Ensure every schema key is present in values (use default if unconfigured)
-        # 敏感字段(token/密钥等)的值掩码，避免明文回传给前端泄露
-        values = {}
-        for key, meta in schema.items():
-            raw = config.get(key, meta.get("default"))
-            if _is_sensitive_key(key) and raw:
-                values[key] = "********"
-            else:
-                values[key] = raw
-        return web.json_response(
-            {
-                "schema": schema,
-                "values": values,
-                "providers": await _provider_items(current_plugin),
-            }
-        )
+        return web.json_response(await _settings_payload(current_plugin))
 
     async def handle_settings_post(request: web.Request) -> web.Response:
         try:
@@ -626,15 +658,10 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         return web.json_response(data)
 
     async def handle_logo(request: web.Request) -> web.Response:
-        import os
-
-        logo_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logo.png"
-        )
-        if not os.path.exists(logo_path):
+        # 路径为模块级常量；.exists() 走 pathlib（ASYNC240 只报 os.path / .resolve()）
+        if not _LOGO_PATH.exists():
             return web.Response(text="Not Found", status=404)
-        with open(logo_path, "rb") as f:
-            data = f.read()
+        data = await asyncio.to_thread(_LOGO_PATH.read_bytes)
         return web.Response(body=data, content_type="image/png")
 
     async def handle_memory_meltdown(request: web.Request) -> web.Response:
@@ -661,6 +688,10 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
                 mem_sys._l3_nodes.clear()
                 mem_sys._l3_edges.clear()
                 mem_sys._tick = 0
+                # FIX(F2，完整性复审)：显式擦除必须置 _hydrated=True，否则懒创建时排的
+                # 后台补水任务会把尚未删除的 KV 旧档合并回活体，令 meltdown 被自己的
+                # 补水复活（详见 webui_routes 同名注释）。
+                mem_sys._hydrated = True
         hosts = getattr(current_plugin, "_hosts", {}) or {}
         if session in hosts:
             hosts[session].kernel.body.memory["traces"] = []
@@ -790,6 +821,9 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
             mem_sys._l3_nodes.clear()
             mem_sys._l3_edges.clear()
             mem_sys._tick = 0
+            # FIX(F1，完整性复审)：同 meltdown——置 _hydrated=True 阻断懒创建补水任务
+            # 把刚清空的记忆从 KV 旧档复活回活体再被周期 save 写回。
+            mem_sys._hydrated = True
             purged.append("memory_system")
 
         # Remove host instance
@@ -1549,6 +1583,32 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
             pass
         return web.json_response({"topics": topics})
 
+    # ------------------------------------------------------------------
+    # MEM-03 PR-7: GET /api/admin/inspect|quarantine_view|pending_deletes
+    # 三只读 admin 端点——诚实只读，builder 见模块级 _admin_* 函数（两个消费面
+    # 共享同一份 builder，见 _v2core_state_payload 上方注释的既有共享模式）。
+    # ------------------------------------------------------------------
+
+    async def handle_admin_inspect(request: web.Request) -> web.Response:
+        """单 session 记忆诊断：KV 键存在性/字节数/version/backup CRC、
+        _hydrated/_incarnation_epoch vs 当前纪元、写咽喉队深/拒写计数。"""
+        current = _plugin(plugin)
+        session = str(request.query.get("session", "") or "").strip()
+        return web.json_response(await _admin_inspect_payload(current, session=session))
+
+    async def handle_admin_quarantine_view(request: web.Request) -> web.Response:
+        """quarantine 侧车只读视图（此前只写不读的缺口）。"""
+        current = _plugin(plugin)
+        session = str(request.query.get("session", "") or "").strip()
+        return web.json_response(
+            await _admin_quarantine_view_payload(current, session=session)
+        )
+
+    async def handle_admin_pending_deletes(request: web.Request) -> web.Response:
+        """跨重启 pending-delete 索引进程内镜像快照。"""
+        current = _plugin(plugin)
+        return web.json_response(_admin_pending_deletes_payload(current))
+
     app.router.add_get("/", handle_page)
     app.router.add_get("/twin", handle_twin_page)
     app.router.add_get("/health", handle_health)
@@ -1595,6 +1655,9 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
     app.router.add_get("/api/scar_map", handle_scar_map)
     app.router.add_get("/api/sheaf_topology", handle_sheaf_topology)
     app.router.add_get("/api/topic-gravity", handle_topic_gravity)
+    app.router.add_get("/api/admin/inspect", handle_admin_inspect)
+    app.router.add_get("/api/admin/quarantine_view", handle_admin_quarantine_view)
+    app.router.add_get("/api/admin/pending_deletes", handle_admin_pending_deletes)
     app.router.add_get("/assets/logo.png", handle_logo)
     app.router.add_get("/logo.png", handle_logo)
 
@@ -1650,8 +1713,7 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
 
     # Keep running until cancelled
     try:
-        while True:
-            await asyncio.sleep(3600)
+        await asyncio.Event().wait()   # 永久挂起直到被 cancel（async 原生，零周期唤醒）
     except asyncio.CancelledError:
         await runner.cleanup()
 
@@ -1675,7 +1737,12 @@ def start_webui_background(plugin: Any, host: str = "127.0.0.1", port: int = 271
 
 async def stop_webui_server() -> None:
     """停止独立监听器（插件卸载/重载时调用）。清理 task、httpd、thread。"""
-    global _server_task, _httpd, _httpd_thread, _active_plugin
+    global _server_task, _httpd, _httpd_thread, _active_plugin, _main_loop
+    # 清掉 persistent main loop 引用：卸载/重载后旧 loop 即将失效（或已由新一轮
+    # __init__ 抢占式清理），避免 stdlib handler 用 run_coroutine_threadsafe 提交
+    # 到一个已经不再服务的悬垂 loop 上。main.py 的 async initialize() 会在新一轮
+    # 生命周期里重新调用 set_main_loop() 权威绑定。
+    _main_loop = None
     task = _server_task
     _server_task = None
     if task and not task.done():
@@ -1821,7 +1888,7 @@ def start_webui_thread_server(
             path = parsed.path.rstrip("/") or "/"
             if path not in ("/", "/twin", "/favicon.ico", "/health", "/metrics", "/logo.png", "/assets/logo.png"):
                 auth = self.headers.get("Authorization", "")
-                if not auth.startswith("Bearer ") or auth[7:] != _active_token:
+                if not _active_token or not auth.startswith("Bearer ") or auth[7:] != _active_token:
                     self._send_json({"error": "unauthorized"}, status=401)
                     return
             # S9: /metrics requires Bearer token when auth is configured
@@ -1853,18 +1920,7 @@ def start_webui_thread_server(
                 elif path == "/api/settings":
                     with _plugin_access_lock:
                         current_plugin = _plugin(plugin)
-                        schema = _load_schema(current_plugin)
-                        config = dict(getattr(current_plugin, "_config", {}) or {})
-                        values = {}
-                        for key, meta in schema.items():
-                            raw = config.get(key, meta.get("default"))
-                            if _is_sensitive_key(key) and raw:
-                                values[key] = "********"
-                            else:
-                                values[key] = raw
-                    self._send_json(
-                        {"schema": schema, "values": values, "providers": []}
-                    )
+                    self._send_json(asyncio.run(_settings_payload(current_plugin)))
                 elif path == "/api/computation_logs":
                     _last_diag_request = time.time()
                     with _plugin_access_lock:
@@ -2185,7 +2241,7 @@ def start_webui_thread_server(
             path = parsed.path.rstrip("/") or "/"
             if path not in ("/", "/favicon.ico", "/logo.png", "/assets/logo.png"):
                 auth = self.headers.get("Authorization", "")
-                if not auth.startswith("Bearer ") or auth[7:] != _active_token:
+                if not _active_token or not auth.startswith("Bearer ") or auth[7:] != _active_token:
                     self._send_json({"error": "unauthorized"}, status=401)
                     return
             # Item 24: CSRF 防护 — POST 需要 X-CSRF-Token header
@@ -2258,10 +2314,24 @@ def start_webui_thread_server(
                     if mem_sys is None or not list(mem_sys._l1):
                         self._send_json({"ok": True, "estimated_seconds": 0})
                         return
-                    loop = asyncio.get_event_loop()
-                    loop.call_soon_threadsafe(
-                        asyncio.ensure_future,
+                    # DATA-LOSS 修复：get_event_loop() 在 worker 线程里会造出一个从未
+                    # run 过的新 loop，call_soon_threadsafe 排的回调永远不执行——
+                    # consolidation 悄悄没跑却仍回 {ok: True}。改提交到真正在跑的
+                    # persistent main loop（set_main_loop 绑定）；拿不到就诚实报错。
+                    main_loop = _get_main_loop()
+                    if main_loop is None or not main_loop.is_running():
+                        logger.warning(
+                            "Sylanne WebUI memory_consolidate (stdlib): 无可用的 "
+                            "persistent main loop，consolidation 未调度"
+                        )
+                        self._send_json(
+                            {"ok": False, "error": "consolidation_unavailable_no_loop"},
+                            status=503,
+                        )
+                        return
+                    asyncio.run_coroutine_threadsafe(
                         current_plugin._trigger_consolidation(session),
+                        main_loop,
                     )
                     self._send_json({"ok": True, "estimated_seconds": 30})
                 except Exception as exc:
@@ -2290,6 +2360,9 @@ def start_webui_thread_server(
                                 mem_sys._l3_nodes.clear()
                                 mem_sys._l3_edges.clear()
                                 mem_sys._tick = 0
+                                # FIX(F2，完整性复审)：置 _hydrated=True 阻断补水复活
+                                # （详见 webui_routes meltdown 同名注释）。
+                                mem_sys._hydrated = True
                         hosts = getattr(current_plugin, "_hosts", {}) or {}
                         if session in hosts:
                             hosts[session].kernel.body.memory["traces"] = []
@@ -2297,17 +2370,62 @@ def start_webui_thread_server(
                                 "_memory_system", None
                             )
                         sp = getattr(current_plugin, "_state_persistence", None)
-                        if sp is not None and hasattr(sp, "purge_session_after_meltdown"):
+                    # DATA-LOSS 修复：原先用 get_event_loop()+call_soon_threadsafe+
+                    # ensure_future 在 worker 线程里排持久化 purge——该线程没有自己的
+                    # running loop，get_event_loop() 只会造一个从未 run 过的新 loop，
+                    # 回调永远不会执行。disk 上的会话状态就此存活，重启后可"复活"，
+                    # 但接口仍照常回 {ok: True, cleared: True} 造成假成功。
+                    # 现在改提交到 AstrBot 进程级 persistent main loop（由 main.py 的
+                    # async initialize() 用 set_main_loop() 绑定），并 block 等结果，
+                    # 确保响应体如实反映持久化 purge 是否真的执行完成。
+                    persistent_purge_ok = True
+                    warning: str | None = None
+                    if sp is not None and hasattr(sp, "purge_session_after_meltdown"):
+                        main_loop = _get_main_loop()
+                        if main_loop is not None and main_loop.is_running():
                             try:
-                                loop = asyncio.get_event_loop()
-                                loop.call_soon_threadsafe(
-                                    asyncio.ensure_future,
-                                    sp.purge_session_after_meltdown(session),
+                                fut = asyncio.run_coroutine_threadsafe(
+                                    sp.purge_session_after_meltdown(session), main_loop
                                 )
-                            except Exception:
-                                pass
+                                fut.result(timeout=10)
+                            except Exception as purge_exc:
+                                persistent_purge_ok = False
+                                warning = (
+                                    "in-memory cleared; persistent purge failed/"
+                                    "timed out"
+                                )
+                                logger.error(
+                                    "Sylanne MEMORY MELTDOWN (stdlib): persistent "
+                                    f"purge failed for session={session}: {purge_exc}",
+                                    exc_info=True,
+                                )
+                        else:
+                            persistent_purge_ok = False
+                            warning = (
+                                "in-memory cleared; persistent purge unavailable "
+                                "(no running loop)"
+                            )
+                            logger.warning(
+                                "Sylanne MEMORY MELTDOWN (stdlib): no running "
+                                f"persistent main loop, session={session} disk "
+                                "state NOT purged"
+                            )
                     logger.info(f"Sylanne MEMORY MELTDOWN (stdlib): session={session}")
-                    self._send_json({"ok": True, "session": session, "cleared": True})
+                    if persistent_purge_ok:
+                        self._send_json(
+                            {"ok": True, "session": session, "cleared": True}
+                        )
+                    else:
+                        # NEVER 裸 cleared:true——诚实告知内存已清但磁盘 purge 未执行。
+                        self._send_json(
+                            {
+                                "ok": True,
+                                "session": session,
+                                "cleared": True,
+                                "persistent_purge": False,
+                                "warning": warning,
+                            }
+                        )
                 except Exception as exc:
                     logger.error(f"Sylanne WebUI POST /api/memory_meltdown error: {exc}", exc_info=True)
                     self._send_json({"ok": False, "error": "Internal server error"}, status=500)
@@ -2415,10 +2533,13 @@ async def _provider_items(plugin: Any) -> list[dict[str, Any]]:
             }
         )
 
+    # Dedicated registries must win deduplication.  AstrBot's generic registry
+    # may include embedding providers; visiting it first would mislabel them as
+    # text models and make the compact embedding selector appear empty.
     for method_name, provider_type in (
-        ("get_all_providers", "llm"),
-        ("get_all_llm_providers", "llm"),
         ("get_all_embedding_providers", "embedding"),
+        ("get_all_llm_providers", "llm"),
+        ("get_all_providers", "llm"),
     ):
         getter = getattr(context, method_name, None)
         if not callable(getter):
@@ -2435,6 +2556,24 @@ async def _provider_items(plugin: Any) -> list[dict[str, Any]]:
         for provider in iterable:
             add(provider, provider_type)
     return items
+
+
+async def _settings_payload(plugin: Any) -> dict[str, Any]:
+    """Build the identical settings response for aiohttp and stdlib modes."""
+
+    schema = _load_schema(plugin)
+    config = dict(getattr(plugin, "_config", {}) or {})
+    values: dict[str, Any] = {}
+    for key, meta in schema.items():
+        raw = config.get(key, meta.get("default"))
+        values[key] = "********" if _is_sensitive_key(key) and raw else raw
+    providers = await _provider_items(plugin)
+    return {
+        "schema": schema,
+        "values": values,
+        "providers": providers,
+        "model_routing": build_model_routing_payload(config, schema, providers),
+    }
 
 
 def _known_sessions(plugin: Any, *, requested: str = "") -> list[str]:
@@ -2733,6 +2872,201 @@ def _v2core_state_payload(plugin: Any, *, session: str = "") -> dict[str, Any]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# MEM-03 PR-7：三只读 admin 端点（诚实只读——只暴露已存在的字段，绝不新增持久
+# 状态）。两个消费面（独立 aiohttp 服务器 + 嵌入式 AstrBot Web 服务器）共用
+# 本节的模块级 builder，镜像 `_build_widget_state` / `_v2core_state_payload`
+# 的既有共享模式。
+# ---------------------------------------------------------------------------
+
+
+def _admin_inspect_fence_stats(plugin: Any, session: str = "") -> dict[str, Any]:
+    """化身栅栏 + 写咽喉部分（同步、纯内存读取，无 await）：`_hydrated` /
+    `_incarnation_epoch`（只从活体内存对象上 getattr，绝不经 to_dict/序列化）
+    vs 当前纪元、队深、拒写等计数、未决删除。抽成独立同步辅助供
+    `_admin_inspect_payload` 复用，不直接对外注册为 handler。
+    """
+    out: dict[str, Any] = {
+        "hydrated": None,
+        "incarnation_epoch": None,
+        "current_epoch": None,
+        "epoch_matches": None,
+        "queue_depth": None,
+        "throat_stats": None,
+        "has_pending_delete": None,
+    }
+    sp = getattr(plugin, "_state_persistence", None)
+    if sp is None or not session:
+        return out
+    try:
+        store = getattr(plugin, "_store", None)
+        systems = getattr(store, "memory_systems", None) if store is not None else None
+        live = systems.get(session) if systems is not None else None
+        throat = getattr(sp, "_throat", None)
+        current_epoch = throat.current_epoch(session) if throat is not None else None
+        stamp = getattr(live, "_incarnation_epoch", None) if live is not None else None
+        out["hydrated"] = getattr(live, "_hydrated", None) if live is not None else None
+        out["incarnation_epoch"] = stamp
+        out["current_epoch"] = current_epoch
+        out["epoch_matches"] = (
+            (stamp == current_epoch) if stamp is not None and current_epoch is not None else None
+        )
+    except Exception:
+        pass
+    try:
+        throat = getattr(sp, "_throat", None)
+        if throat is not None:
+            out["queue_depth"] = throat.queue_depth(session)
+            out["throat_stats"] = throat.stats()
+            out["has_pending_delete"] = throat.has_pending_delete(session)
+    except Exception:
+        pass
+    return out
+
+
+async def _admin_inspect_payload(plugin: Any, session: str = "") -> dict[str, Any]:
+    """单 session 诊断：键存在性/字节数/version/backup CRC/_hydrated/
+    _incarnation_epoch vs 当前纪元/写咽喉队深/拒写计数。
+
+    Best-effort：任何一块读取失败只把该块置 null，绝不因单点异常炸掉整个响应。
+    `_incarnation_epoch` 只从【活体内存对象】上读（getattr），从不经过任何
+    to_dict/序列化路径——冻结面：该属性绝不允许出现在任何持久化 blob 里，本
+    builder 也只读不写，绝不把它塞回任何 dict 之外的地方。两个 HTTP 消费面
+    （独立 aiohttp / 嵌入式 quart）都在 async 上下文中，故本 builder 是唯一
+    真实实现（不提供假的同步壳，避免"看起来能同步跑，其实读不到 KV"的假象）。
+    """
+    out: dict[str, Any] = {"session": session, "kv_keys": None}
+    out.update(_admin_inspect_fence_stats(plugin, session))
+    if not session:
+        return out
+
+    sp = getattr(plugin, "_state_persistence", None)
+    if sp is None:
+        return out
+
+    import json as _json
+
+    get_fn = getattr(plugin, "get_kv_data", None)
+    kv_keys: dict[str, Any] = {}
+    if callable(get_fn):
+        primary_key = sp.sylanne_memory_kv_key(session)
+        backup_key = sp.sylanne_memory_backup_v2_kv_key(session)
+        try:
+            from .memory_legacy_formats import quarantine_kv_key
+
+            quarantine_key = quarantine_kv_key(sp._safe_session_key(session))
+        except Exception:
+            quarantine_key = None
+
+        async def _probe(key: str | None) -> dict[str, Any] | None:
+            if key is None:
+                return None
+            try:
+                blob = await get_fn(key, None)
+            except Exception:
+                return {"exists": None, "error": True}
+            if blob is None:
+                return {"exists": False}
+            try:
+                size = len(_json.dumps(blob, ensure_ascii=False).encode("utf-8"))
+            except Exception:
+                size = None
+            entry: dict[str, Any] = {"exists": True, "bytes": size}
+            if isinstance(blob, dict) and "version" in blob:
+                entry["version"] = blob.get("version")
+            return entry
+
+        kv_keys["primary"] = await _probe(primary_key)
+        backup_entry = await _probe(backup_key)
+        if backup_entry is not None and backup_entry.get("exists"):
+            try:
+                backup_blob = await get_fn(backup_key, None)
+                backup_entry["crc_valid"] = (
+                    sp._backup_blob_is_valid(backup_blob)
+                    if hasattr(sp, "_backup_blob_is_valid")
+                    else None
+                )
+            except Exception:
+                backup_entry["crc_valid"] = None
+        kv_keys["v2_backup"] = backup_entry
+        kv_keys["quarantine"] = await _probe(quarantine_key)
+    out["kv_keys"] = kv_keys or None
+    return out
+
+
+async def _admin_quarantine_view_payload(plugin: Any, session: str = "") -> dict[str, Any]:
+    """MEM-01 quarantine 侧车（此前只写不读的缺口）：可选按 session 过滤，
+    否则聚合遍历所有已知 session 的 quarantine 键（best-effort，KV 无枚举 API，
+    只能基于 `_known_sessions` 已知集合探测）。逐 session 读 quarantine 侧车键
+    （未知 session 的残留侧车键无法被发现，诚实标注在 `note` 字段）。
+    """
+    sp = getattr(plugin, "_state_persistence", None)
+    get_fn = getattr(plugin, "get_kv_data", None)
+    out: dict[str, Any] = {
+        "session": session,
+        "sessions": {},
+        "total_entries": 0,
+        "note": (
+            "AstrBot KV 无键枚举 API，仅覆盖 _known_sessions 已知的会话集合；"
+            "未活跃过的会话残留 quarantine 侧车键不可见（诚实遗留，见设计文档 §9）"
+        ),
+    }
+    if sp is None or not callable(get_fn):
+        return out
+    try:
+        from .memory_legacy_formats import quarantine_kv_key
+    except Exception:
+        return out
+
+    candidates = [session] if session else _known_sessions(plugin)
+    sessions_out: dict[str, Any] = {}
+    total = 0
+    for sk in candidates:
+        if not sk:
+            continue
+        try:
+            safe = sp._safe_session_key(sk)
+            key = quarantine_kv_key(safe)
+            blob = await get_fn(key, None)
+        except Exception:
+            sessions_out[sk] = {"error": True}
+            continue
+        if not isinstance(blob, dict):
+            continue
+        items = blob.get("items") if isinstance(blob.get("items"), list) else []
+        if not items:
+            continue
+        count = int(blob.get("count", len(items)) or len(items))
+        sessions_out[sk] = {"count": count, "items": items}
+        total += count
+    out["sessions"] = sessions_out
+    out["total_entries"] = total
+    return out
+
+
+def _admin_pending_deletes_payload(plugin: Any) -> dict[str, Any]:
+    """跨重启 pending-delete 索引：进程内镜像（`_pending_delete_mirror`）快照，
+    含扫描完成标志——纯只读，绝不修改镜像/绝不触发 clear。
+    """
+    sp = getattr(plugin, "_state_persistence", None)
+    out: dict[str, Any] = {
+        "scan_done": None,
+        "entries": {},
+        "count": 0,
+    }
+    if sp is None:
+        return out
+    try:
+        mirror = getattr(sp, "_pending_delete_mirror", None)
+        out["scan_done"] = getattr(sp, "_pending_delete_scan_done", None)
+        if isinstance(mirror, dict):
+            out["entries"] = dict(mirror)
+            out["count"] = len(mirror)
+    except Exception:
+        pass
+    return out
+
+
 def _last_bot_text(plugin: Any, session_key: str) -> str:
     """获取指定会话的最后一条 bot 回复文本（截断到 120 字符）。"""
     buffers = getattr(plugin, "_conversation_buffers", {})
@@ -2861,9 +3195,16 @@ def _frontend_spine_layers(timing_raw: dict, comp_diag: dict) -> list[dict[str, 
         stats = timing_raw.get(internal_key, timing_raw.get(lid, {}))
         if not isinstance(stats, dict):
             stats = {}
-        avg_ms = round(stats.get("mean_ns", stats.get("p50_ns", 0)) / 1_000_000, 1)
-        p50_ms = round(stats.get("p50_ns", 0) / 1_000_000, 1)
-        p99_ms = round(stats.get("p99_ns", stats.get("p95_ns", 0)) / 1_000_000, 1)
+        avg_ms = round(
+            stats.get("mean_ns", stats.get("p50_ns", 0)) / 1_000_000, 6
+        )
+        p50_ms = round(stats.get("p50_ns", 0) / 1_000_000, 6)
+        p95_ms = round(
+            stats.get("p95_ns", stats.get("p99_ns", 0)) / 1_000_000, 6
+        )
+        p99_ms = round(
+            stats.get("p99_ns", stats.get("p95_ns", 0)) / 1_000_000, 6
+        )
         count = int(stats.get("count", 0))
         result.append(
             {
@@ -2872,6 +3213,7 @@ def _frontend_spine_layers(timing_raw: dict, comp_diag: dict) -> list[dict[str, 
                 "status": "active" if count > 0 else "idle",
                 "avg": avg_ms,
                 "p50": p50_ms,
+                "p95": p95_ms,
                 "p99": p99_ms,
                 "count": count,
                 "desc": desc,
@@ -2890,12 +3232,13 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
     all_sessions = _known_sessions(plugin, requested=session)
     if not all_sessions:
         return {
-            "schema_version": "sylanne.webui.state.v1",
+            "schema_version": "sylanne.webui.state.v2",
             "runtime": _runtime_info(plugin),
             "current_session": "default",
             "emotion": {},
             "gate": {},
-            "route_stats": {"fast": 0, "normal": 0, "full": 0, "skip": 0},
+            "route_stats": {"resonance": 0, "skip": 0},
+            "route_distribution": {"RESONANCE": 0, "SKIP": 0},
             "boundary": {},
             "expression": {},
             "timing": {},
@@ -2912,7 +3255,7 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
 
     # 如果没有指定 session，自动选择最活跃的（tick_count 最高的 host）
     # 避免选到从未处理过消息的 "default" 空 host
-    if not session or session not in all_sessions:
+    if not session or session == "default" or session not in all_sessions:
         best_key = all_sessions[0]
         best_ticks = -1
         for sk in all_sessions:
@@ -2934,28 +3277,16 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
         if host is None:
             raise KeyError(session_key)
         comp = host.kernel.computation
-        gate = (lambda g: g.to_dict() if g is not None and hasattr(g, "to_dict") else {})(
-            getattr(comp, "gate", None) or getattr(comp, "_gate", None)
-        )
+        gate = _comp_gate_dict(comp)
         # Route stats from computation spine counters
         comp_diag = comp.diagnostics() if hasattr(comp, "diagnostics") else {}
-        route_counts = (
-            comp_diag.get("route_counts", {}) if isinstance(comp_diag, dict) else {}
-        )
-        route_stats = {
-            "fast": int(route_counts.get("fast", 0)),
-            "normal": int(route_counts.get("normal", 0)),
-            "full": int(route_counts.get("full", 0)),
-            "skip": int(route_counts.get("skip", 0)),
-        }
+        route_stats, route_distribution = _comp_route_stats(comp)
         comp_result = getattr(host.kernel, "_last_computation_result", None) or {}
         layers = dict(comp_result.get("layers", {}))
         if not isinstance(layers, dict):
             layers = {}
         # Boundary: map internal field names to frontend-expected names
-        boundary_raw = (lambda b: b.to_dict() if b is not None and hasattr(b, "to_dict") else {})(
-            getattr(comp, "boundary", None) or getattr(comp, "_boundary", None)
-        )
+        boundary_raw = _comp_boundary_dict(comp)
         boundary = {
             "integrity": boundary_raw.get("boundary_integrity", 1.0),
             "entropy": boundary_raw.get("internal_entropy", 0.0),
@@ -3000,7 +3331,10 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
                 }
             )
         # Ensure L1_HDC layer has all fields from computation result + sample_bits
-        sample_bits = comp.last_hdc_sample if hasattr(comp, "last_hdc_sample") else []
+        sample_bits = list(
+            (comp.last_hdc_sample if hasattr(comp, "last_hdc_sample") else None)
+            or []
+        )
         comp_l1 = comp_result.get("layers", {}).get("L1_HDC", {})
         if comp_l1:
             layers["L1_HDC"] = {**layers.get("L1_HDC", {}), **comp_l1}
@@ -3064,19 +3398,19 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
         except Exception:
             pass
         return {
-            "schema_version": "sylanne.webui.state.v1",
+            "schema_version": "sylanne.webui.state.v2",
             "tick_count": comp._tick_count,
             "runtime": _runtime_info(plugin),
             "current_session": session_key,
             "emotion": {
                 **_EMOTION_DEFAULTS,
                 **comp.engine.observe(),
-                **_assessment_overlay(comp._last_assessment),
+                **_assessment_overlay(getattr(comp, "_last_assessment", None)),
             },
             "gate": {
                 **gate,
                 "history": gate.get("surprise_history", [])[-60:],
-                "route": comp_result.get("route", "NORMAL"),
+                "route": comp_result.get("route", "RESONANCE"),
             },
             "route_stats": route_stats,
             "boundary": boundary,
@@ -3108,30 +3442,27 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
             },
             "theme": {"base": "#F3A7C8", "source": "emotion", "mode": "soft"},
             "feedback": feedback,
-            "sessions": all_sessions,
+            "sessions": _webui_session_items(plugin, all_sessions),
             "social_field": social_field_state,
             "life_simulation": getattr(plugin, "_life_simulator", None)
             and plugin._life_simulator.to_dict()
             or {},
             # --- 新前端兼容字段 ---
             "session_id": session_key,
-            "route_distribution": {
-                "FAST": route_stats["fast"],
-                "NORMAL": route_stats["normal"],
-                "FULL": route_stats["full"],
-                "SKIP": route_stats["skip"],
-            },
+            "route_distribution": route_distribution,
             "personality": _frontend_personality(personality),
             "spine_layers": _frontend_spine_layers(timing_raw, comp_diag),
         }
     except Exception:
+        logger.exception("Sylanne WebUI state build failed: session=%s", session_key)
         return {
-            "schema_version": "sylanne.webui.state.v1",
+            "schema_version": "sylanne.webui.state.v2",
             "runtime": _runtime_info(plugin),
             "current_session": session_key,
             "emotion": {},
             "gate": {},
-            "route_stats": {"fast": 0, "normal": 0, "full": 0, "skip": 0},
+            "route_stats": {"resonance": 0, "skip": 0},
+            "route_distribution": {"RESONANCE": 0, "SKIP": 0},
             "boundary": {},
             "expression": {},
             "timing": {},
@@ -3140,7 +3471,7 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
             "persona": {},
             "theme": {"base": "#F3A7C8", "source": "emotion", "mode": "soft"},
             "feedback": {"accepted": 0, "ignored": 0, "rejected": 0},
-            "sessions": all_sessions,
+            "sessions": _webui_session_items(plugin, all_sessions),
             "life_simulation": {},
         }
 
@@ -3674,7 +4005,9 @@ class WebUILifecycle:
         webui_host = str(self._p._cfg("sylanne_webui_host", "127.0.0.1") or "127.0.0.1")
         webui_port = self._p._cfg_int("sylanne_webui_port", 2718)
         token = _ensure_token(self._p._config or {})
-        self._p.logger.info(f"Sylanne WebUI token: {token}")
+        # 不把 bearer token 明文写进日志(日志常被收集/转发/共享=凭据泄露);token 已由
+        # _ensure_token 持久化进配置,运维需要时从配置取。这里只记"已就绪 + 长度"。
+        self._p.logger.info("Sylanne WebUI auth token ready (redacted, %d chars)", len(token))
         try:
             start_webui_background(self._p, host=webui_host, port=webui_port)
             self._p.logger.info(

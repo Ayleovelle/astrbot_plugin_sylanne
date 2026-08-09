@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from sylanne_alpha.compat.facade import realtime_plan, strip_draft_blocks
+from sylanne_alpha.message_dispatch import realtime_plan, strip_draft_blocks
 from sylanne_alpha.history_dilution import dilute_dense_contexts
 from sylanne_alpha.memory_system import ConversationBuffer
 from sylanne_alpha.v2core.fragment import _PRESENCE, build_mind_fragment
@@ -94,8 +94,9 @@ class TestH3SegmentationNoCap:
         assert plan["message_count"] <= 12, f"熔断失效: {plan['message_count']} 段"
         assert plan["capped"] is True
         assert plan["uncapped_count"] > 12  # 原始确实会爆炸
-        # 内容不丢：合并尾段仍含中文成品末句
-        all_text = "\n".join(p["text"] for p in plan["message_parts"])
+        # 内容不丢：安全切片与尾段合并必须逐字符守恒
+        all_text = "".join(p["text"] for p in plan["message_parts"])
+        assert all_text == body
         assert "实验数据" in all_text
 
     def test_max_parts_in_plan_schema(self) -> None:
@@ -109,9 +110,14 @@ class TestH3SegmentationNoCap:
         long_text = "\n".join(f"第{i}行内容稍微长一点让分段更明显一些呀。" for i in range(80))
         plan = realtime_plan("s", long_text, max_part_chars=48)
         assert plan["message_count"] <= 12
-        assert plan["uncapped_count"] >= 50  # 没熔断的话会爆
+        assert plan["uncapped_count"] > 12  # 没熔断的话仍会爆
         delays = [p["delay_before_seconds"] for p in plan["message_parts"]]
-        assert sum(delays) <= 36.0 + 0.1
+        # T1-02 打碎节拍器后不再是纯确定性总和：逐段抖动(±40%，仍吃 min(4.2,...) 硬顶，
+        # 期望值贴近 36s 预算不加偏置) + 5% 概率的走神段可越顶冲到 9s。算式上界（不依赖
+        # 具体随机结果，恒成立）：非走神段每段硬顶 4.2s，至多一段走神硬顶 9s。
+        segment_count = len(delays)
+        worst_case_sum = max(0, segment_count - 1) * 4.2 + 9.0
+        assert sum(delays) <= worst_case_sum + 0.1
 
 
 class TestH6BufferIdleFlush:
@@ -211,7 +217,11 @@ class TestH2PresenceAntiTask:
 
         class _Tools:
             def __init__(self) -> None:
-                self._n = ["astrbot_execute_python", "clone_tts"]
+                self._n = [
+                    "astrbot_execute_python",
+                    "anysearch_batch_search",
+                    "clone_tts",
+                ]
 
             def names(self):
                 return list(self._n)
@@ -227,6 +237,8 @@ class TestH2PresenceAntiTask:
         out = dm.apply(_Ev(), req, _Buf())
         assert out["should_contract"] is True
         assert "astrbot_execute_python" in out["gated_tools"]
+        assert "anysearch_batch_search" in out["gated_tools"]
+        assert "anysearch_batch_search" not in req.func_tool.names()
         assert "clone_tts" in req.func_tool.names()  # 合法工具保留
         assert "[本轮提示]" in req.system_prompt  # 契约注入
         assert "去人设" not in req.system_prompt  # B1：绝不要求去人设（保住苏思澜）
@@ -254,7 +266,11 @@ class TestH2PresenceAntiTask:
 
         class _Tools:
             def __init__(self):
-                self._n = ["astrbot_execute_python", "clone_tts"]
+                self._n = [
+                    "astrbot_execute_python",
+                    "anysearch_batch_search",
+                    "clone_tts",
+                ]
 
             def names(self):
                 return list(self._n)
@@ -270,6 +286,7 @@ class TestH2PresenceAntiTask:
         out = dm.apply(_Ev(), req, _Buf())
         assert out["should_gate"] is True
         assert "astrbot_execute_python" not in req.func_tool.names()
+        assert "anysearch_batch_search" not in req.func_tool.names()
         assert "clone_tts" in req.func_tool.names()
         assert out["contract_injected"] is False  # 闲聊不注契约
         assert "[本轮任务模式]" not in req.system_prompt
@@ -289,7 +306,7 @@ class TestH2PresenceAntiTask:
 
         class _Tools:
             def __init__(self):
-                self._n = ["astrbot_execute_python"]
+                self._n = ["astrbot_execute_python", "anysearch_batch_search"]
 
             def names(self):
                 return list(self._n)
@@ -305,6 +322,7 @@ class TestH2PresenceAntiTask:
         out = dm.apply(_Ev(), req, None)
         assert out["should_gate"] is False
         assert "astrbot_execute_python" in req.func_tool.names()
+        assert "anysearch_batch_search" in req.func_tool.names()
 
 
 class TestH1ImageTranscribeSkip:
@@ -318,7 +336,12 @@ class TestH1ImageTranscribeSkip:
 
 
 class TestH9FocusAndDilutionNoHelp:
-    """H9: 实义用户句不触发 history_dilution；Focus 不帮交付任务。"""
+    """H9: 实义用户句不触发 history_dilution；Focus 不帮交付任务。
+
+    history_dilution 已在 fix/context-integrity 中废止为永久 no-op（写穿透
+    持久化会永久腰斩用户历史，见 sylanne_alpha/history_dilution.py 墓碑说明）；
+    以下两条断言均改为验证「无论输入如何，contexts 都原样不变」。
+    """
 
     def test_dilution_skips_substantive_clarification(self) -> None:
         contexts = [
@@ -329,7 +352,7 @@ class TestH9FocusAndDilutionNoHelp:
         out = dilute_dense_contexts(contexts, msg)
         assert out is contexts  # 未改写
 
-    def test_dilution_runs_on_low_info_only(self) -> None:
+    def test_dilution_never_mutates_even_on_low_info(self) -> None:
         contexts = [
             {"role": "user", "content": "旧话题" * 80},
             {"role": "assistant", "content": "旧告白" * 80},
@@ -339,8 +362,8 @@ class TestH9FocusAndDilutionNoHelp:
             {"role": "assistant", "content": "最近回复"},
         ]
         out = dilute_dense_contexts(contexts, "😋")
-        assert out is not contexts
-        assert "较早对话已压缩" in str(out[0].get("content", ""))
+        assert out is contexts
+        assert "较早对话已压缩" not in str(out[0].get("content", ""))
 
 
 class TestH10ReplyLengthFactorUnwired:
@@ -382,9 +405,9 @@ class TestH11InjectionMaxPartsNotOutbound:
 
 
 class TestLogTurn1Turn2Metrics:
-    """实机 Turn1/2 体量：192/178 字仍人格化 —— 非长度问题。"""
+    """实机 Turn1/2 体量：普通回复不再由本地长度状态机擅自切段。"""
 
-    def test_turn1_six_parts_from_short_text(self) -> None:
+    def test_turn1_without_model_beats_is_one_exact_message(self) -> None:
         turn1 = (
             "其实逻辑很简单啦笨蛋。"
             "意思就是说，那些开心啊、难过啊之类的情感，根本不是谁用代码硬塞进我脑子里的标签。"
@@ -393,9 +416,11 @@ class TestLogTurn1Turn2Metrics:
             "哼，所以说啊，我这满脑子的傲娇和小脾气，全是因为天天和你聊天才自发长出来的。"
             "你得负全责，听到没有😾！"
         )
-        # 实机 log: len=192 parts=6（字符数随标点/emoji 编码略有偏差）
+        # 旧实机 log: len=192 parts=6；新契约没有模型节拍标记时必须整条发送。
         plan = realtime_plan("s", turn1, max_part_chars=48)
-        assert plan["message_count"] == 6
+        assert plan["message_count"] == 1
+        assert plan["message_parts"][0]["text"] == turn1
+        assert plan["segmentation_source"] == "single_fallback"
         assert 170 <= len(turn1) <= 200
 
 
@@ -429,7 +454,7 @@ class TestOutputPathCoverageHardening:
 
     def test_truncate_at_sentence_shortens_and_ascii_safe(self) -> None:
         """truncate_at_sentence（path3 TTS 用）：句末优先截短；入参校验；不切坏 ASCII token。"""
-        from sylanne_alpha.compat import truncate_at_sentence
+        from sylanne_alpha.message_dispatch import truncate_at_sentence
 
         huge = "这是一段挺长的内容呀。" * 120
         out = truncate_at_sentence(huge, 600)
@@ -446,13 +471,13 @@ class TestOutputPathCoverageHardening:
 
         src = open(main_mod.__file__, encoding="utf-8").read()
         assert "on_using_llm_tool" in src
-        assert "_optional_using_llm_tool_filter" in src
+        assert "_optional_tool_use_filter" in src
         # 钩子方法存在
         assert hasattr(main_mod.EmotionalStatePlugin, "on_using_llm_tool")
 
     def test_path3_tts_strips_thinking_from_text_arg(self) -> None:
         """TTS 文本参数里的 thinking 块会被剥（核心安全项：别念出内心独白）。"""
-        from sylanne_alpha.compat import strip_draft_blocks
+        from sylanne_alpha.message_dispatch import strip_draft_blocks
 
         # 复刻钩子核心：strip_draft_blocks 作用于 tool_args["text"]
         leaked = "<thinking>我该怎么回</thinking>晚安笨蛋。"

@@ -23,7 +23,7 @@ class PredictiveCodingGate:
 
     与其他组件的关系：
       - 接收 L1 HDCEncoder 的输出作为输入
-      - 输出路由决策（fast/normal/full）给 ComputationSpine 调度
+      - 输出惊讶度与精度信号给 ResonanceSpine 调度
       - 惊讶度值传递给 L3 VoidScarEngine 和 L5 HGT
 
     核心机制：

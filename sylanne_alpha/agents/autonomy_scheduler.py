@@ -1,27 +1,34 @@
 """AutonomyScheduler：全局自驱心跳（CP8-P3b）。
 
 让 Sylanne「没人说话也活着」——全局单 task 后台循环，定期：
-1. 全局演化一次：驱动 LifeAgent 的 AUTONOMOUS 时点（作息/生活事件，一个 bot 一套）。
+1. 全局演化一次：驱动 LifeAgent（作息/生活事件，一个 bot 一套）。
 2. 三态扫会话：对每个活跃会话按 AWAKE/DROWSY/RETIRED 决定是否自驱演化
-   （空 event 驱动 host 计算 + run_cycle(AUTONOMOUS)）。
+   （空 event 驱动 host 计算 + run_autonomous_cycle）。
 
 防死锁纪律（避免 3.0 回归）：
 - 单 task，while True + sleep + try/except CancelledError（对齐现有循环模式）。
 - 不用全局锁——按会话 session_lock 串行化（与 reactive 后台 observe 同锁），
   对同一会话串行、不同会话并行，无交叉等待。
-- 临界区（持锁期间）只做同步 tick + run_cycle，agent 的 LLM/IO 在 act 内可超时降级。
+- 临界区（持锁期间）只做同步 tick，自主 worker 在锁外运行。
 - RETIRED 会话移出迭代（资源归零）；用户消息经 reactive 路径自动唤醒（last_user_
   message_time 刷新 → autonomy_phase 回 AWAKE）。
+
+性能优化（2c2g 低配服务器适配）：
+- _base_interval 默认 90s（原 30s），降低扫描频率
+- AWAKE 会话加降频倍数（每 _awake_divisor 拍才 tick 一次，默认 2 → 实际 180s）
+- DROWSY 降频倍数默认 6（原 4 → 实际 540s）
+- 单次 scan 最多 tick _max_ticks_per_scan 个会话（默认 3），防 CPU burst
+- 会话间 asyncio.sleep(0) yield 让出控制权，防阻塞 reactive 路径
+- host.on_request(None) 跑在 executor 里防阻塞事件循环
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import time
 from typing import TYPE_CHECKING
-
-from sylanne_alpha.agents.base import AUTONOMOUS
 
 if TYPE_CHECKING:
     from sylanne_alpha.agents.self_core import SelfCore
@@ -56,22 +63,38 @@ class AutonomyScheduler:
 
     @property
     def _base_interval(self) -> float:
-        """扫描节拍（秒）。默认 30s，下限 0.1s（允许测试/激进配置）。"""
+        """扫描节拍（秒）。默认 90s（2c2g 适配），下限 0.1s（允许测试/激进配置）。"""
         try:
             return max(
                 0.1,
-                float((self._p.config or {}).get("sylanne_alpha_autonomy_scan_interval_seconds", 30.0)),
+                float((self._p.config or {}).get("sylanne_alpha_autonomy_scan_interval_seconds", 90.0)),
             )
         except Exception:
-            return 30.0
+            return 90.0
 
     @property
     def _drowsy_divisor(self) -> int:
-        """DROWSY 会话降频倍数：每 N 个扫描拍才演化一次。"""
+        """DROWSY 会话降频倍数：每 N 个扫描拍才演化一次（默认 6 → 实际 ~540s）。"""
         try:
-            return max(1, int((self._p.config or {}).get("sylanne_alpha_autonomy_drowsy_divisor", 4)))
+            return max(1, int((self._p.config or {}).get("sylanne_alpha_autonomy_drowsy_divisor", 6)))
         except Exception:
-            return 4
+            return 6
+
+    @property
+    def _awake_divisor(self) -> int:
+        """AWAKE 会话降频倍数：每 N 个扫描拍才 tick 一次（默认 2 → 实际 ~180s）。"""
+        try:
+            return max(1, int((self._p.config or {}).get("sylanne_alpha_autonomy_awake_divisor", 2)))
+        except Exception:
+            return 2
+
+    @property
+    def _max_ticks_per_scan(self) -> int:
+        """单次 scan 最多 tick 多少个会话（防 CPU burst，默认 3）。"""
+        try:
+            return max(1, int((self._p.config or {}).get("sylanne_alpha_autonomy_max_ticks_per_scan", 3)))
+        except Exception:
+            return 3
 
     def start(self) -> None:
         if self._task is not None and not self._task.done():
@@ -128,11 +151,13 @@ class AutonomyScheduler:
         #    用任一活跃会话的 surface 作上下文；无会话则用 default。
         await self._global_autonomy(now)
 
-        # 2. 三态扫各会话：AWAKE 每拍 / DROWSY 降频 / RETIRED 跳过。
+        # 2. 三态扫各会话：AWAKE 降频 / DROWSY 降频 / RETIRED 跳过。
         try:
             sessions = self._p._store.hosts.snapshot_items()
         except Exception:
             sessions = []
+        ticked = 0
+        max_ticks = self._max_ticks_per_scan
         for sk, host in sessions:
             phase = self._sc.autonomy_phase(sk, now)
             prev = self._prev_phase.get(sk)
@@ -150,6 +175,8 @@ class AutonomyScheduler:
                             await self._consolidation._write_evolution(sk, snapshot)
                         except Exception as exc:
                             logger.debug("Sylanne consolidate write [%s]: %s", sk, exc)
+                    # yield 让出控制权，防阻塞 reactive 路径
+                    await asyncio.sleep(0)
                 # Phase 2 核心：生活巩固（当天 LifeEvent → 次日 LifePlan）。独立守卫+锁舞，
                 # 与对话策略巩固并列。锁内同步聚合取快照，锁外落盘（IO 不占会话锁）。
                 if self._life_consolidation.needs_consolidation(sk, now):
@@ -161,6 +188,7 @@ class AutonomyScheduler:
                             await self._life_consolidation._write_state(sk, life_snap)
                         except Exception as exc:
                             logger.debug("Sylanne life consolidate write [%s]: %s", sk, exc)
+                    await asyncio.sleep(0)
                 continue  # 巩固后移出自驱，资源归零
             if phase == self._sc.DROWSY:
                 # CP8-P4-E 首拍闸：仅 AWAKE→DROWSY 跳变的那一拍触发一次反思
@@ -175,7 +203,17 @@ class AutonomyScheduler:
                         logger.debug("Sylanne life reflection [%s]: %s", sk, exc)
                 if (self._tick_count % self._drowsy_divisor) != 0:
                     continue  # 降频
+            elif phase == self._sc.AWAKE:
+                # AWAKE 降频：每 _awake_divisor 拍才 tick 一次（默认 2 → 实际 180s）
+                if (self._tick_count % self._awake_divisor) != 0:
+                    continue
+            # 并发上限：单次 scan 最多 tick N 个会话，防 CPU burst
+            if ticked >= max_ticks:
+                break
             await self._tick_session(sk, host, now)
+            ticked += 1
+            # 会话间 yield，让 reactive 路径有机会插入
+            await asyncio.sleep(0)
 
     async def _global_autonomy(self, now: float) -> None:
         """驱动全局演化（LifeAgent AUTONOMOUS）。用 default 会话 surface 作上下文。"""
@@ -186,25 +224,24 @@ class AutonomyScheduler:
                 items = self._p._store.hosts.snapshot_items()
                 host = items[0][1] if items else None
             surface = host.kernel.surface() if host is not None else {}
-            await self._sc.run_cycle("default", surface, phase=AUTONOMOUS)
+            await self._sc.run_autonomous_cycle("default", surface)
         except Exception as exc:
             logger.debug("Sylanne global autonomy: %s", exc)
 
     async def _tick_session(self, session_key: str, host, now: float) -> None:
-        """单会话自驱 tick：空 event 驱动演化 + run_cycle。
+        """单会话自驱 tick：空 event 驱动演化 + 自主 worker。
 
-        CP8-P6 锁舞：持锁只做同步的 host 演化 + 取 surface 快照；run_cycle(AUTONOMOUS)
-        移到锁外（其唯一 LLM 来源 LifeAgent 驱动的是全局生命模拟、不写本会话 host，
-        故无需在锁内，避免 LLM 长占会话锁阻塞 reactive 唤醒）。
+        host.on_request(None) 跑在 executor 里防阻塞事件循环（2c2g 适配）。
+        锁仍持有保证串行化，但 executor 让出 GIL 使其他协程可调度。
         """
         lock = self._p._session_lock(session_key)
         try:
+            loop = asyncio.get_running_loop()
             async with lock:
-                # 空 event 驱动 host 纯演化（无文本，body 状态照常漂移）——同步、需持锁
-                host.on_request(None)
+                # executor 内跑纯计算，让出事件循环给 reactive 路径
+                await loop.run_in_executor(None, host.on_request, None)
                 surface = host.kernel.surface()
-            # run_cycle 在锁外：AUTONOMOUS 时点 agent 不写本会话 host（LifeAgent 演化的
-            # 是全局生命模拟），读的是已取的 surface 快照，无竞态。
-            await self._sc.run_cycle(session_key, surface, phase=AUTONOMOUS)
+            # 自主 worker 在锁外运行，不长占本会话 host 锁。
+            await self._sc.run_autonomous_cycle(session_key, surface)
         except Exception as exc:
             logger.debug("Sylanne autonomy tick [%s]: %s", session_key, exc)

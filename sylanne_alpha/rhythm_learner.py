@@ -94,6 +94,32 @@ class RhythmProfile:
             if median_gap > 0.1:
                 self._chars_per_second = max(2.0, min(20.0, median_len / median_gap))
 
+    def median_gap_seconds(self) -> float | None:
+        """用户消息间隔中位数（秒）。样本不足（<3）时返回 None（调用方应回退默认值）。"""
+        if len(self._inter_msg_gaps) < 3:
+            return None
+        sorted_gaps = sorted(self._inter_msg_gaps)
+        return sorted_gaps[len(sorted_gaps) // 2]
+
+    def intra_burst_median_gap_seconds(
+        self, burst_threshold: float = 10.0
+    ) -> float | None:
+        """连发内间隔中位数（秒）——只用小于 burst_threshold 的样本。
+
+        review 发现：median_gap_seconds() 的全量样本混着"两条连发之间隔几秒"和
+        "一轮对话结束到下一轮重新开口之间隔几十秒"两种截然不同的停顿，成熟画像
+        的全量中位数几乎总落在几十秒量级——用它去撑 T2-04③ 的自适应合并窗口，
+        会把 clamp 钝化成常量 8.0s 天花板，等于没自适应。这里先过滤掉像是跨轮
+        停顿的大间隔样本，只留"像连发"的间隔再取中位数，更贴近"这个人连着发
+        消息时，条与条之间隔多久"这个问题本身。
+
+        样本不足（过滤后 <3）时返回 None，调用方应回退默认值/整体中位数。
+        """
+        candidates = sorted(g for g in self._inter_msg_gaps if g < burst_threshold)
+        if len(candidates) < 3:
+            return None
+        return candidates[len(candidates) // 2]
+
     @property
     def confidence(self) -> float:
         return self._confidence
@@ -105,34 +131,6 @@ class RhythmProfile:
     @property
     def chars_per_second(self) -> float:
         return self._chars_per_second
-
-    def modulate(
-        self, default_max_part: int, default_cps: float, blend: float
-    ) -> tuple[int, float]:
-        """返回混合后的 (max_part_chars, chars_per_second)。
-
-        参数:
-            default_max_part: 默认最大分段字符数
-            default_cps: 默认打字速度
-            blend: 混合比例，0.0=纯默认，1.0=纯用户节奏
-
-        实际混合比例还会乘以置信度（采样不足时不生效）。
-        """
-        effective_blend = blend * self._confidence
-        if effective_blend < 0.05:
-            return default_max_part, default_cps
-
-        learned_part = max(12, min(120, int(self._avg_part_chars)))
-        learned_cps = self._chars_per_second
-
-        blended_part = int(
-            default_max_part * (1 - effective_blend) + learned_part * effective_blend
-        )
-        blended_cps = (
-            default_cps * (1 - effective_blend) + learned_cps * effective_blend
-        )
-
-        return max(12, min(120, blended_part)), max(2.0, min(20.0, blended_cps))
 
     def to_dict(self) -> dict[str, Any]:
         """序列化画像状态。"""
@@ -293,7 +291,11 @@ class RhythmLearner:
 
         # 净同步意图：正值=想同步，负值=在退缩
         sync_intent = drive_factor - withdrawal_factor
-        effective_blend = max(0.0, blend * profile.confidence * max(0.1, sync_intent))
+        # flavor 级校准（核查任务 wzwd8i0ta #27）：内层地板 0.1 让成熟画像
+        # （confidence≈1）的 effective_blend 恒 ≥ blend*1*0.1=0.06 > 0.05，退缩分支永不可达。
+        # 改地板 0.0：净退缩（sync_intent≤0）时 effective_blend 真归零，成熟画像也能进退缩放慢。
+        # 正向同步区间（sync_intent>0.1）行为不变，不动整体节律语义。
+        effective_blend = max(0.0, blend * profile.confidence * max(0.0, sync_intent))
 
         if effective_blend < 0.05:
             # 退缩模式：使用比默认更慢的节奏
@@ -314,6 +316,32 @@ class RhythmLearner:
 
     def profile(self, session_key: str) -> RhythmProfile | None:
         return self._profiles.get(session_key)
+
+    def get_median_inter_message_gap(self, session_key: str) -> float | None:
+        """获取该会话用户消息间隔中位数（秒），供自适应防抖合并窗口等场景使用。
+
+        门槛与 get_rhythm_params 一致（confidence >= 0.1）——画像还不成熟时返回
+        None，调用方应回退到固定/配置窗口，而不是拿噪声样本硬算。
+        """
+        profile = self._profiles.get(session_key)
+        if profile is None or profile.confidence < 0.1:
+            return None
+        return profile.median_gap_seconds()
+
+    def get_intra_burst_median_gap(
+        self, session_key: str, burst_threshold: float = 10.0
+    ) -> float | None:
+        """获取该会话"像连发"的消息间隔中位数（秒），排除跨轮对话停顿污染。
+
+        门槛与 get_median_inter_message_gap 一致（confidence >= 0.1）。供 T2-04②③
+        自适应探测/合并窗口使用——比全量中位数更贴近"这个人连发时条与条之间
+        隔多久"，不会被对话轮次之间的长静默拉高（见
+        RhythmProfile.intra_burst_median_gap_seconds 的 review 说明）。
+        """
+        profile = self._profiles.get(session_key)
+        if profile is None or profile.confidence < 0.1:
+            return None
+        return profile.intra_burst_median_gap_seconds(burst_threshold)
 
     # ------------------------------------------------------------------
     # Item 79: 回复长度自适应控制器

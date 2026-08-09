@@ -22,7 +22,7 @@ hypothesis = pytest.importorskip("hypothesis")
 
 from hypothesis import given, settings, strategies as st  # noqa: E402
 
-from sylanne_alpha.v2core.body_port import snapshot_from_surface  # noqa: E402
+from sylanne_alpha.v2core.body_port_v2 import snapshot_from_surface  # noqa: E402
 from sylanne_alpha.v2core.capabilities.expression import compose_style  # noqa: E402
 from sylanne_alpha.v2core.capabilities.ignition import personality_saddle  # noqa: E402
 from sylanne_alpha.v2core.capabilities.somatic import guard_soften_from_body  # noqa: E402

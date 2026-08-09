@@ -30,7 +30,7 @@ class AutopoieticBoundary:
       - 穿透未超阈值 → 完整性微降 + 熵微升
 
     与其他组件的关系：
-      - 被 ComputationSpine 在 L6 层调用
+      - 被 ResonanceSpine 在边界模块调用
       - 接收 L3 情感状态转换为的力向量
       - stability() 输出给结果诊断
       - 相变事件影响 L7 表达驱动力

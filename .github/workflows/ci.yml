@@ -24,7 +24,8 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install pyright ruff aiohttp
+          pip install -r requirements.txt
+          pip install pyright ruff
 
       - name: Syntax check (all .py files)
         run: |
@@ -52,7 +53,8 @@ jobs:
           echo "No conflict markers found"
 
       - name: Ruff lint
-        run: ruff check . --select=E9,F63,F7,F82 --no-fix
+        # select 单一真相在 pyproject.toml（含 ASYNC）；此处不再覆盖 --select。
+        run: ruff check . --no-fix
 
       - name: Pyright type check (sylanne_alpha)
         continue-on-error: true
@@ -76,7 +78,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install runtime deps
-        run: pip install aiohttp
+        run: pip install -r requirements.txt
 
       - name: Import main module
         run: |
@@ -168,7 +170,8 @@ jobs:
       - name: Install deps
         run: |
           pip install --upgrade pip
-          pip install pytest pytest-asyncio aiohttp numpy jieba
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio numpy jieba
 
       - name: Run pytest
         run: pytest tests/ -v --no-header -p no:cacheprovider
@@ -186,8 +189,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Resolve package channel
+        id: package-channel
+        run: |
+          CHANNEL=$(python -c "from pathlib import Path; from scripts.package_plugin import _metadata_channel_for_version, _read_metadata_version; print(_metadata_channel_for_version(_read_metadata_version(Path('metadata.yaml').read_bytes())))")
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+
       - name: Build plugin zip
-        run: python scripts/package_plugin.py --output dist/plugin.zip
+        run: python scripts/package_plugin.py --channel "${{ steps.package-channel.outputs.channel }}" --output dist/plugin.zip
 
       - name: Verify zip contents
         run: |
@@ -225,7 +234,7 @@ jobs:
         run: |
           mkdir -p /tmp/verify && cd /tmp/verify
           unzip -q $GITHUB_WORKSPACE/dist/plugin.zip
-          pip install aiohttp
+          pip install -r $GITHUB_WORKSPACE/requirements.txt
           python -c "
           import sys
           sys.path.insert(0, '/tmp/verify/astrbot_plugin_sylanne')

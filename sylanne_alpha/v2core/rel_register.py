@@ -16,6 +16,12 @@ import re
 import time
 from typing import Any
 
+from sylanne_alpha.provider_routing import (
+    ProviderFeature,
+    call_text_provider_once,
+    resolve_text_provider,
+)
+
 try:
     from astrbot.api import logger  # type: ignore
 except Exception:  # pragma: no cover - 测试环境无 astrbot
@@ -106,24 +112,28 @@ async def classify_and_store(
     任何异常吞掉（后台任务，绝不影响主流程）。不碰 SDK 内部。
     """
     try:
-        pipe = getattr(plugin, "_llm_response_pipeline", None)
-        call = getattr(pipe, "_generic_llm_call", None)
         store = getattr(plugin, "_store", None)
         reg = getattr(store, "relationship_register_state", None)
-        if call is None or reg is None or not text.strip():
+        context = getattr(plugin, "context", None) or getattr(plugin, "_context", None)
+        config = getattr(plugin, "config", None) or getattr(plugin, "_config", None) or {}
+        if reg is None or context is None or not text.strip():
             return
-        raw = await call(
-            # 转义花括号：用户消息含 {} 会被 .format 当占位符 → KeyError/ValueError
-            # 被外层吞掉，导致含 {} 的消息静默无法分类。
-            _PROMPT.format(text=text[:300].replace("{", "{{").replace("}", "}}")),
-            provider_config_keys=[
-                "sylanne_alpha_rel_register_provider_id",
-                "sylanne_alpha_assessor_provider_id",
-                "emotion_provider_id",
-            ],
+        resolved = await resolve_text_provider(
+            feature=ProviderFeature.RELATIONSHIP,
+            config=config,
+            context=context,
+            umo=str(getattr(event, "unified_msg_origin", "") or "") or None,
+        )
+        if resolved.provider is None:
+            return
+        prompt = _PROMPT.format(text=text[:300])
+        response = await call_text_provider_once(
+            resolved.provider,
+            prompt=prompt,
             max_tokens=8,
             temperature=0.0,
         )
+        raw = getattr(response, "completion_text", response)
         label = _parse_rel(raw)
         if label == "unknown":
             return

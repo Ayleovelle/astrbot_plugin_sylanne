@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import sys
 import unittest
 from types import SimpleNamespace
 
@@ -65,9 +64,6 @@ class FakePersonaManager:
 
 
 class TestConversationManagerIntegration(unittest.TestCase):
-    def setUp(self):
-        sys.modules.pop("main", None)
-
     def _make_plugin(self, conv_mgr=None, persona_mgr=None, config=None):
         main = importlib.import_module("main")
         ctx = SimpleNamespace()
@@ -135,9 +131,6 @@ class TestConversationManagerIntegration(unittest.TestCase):
 
 
 class TestPersonaManagerIntegration(unittest.TestCase):
-    def setUp(self):
-        sys.modules.pop("main", None)
-
     def _make_plugin(self, persona_mgr=None, config=None):
         main = importlib.import_module("main")
         ctx = SimpleNamespace()
@@ -229,9 +222,6 @@ class TestPersonaManagerIntegration(unittest.TestCase):
 
 class TestIntegrationFallback(unittest.TestCase):
     """Test that the plugin works correctly without managers (backwards compat)."""
-
-    def setUp(self):
-        sys.modules.pop("main", None)
 
     def test_full_lifecycle_without_managers(self):
         main = importlib.import_module("main")

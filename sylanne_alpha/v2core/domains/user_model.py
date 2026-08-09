@@ -42,6 +42,9 @@ from sylanne_alpha.v2core.lexicon import STATIC_WORDS, TextSignals, read_signals
 
 _DISPOSITION_DIMS = ("warmth", "engagement", "defensiveness", "distress")
 _RHYTHM_ALPHA = 0.2          # 回复时距慢 EMA
+_RHYTHM_GAP_CEILING = 3600.0  # 单次 gap 上限(秒)：超过=用户离开/睡了/插件停机跨重启，不是
+#                               对话节律数据点。不设上限时，一次跨停机 gap(可达数天)×α 会把
+#                               EMA 顶到上万(实测加载旧数据后 rhythm_ema 飙到 1 万+)，污染节律模型。
 _STYLE_ALPHA = 0.1           # 风格慢漂
 _DISP_ALPHA_BASE = 0.3       # 处置后验基础学习率（再被精度调制）
 _PE_WINDOW = 16
@@ -131,7 +134,7 @@ class UserModelDomain:
     __slots__ = (
         "_disposition", "_disp_precision", "_rhythm_ema", "_last_user_ts",
         "_style_sketch", "_last_prediction", "_pe_history", "_sync_trace",
-        "_meme_cands", "_memes", "_hesitation_ema", "_bond_ema",
+        "_meme_cands", "_memes", "_hesitation_ema", "_bond_ema", "_last_user_text",
     )
 
     def __init__(self) -> None:
@@ -149,6 +152,10 @@ class UserModelDomain:
         self._memes: dict[str, dict[str, float]] = {}
         self._hesitation_ema: float = 0.0
         self._bond_ema: float = 0.0
+        # T2-01①：上一条真实用户文本（不含空闲/主动轮），供 IgnitionArbiter 做零状态
+        # 的"复读检测"（本轮文本与上轮文本相同 → 低信息量）。只在 EVOLVE 写，DELIBERATE
+        # 读到的永远是"上一轮"的值（与 _last_user_ts 同一时序纪律，见 reply_overdue）。
+        self._last_user_text: str = ""
 
     # ---- 读接口（PERCEPT/DELIBERATE，纯只读）----
 
@@ -156,9 +163,26 @@ class UserModelDomain:
         """对你下一条消息处置的期望 = 当前后验均值（静态模型的诚实预测）。"""
         return dict(self._disposition)
 
-    def predict_you(self, body: BodySnapshot, text: str) -> UserView:
-        """投影：结合本条文本浅证据的预判 + 把握度。只读，喂 Mentalize/心象片段。"""
-        ev = evidence_from_signals(read_signals(text))
+    def bond(self) -> float:
+        """关系质量代理（_bond_ema 裸值）。供 AdaptationDomain StyleMirror 的 CAT bond 闸。
+
+        注意与 bond_hint() 区分：后者返回叠加 sync_trace/memes 派生分的【措辞串】，非裸 EMA。
+        """
+        return self._bond_ema
+
+    def style_sketch(self) -> dict[str, float]:
+        """你被观测到的风格三轴只读副本，键为 'len'/'punct'/'warmth'（首条消息前为空 dict）。"""
+        return dict(self._style_sketch)
+
+    def predict_you(self, ctx: BeatContext) -> UserView:
+        """投影：结合本条文本浅证据的预判 + 把握度。只读，喂 Mentalize/心象片段。
+
+        铁律（别重复 tokenize）：复用 make_context 预读进 scratch["signals"] 的 TextSignals，
+        不在每轮热路径重新分词；scratch 缺位（极端容错）才回落 read_signals。
+        """
+        body = ctx.body
+        sig: TextSignals = ctx.scratch.get("signals") or read_signals(ctx.text or "")
+        ev = evidence_from_signals(sig)
         predicted = {
             d: self._disposition[d] + 0.3 * ev.get(d, 0.0) for d in _DISPOSITION_DIMS
         }
@@ -190,6 +214,21 @@ class UserModelDomain:
         ranked = sorted(self._memes.items(),
                         key=lambda kv: (-float(kv[1].get("count", 0.0)), -len(kv[0])))
         return [g for g, _ in ranked[:max(0, limit)]]
+
+    def last_user_text(self) -> str:
+        """上一条真实用户文本（本轮之前）；无历史 → 空串。消费者：ignition 低信息量/复读检测。"""
+        return self._last_user_text
+
+    def seconds_since_last_user(self, now: float) -> float | None:
+        """距上一条真实用户消息过了多久（秒）；无历史/无效 now → None。
+
+        消费者：ignition 的"连发轰炸"启发式（T2-01①）——不看节律 EMA 的相对超期，
+        只看绝对间隔，冷启动（无 EMA）也能识别真连发。
+        """
+        if self._last_user_ts is None or now <= 0.0:
+            return None
+        gap = now - self._last_user_ts
+        return gap if gap >= 0.0 else None
 
     def reply_overdue(self, body: BodySnapshot, now: float) -> float:
         """相对你的节律 EMA，本次沉默超期多少倍。无节律画像 → 0。不封顶（铁律②）。"""
@@ -315,12 +354,16 @@ class UserModelDomain:
         if now > 0.0 and text:
             if self._last_user_ts is not None:
                 gap = now - self._last_user_ts
-                if gap > 0.0:
+                # 只学"活跃对话内"的回复时距。0 < gap <= 上限才计入；超上限的 gap = 用户离开/
+                # 睡了/插件停机跨重启，直接不学、保留上次对话内的 cadence。注意：这是拒绝 EMA 的
+                # 【输入】离群点(节律 hygiene)，不封顶 reply_overdue 的【输出】超期倍数(铁律②仍成立)。
+                if 0.0 < gap <= _RHYTHM_GAP_CEILING:
                     self._rhythm_ema = (gap if self._rhythm_ema is None
                                         else (1 - _RHYTHM_ALPHA) * self._rhythm_ema
                                         + _RHYTHM_ALPHA * gap)
             self._last_user_ts = now
         if text:
+            self._last_user_text = text
             self._update_style(sig)
             # SharedLexicon：唤起取 appraisal 的真实评价（PERCEPT 写 scratch，EVOLVE 读）
             arousal = 0.0
@@ -542,6 +585,7 @@ class UserModelDomain:
             "bond_ema": self._bond_ema,
             "meme_cands": {g: dict(c) for g, c in self._meme_cands.items()},
             "memes": {g: dict(m) for g, m in self._memes.items()},
+            "last_user_text": self._last_user_text,
         }
 
     def load_dict(self, data: dict[str, Any]) -> None:
@@ -564,7 +608,19 @@ class UserModelDomain:
                     except (TypeError, ValueError):
                         pass
         self._rhythm_ema = _opt_f(data.get("rhythm_ema"))
+        if self._rhythm_ema is not None and not (
+            math.isfinite(self._rhythm_ema)
+            and 0.0 < self._rhythm_ema <= _RHYTHM_GAP_CEILING
+        ):
+            # 旧档/损坏值愈合：新不变量下正常 EMA 恒 ≤ 上限(输入已 gate)，故任何越界值——
+            # 老版本跨停机 gap 顶上万、或 NaN/inf/负数(损坏档、手改档回灌)——都是已知坏数据、
+            # 零残值。直接置 None 冷启：下一条正常 gap 一发即把 EMA 重初始化到真 cadence(1 轮恢复)，
+            # 优于夹回上限后要 ~22 轮才洗回、且会放大重启后 overdue 尖峰(红队量化复核实证)。
+            self._rhythm_ema = None
         self._last_user_ts = _opt_f(data.get("last_user_ts"))
+        lut = data.get("last_user_text")
+        if isinstance(lut, str):
+            self._last_user_text = lut
         hes = _opt_f(data.get("hesitation_ema"))
         if hes is not None:
             self._hesitation_ema = hes

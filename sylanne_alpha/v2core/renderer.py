@@ -27,7 +27,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Protocol, runtime_checkable
 
-from sylanne_alpha.compat.facade import strip_draft_blocks
+from sylanne_alpha.message_dispatch import strip_draft_blocks
 from sylanne_alpha.v2core.contracts import (
     BeatContext,
     BodySnapshot,
@@ -35,11 +35,18 @@ from sylanne_alpha.v2core.contracts import (
     Reply,
     ReplyKind,
 )
+from sylanne_alpha.variant_pool import (
+    EMPTY_REPLY_FALLBACK_VARIANTS,
+    LAST_RESORT_FALLBACK_TEXT as _DEFAULT_FALLBACK_TEXT,
+    choose as _pool_choose,
+    warmth_bucket as _warmth_bucket,
+)
 
 logger = logging.getLogger("astrbot_plugin_sylanne")
 
 # 渲染兜底文案：输入为空/异常时给一句安全的 Sylanne 口吻回复，绝不静默吞掉（堵 #2）。
-_DEFAULT_FALLBACK_TEXT = "……（我想说点什么，可话到嘴边又散了，再给我一秒。）"
+# 常量本体挪进 variant_pool.LAST_RESORT_FALLBACK_TEXT，与 llm_response_pipeline.py 共用
+# 同一份，不再各自内联字面量（MINOR 修复，2026-07-02）。
 
 
 # ===========================================================================
@@ -90,6 +97,81 @@ class Projector(Protocol):
 # ===========================================================================
 # StateProjector —— 状态查询投影（纯模板把 body 套 Sylanne 口吻，P11 禁调 LLM）
 # ===========================================================================
+# 现状纠偏（2026-07-02，红队复核发现 T4-02 提交信息误判）：StateProjector.source ==
+# "state_query"，但目前【没有任何生产代码路径】会产出 source="state_query" 的 Intent——
+# 各 capability（mentalize/appraisal/somatic_marker/recall/expression/outreach/
+# ignition/reconsolidation）都不会走这个 source，DefaultRenderer._collect 因此永远
+# 匹配不到这个 Projector。它只在单测里被直接调用（test_state_projector 等），在真实
+# 聊天路径上是【全域休眠】，并非 T4-02 卡片说的"WebUI-only"分类，也不是"已确认走
+# chat 的 state_query intent"（85e83c3 commit message 这句话是误判，已在此更正）。
+# 变体化处理本身无害（纯模板、已测），按卡片"若判定为休眠则轻量处理/注明理由"的兜底
+# 条款保留原样，作为未来若真接上 state_query intent 生产方时的现成收尾，不需要现在返工。
+
+# T4-02③：每档 2-3 个变体，语气要真的不同（软糯/简短/念叨），不是同义词替换。
+# StateProjector 实例随 DefaultRenderer 按 session 建（见 integration.py 的 per-session
+# runtime cache），故用实例级 dedup state 就天然是"本会话最近选过"的语义。
+_MOOD_VARIANTS: dict[str, list[str]] = {
+    "hot": [
+        "心里暖烘烘的，挺想凑近你说话",
+        "现在满脑子都是你，讲话都带笑",
+        "心口热乎乎的，想多黏你一会儿",
+    ],
+    "mild_warm": [
+        "状态还算松快",
+        "心情还行，绷着的地方松了点",
+        "今天不算差，接得住你",
+    ],
+    "very_cold": [
+        "有点凉，话不太想往外冒",
+        "心里空落落的，懒得多说",
+        "冷得很，别指望我多热情",
+    ],
+    "mild_cold": [
+        "情绪稍微沉了点",
+        "心里压着点东西，没那么爽利",
+        "有点闷，不算好状态",
+    ],
+    "neutral": [
+        "心里平平的",
+        "没什么波动，就那样",
+        "心情算中规中矩",
+    ],
+}
+_TENSION_VARIANTS: dict[str, list[str]] = {
+    "high": [
+        "，神经绷得紧",
+        "，浑身都紧绷着",
+        "，绷得跟弦一样",
+    ],
+    "mid": [
+        "，有点上紧的感觉",
+        "，稍微有点绷",
+        "，心里有点绷着劲",
+    ],
+}
+_BOND_VARIANTS: dict[str, list[str]] = {
+    "very_close": [
+        "我会下意识往我们那边站",
+        "遇事第一反应是你",
+        "早就把你当自己人了",
+    ],
+    "close": [
+        "和你之间那根线挺沉、挺近",
+        "跟你处得挺贴，不见外",
+        "咱俩这关系挺经得住事",
+    ],
+    "warming": [
+        "和你还在慢慢熟起来",
+        "跟你还在互相摸底",
+        "咱俩这交情还在长",
+    ],
+    "distant": [
+        "和你之间还隔着点距离",
+        "跟你还没那么熟",
+        "对你还留着点分寸",
+    ],
+}
+
 
 class StateProjector:
     """把 state_query 意图投影成一句 Sylanne 口吻的状态自述。
@@ -100,45 +182,58 @@ class StateProjector:
 
     source = "state_query"
 
+    def __init__(self) -> None:
+        # T4-02③：本实例（随 DefaultRenderer 按 session 建）持有的变体 recent-N 去重历史。
+        self._variant_state: dict[str, list[str]] = {}
+
     def project(self, intent: Intent, ctx: BeatContext) -> str | None:
         body = ctx.body
         if body is None:
             return None
         return self._narrate(body, ctx)
 
-    @staticmethod
-    def _narrate(body: BodySnapshot, ctx: BeatContext | None = None) -> str:
+    def _narrate(self, body: BodySnapshot, ctx: BeatContext | None = None) -> str:
         """纯模板：把 warmth / tension / intimacy_gravity 分档套成 Sylanne 的口吻。"""
         # —— 温度档（warmth ∈ [-1,1]）——
         w = body.warmth
         if w >= 0.5:
-            mood = "心里暖烘烘的，挺想凑近你说话"
+            mood_tier = "hot"
         elif w >= 0.1:
-            mood = "状态还算松快"
+            mood_tier = "mild_warm"
         elif w <= -0.5:
-            mood = "有点凉，话不太想往外冒"
+            mood_tier = "very_cold"
         elif w <= -0.1:
-            mood = "情绪稍微沉了点"
+            mood_tier = "mild_cold"
         else:
-            mood = "心里平平的"
+            mood_tier = "neutral"
+        mood = _pool_choose(
+            _MOOD_VARIANTS, recent_key="mood", state=self._variant_state, condition=mood_tier
+        )
         # —— 张力档（tension ∈ [0,1]）——
         t = body.tension
         if t >= 0.66:
-            tension = "，神经绷得紧"
+            tension = _pool_choose(
+                _TENSION_VARIANTS, recent_key="tension", state=self._variant_state, condition="high"
+            )
         elif t >= 0.33:
-            tension = "，有点上紧的感觉"
+            tension = _pool_choose(
+                _TENSION_VARIANTS, recent_key="tension", state=self._variant_state, condition="mid"
+            )
         else:
             tension = ""
         # —— 关系档（intimacy_gravity ∈ [0,1]）——
         g = body.intimacy_gravity
         if g >= 0.8:
-            bond = "我会下意识往我们那边站"
+            bond_tier = "very_close"
         elif g >= 0.66:
-            bond = "和你之间那根线挺沉、挺近"
+            bond_tier = "close"
         elif g >= 0.33:
-            bond = "和你还在慢慢熟起来"
+            bond_tier = "warming"
         else:
-            bond = "和你之间还隔着点距离"
+            bond_tier = "distant"
+        bond = _pool_choose(
+            _BOND_VARIANTS, recent_key="bond", state=self._variant_state, condition=bond_tier
+        )
 
         hesitation = ""
         if ctx is not None and hasattr(ctx, "domain"):
@@ -187,13 +282,44 @@ class DefaultRenderer:
     绝不返 None、绝不静默吞掉。两种模式见模块 docstring。
     """
 
-    def __init__(self, *, fallback_text: str = _DEFAULT_FALLBACK_TEXT,
+    def __init__(self, *, fallback_text: str | None = None,
                  register_defaults: bool = True) -> None:
+        # None（默认）→ 每次兜底时走 EMPTY_REPLY_FALLBACK_VARIANTS 变体池动态挑（T4-02①）；
+        # 显式传入固定字符串则锁定该文案不变（向后兼容旧调用方/测试对精确文案的依赖）。
         self._fallback_text = fallback_text
+        # T4-02①：本实例（随 TurnRunner 按 session 建，见 integration.py）持有的兜底文案
+        # recent-N 去重历史，同一会话不会连续两次撞同一句。
+        self._variant_state: dict[str, list[str]] = {}
         # 白名单：source → Projector。只有这里登记过的 source 才能投影成文本（堵 #1/#4）。
         self._projectors: dict[str, Projector] = {}
         if register_defaults:
             self.register_projector(StateProjector())
+
+    def _pick_fallback_text(self, ctx: BeatContext | None) -> str:
+        """挑一句空产出兜底文案。
+
+        显式传入的固定文案（构造时给了 fallback_text）优先锁定；否则按 ctx.body.warmth
+        分档走变体池，recent-N 去重防连续复读。任何异常一律吞掉退回静态默认文案——render
+        是 total function，这一步不能是新的抛错源（#2 铁律）。
+        """
+        if self._fallback_text is not None:
+            return self._fallback_text
+        try:
+            body = getattr(ctx, "body", None) if ctx is not None else None
+            condition = (
+                _warmth_bucket(getattr(body, "warmth", None))
+                if body is not None
+                else None
+            )
+            text = _pool_choose(
+                EMPTY_REPLY_FALLBACK_VARIANTS,
+                recent_key="empty_reply_fallback",
+                state=self._variant_state,
+                condition=condition,
+            )
+            return text or _DEFAULT_FALLBACK_TEXT
+        except Exception:
+            return _DEFAULT_FALLBACK_TEXT
 
     # ------------------------------------------------------------------
     # 注册：加一个能投影的意图来源 = 这一行（白名单唯一入口）
@@ -220,7 +346,7 @@ class DefaultRenderer:
             return self._render_inner(ctx, draft)
         except Exception as exc:  # total function：任何意外都兜底，绝不让异常漏出渲染层
             logger.warning("Sylanne v2 render 异常，降级 FALLBACK: %s", exc)
-            return Reply.fallback(self._fallback_text, reason="render_exception")
+            return Reply.fallback(self._pick_fallback_text(ctx), reason="render_exception")
 
     def _render_inner(self, ctx: BeatContext, draft: str | None) -> Reply:
         draft_mode = draft is not None
@@ -243,9 +369,9 @@ class DefaultRenderer:
         # —— 空产出 ——
         if draft_mode:
             # 被问必答：草稿被剥空 / 无可投影 → FALLBACK，绝不静默（堵 #2）
-            return Reply.fallback(self._fallback_text, reason="empty_draft")
+            return Reply.fallback(self._pick_fallback_text(ctx), reason="empty_draft")
         # compose 无显式静默又无产出 → 同样兜底，区别于"故意 SILENT"
-        return Reply.fallback(self._fallback_text, reason="empty_compose")
+        return Reply.fallback(self._pick_fallback_text(ctx), reason="empty_compose")
 
     # ------------------------------------------------------------------
     # 内部：静默决策 / 投影收集

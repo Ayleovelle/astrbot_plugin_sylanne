@@ -3,9 +3,12 @@
 提供周报自动生成等统计分析功能。
 
 Item 69: 周报自动生成
-- 统计过去 7 天的对话轮数、活跃会话数、新记忆条数
+- lifetime_total_turns / lifetime_active_sessions：累计（全时段）对话轮数与活跃会话数
+  ——底层是 host 计算核的累计 tick 计数，无法按天回溯，故诚实命名为 lifetime_*
+  （核查任务 wzwd8i0ta #37：旧名 total_turns/active_sessions 暗示 7 天窗口，是双口径误导）
+- new_memories：过去 7 天新增记忆条数（真窗口过滤）
 - 人格漂移幅度（各维度 delta 绝对值之和）
-- 伤痕活跃度（新增伤痕数）
+- 伤痕活跃度（过去 7 天新增伤痕数）
 """
 
 from __future__ import annotations
@@ -15,14 +18,14 @@ from typing import Any
 
 
 def generate_weekly_report(plugin: Any) -> dict[str, Any]:
-    """生成过去 7 天的周报统计。
+    """生成周报统计（new_memories/scar_activity 为 7 天窗口，lifetime_* 为累计全时段）。
 
     统计项：
-    - total_turns: 总对话轮数
-    - active_sessions: 活跃会话数
-    - new_memories: 新记忆条数
+    - lifetime_total_turns: 累计对话轮数（全时段，非 7 天）
+    - lifetime_active_sessions: 累计活跃会话数（全时段，非 7 天）
+    - new_memories: 过去 7 天新记忆条数
     - personality_drift_magnitude: 人格漂移幅度（各维度 delta 绝对值之和）
-    - scar_activity: 伤痕活跃度（新增伤痕数）
+    - scar_activity: 过去 7 天新增伤痕数
 
     Args:
         plugin: 插件实例，通过其属性访问各子系统状态。
@@ -124,12 +127,14 @@ def generate_weekly_report(plugin: Any) -> dict[str, Any]:
             continue
 
     return {
-        "schema_version": "sylanne.analytics.weekly.v1",
+        # v2（核查任务 wzwd8i0ta #37）：total_turns/active_sessions 改名 lifetime_*，
+        # 诚实标注其为累计全时段口径，区分于 new_memories/scar_activity 的 7 天窗口。
+        "schema_version": "sylanne.analytics.weekly.v2",
         "generated_at": now,
         "period_start": seven_days_ago,
         "period_end": now,
-        "total_turns": total_turns,
-        "active_sessions": active_sessions,
+        "lifetime_total_turns": total_turns,
+        "lifetime_active_sessions": active_sessions,
         "new_memories": new_memories,
         "personality_drift_magnitude": personality_drift_magnitude,
         "scar_activity": scar_activity,

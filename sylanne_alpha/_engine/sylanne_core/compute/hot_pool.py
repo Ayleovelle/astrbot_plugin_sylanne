@@ -14,7 +14,7 @@
 与其他组件的关系：
   - 接收外部影响注入（来自 memory_plugin、dialogue_agent 等）
   - 通过 feed_body() 将热力学状态推入身体子系统
-  - 通过 cascade 状态影响 ComputationSpine 的漂移速率
+  - 通过 cascade 状态影响 ResonanceSpine 的漂移速率
   - 坍缩时直接修改人格特质（绕过正常漂移上限）
 """
 

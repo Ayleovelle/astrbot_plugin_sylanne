@@ -205,27 +205,30 @@ def test_life_diagnostics_includes_full_state_and_prompt(loop):
 # ---------------------------------------------------------------------------
 
 
-class _FakeQuartRequest:
-    """轻量化 quart.request 替身，按 body 直接返回。"""
+class _FakeAstrBotRequest:
+    """Minimal astrbot.api.web.request replacement for JSON handlers."""
 
     def __init__(self, body):
         self._body = body
 
-    async def get_json(self, silent: bool = True):
+    async def json(self, default=None):
+        del default
         return self._body
 
 
-def _patch_quart_request(monkeypatch, body):
-    fake = _FakeQuartRequest(body)
-    # 直接给 quart.request 打补丁；webui_routes.life_controls_handler 内 import 局部
-    import quart  # noqa: WPS433  (运行时 import 与目标模块一致)
+def _patch_astrbot_web_request(monkeypatch, body):
+    import sys
+    import types
 
-    monkeypatch.setattr(quart, "request", fake, raising=False)
+    fake = _FakeAstrBotRequest(body)
+    web = types.ModuleType("astrbot.api.web")
+    web.request = fake
+    monkeypatch.setitem(sys.modules, "astrbot.api.web", web)
     return fake
 
 
 def test_life_controls_unavailable_when_sim_missing(loop, monkeypatch):
-    _patch_quart_request(monkeypatch, {"action": "toggle_enabled", "value": True})
+    _patch_astrbot_web_request(monkeypatch, {"action": "toggle_enabled", "value": True})
     routes = WebUIRoutes(_make_plugin(life_sim=None))
     resp = loop.run_until_complete(routes.life_controls_handler())
     assert resp == {"error": "life sim not available"}
@@ -235,7 +238,7 @@ def test_life_controls_toggle_enabled_persists_config(loop, monkeypatch):
     sim = _stub_life_sim()
     plugin = _make_plugin(life_sim=sim, config={"sylanne_alpha_life_simulation_enabled": False})
     routes = WebUIRoutes(plugin)
-    _patch_quart_request(monkeypatch, {"action": "toggle_enabled", "value": True})
+    _patch_astrbot_web_request(monkeypatch, {"action": "toggle_enabled", "value": True})
     resp = loop.run_until_complete(routes.life_controls_handler())
     assert resp == {"ok": True, "enabled": True}
     assert plugin._config["sylanne_alpha_life_simulation_enabled"] is True
@@ -246,12 +249,12 @@ def test_life_controls_set_share_intensity_validates(loop, monkeypatch):
     plugin = _make_plugin(life_sim=sim)
     routes = WebUIRoutes(plugin)
     # 有效值
-    _patch_quart_request(monkeypatch, {"action": "set_share_intensity", "value": "high"})
+    _patch_astrbot_web_request(monkeypatch, {"action": "set_share_intensity", "value": "high"})
     resp = loop.run_until_complete(routes.life_controls_handler())
     assert resp == {"ok": True, "share_intensity": "high"}
     assert plugin._config["sylanne_alpha_life_simulation_share_intensity"] == "high"
     # 非法值
-    _patch_quart_request(monkeypatch, {"action": "set_share_intensity", "value": "extreme"})
+    _patch_astrbot_web_request(monkeypatch, {"action": "set_share_intensity", "value": "extreme"})
     resp = loop.run_until_complete(routes.life_controls_handler())
     assert resp == {"error": "invalid intensity"}
 
@@ -270,17 +273,17 @@ def test_life_controls_clear_actions(loop, monkeypatch):
     plugin = _make_plugin(life_sim=sim)
     routes = WebUIRoutes(plugin)
 
-    _patch_quart_request(monkeypatch, {"action": "clear_journal"})
+    _patch_astrbot_web_request(monkeypatch, {"action": "clear_journal"})
     resp = loop.run_until_complete(routes.life_controls_handler())
     assert resp == {"ok": True, "cleared": "events"}
     assert sim.state.events == []
 
-    _patch_quart_request(monkeypatch, {"action": "clear_projects"})
+    _patch_astrbot_web_request(monkeypatch, {"action": "clear_projects"})
     resp = loop.run_until_complete(routes.life_controls_handler())
     assert resp == {"ok": True, "cleared": "projects"}
     assert sim.state.projects == []
 
-    _patch_quart_request(monkeypatch, {"action": "clear_plan"})
+    _patch_astrbot_web_request(monkeypatch, {"action": "clear_plan"})
     resp = loop.run_until_complete(routes.life_controls_handler())
     assert resp == {"ok": True, "cleared": "plan"}
     assert sim.state.plan is None
@@ -289,7 +292,7 @@ def test_life_controls_clear_actions(loop, monkeypatch):
 def test_life_controls_unknown_action(loop, monkeypatch):
     sim = _stub_life_sim()
     routes = WebUIRoutes(_make_plugin(life_sim=sim))
-    _patch_quart_request(monkeypatch, {"action": "nope_not_a_real_action"})
+    _patch_astrbot_web_request(monkeypatch, {"action": "nope_not_a_real_action"})
     resp = loop.run_until_complete(routes.life_controls_handler())
     assert resp == {"error": "unknown action: nope_not_a_real_action"}
 

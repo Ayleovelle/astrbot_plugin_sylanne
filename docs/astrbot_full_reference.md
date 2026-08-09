@@ -362,7 +362,7 @@ class MyPlugin(Star):
         pass
 ```
 
-> **开发者提示**: `on_llm_request` 是修改 LLM 上下文的唯一有效窗口。`on_llm_response` 触发时历史已经落盘，此时修改 prompt 无效。详见 PART 2。
+> **开发者提示**: `on_llm_request` 是修改 LLM 上下文的有效窗口。`on_llm_response` 发生在最终历史保存之前，适合清理响应或记录投递计划，但不应一边立即发送正文、一边保留框架待发送结果。详见 PART 2。
 
 ---
 
@@ -2983,11 +2983,14 @@ yield event.chain_result([node])
 
 ### 消息发送机制
 
-- **被动回复**: `event.send(MessageChain)` 或 `yield event.plain_result(...)`
+- **框架回复**: `yield event.plain_result(...)` 将待发送结果交给后续装饰、TTS 和 `RespondStage`
+- **立即发送**: `await event.send(MessageChain)` 直接调用平台发送，不会替代或清除当前待发送结果
 - **流式发送**: `event.send_streaming(async_generator)`
   - Telegram 私聊: `sendMessageDraft` 实时推送
   - 其他: 累积后发送或 `edit_message_text` fallback
 - **主动发送**: `Platform.send_by_session(session, chain)` — 无需 event 对象
+
+同一逻辑回复只能有一个发送者。插件若使用 `event.send(...)` 旁路发送最终正文，必须同步阻止框架继续发送原结果；否则装饰阶段的 TTS 或 `RespondStage` 会再次发送同一回复。
 
 ---
 

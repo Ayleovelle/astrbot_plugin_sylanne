@@ -48,6 +48,19 @@ def _event_now(event: Any) -> float:
     return time.time()
 
 
+def _event_proactive(event: Any) -> bool:
+    """本轮事件是否主动触达——对象属性 + dict 键双形态探测（对齐 _event_now）。
+
+    旧实现只用 getattr，对 dict 形态事件（如 integration 主动轮传 {"proactive": True}）
+    恒读到 False，靠调用方手补 scratch 兜底——是雷。这里统一双形态探测，根上修。
+    """
+    if event is None:
+        return False
+    if isinstance(event, dict):
+        return bool(event.get("proactive", False))
+    return bool(getattr(event, "proactive", False))
+
+
 class TurnRunner:
     """两阶段编排器。组合 SelfCore（拍调度）+ Renderer（出口契约）+ 领域 ingest。"""
 
@@ -64,19 +77,26 @@ class TurnRunner:
         groups: Any = None,
         now: float | None = None,
         idle: bool = False,
+        evo_delta: Any = None,
     ) -> BeatContext:
         """跑 PERCEPT 拍，返回 ctx（供 integration 暂存到 response 阶段续用）。
 
         全程只读（observe + 领域读接口），不 tick、不写领域——天然并发安全。
+
+        evo_delta（#29）：可选 callable(agent, key)->float，进化偏置 provider。注入
+        ctx.scratch["evo_delta"] 后，DELIBERATE/PERCEPT 各能力经 ctx.evo_bias(...) 读到
+        学到的门控偏置（叠加在人格函数基线上）。None=不注入（旧路径/测试，门控落回纯人格）。
         """
         ctx = self._sc.make_context(
             session_key, event, text, domains=domains or {}, groups=groups,
             now=now if now is not None else _event_now(event),
         )
+        if evo_delta is not None:
+            ctx.scratch["evo_delta"] = evo_delta
         if idle:
             ctx.scratch["idle"] = True
         ev = getattr(ctx, "event", None)
-        if ev is not None and getattr(ev, "proactive", False):
+        if _event_proactive(ev):
             ctx.scratch["proactive"] = True
         self._sc.run_percept(ctx)
         return ctx
@@ -202,10 +222,9 @@ class TurnRunner:
     def _assess_quality(ctx: BeatContext, reply: Reply) -> None:
         """CP8-P4 对话质量自评 → scratch["quality"]（review F3：接活死读）。
 
-        v1 退役交接：旧 DialogueAgent 在 RESPONSE_POST 用 self_score 三维均值发
-        dialogue_quality_high/low（DRIFT_SIGNALS 真实在表：质量高→表达欲+关系引力涨）。
-        v2core 启用即退役 v1 逐轮路径，这条"她从自己回复的质量里学"的闭环断粮——
-        本方法在 render 之后用同一把尺（self_score 零-LLM 启发式 + 同阈值 0.7/0.35，
+        旧逐轮对话路径曾用 self_score 三维均值发 dialogue_quality_high/low
+        （DRIFT_SIGNALS 真实在表：质量高→表达欲+关系引力涨）。本方法在 render
+        之后用同一把尺（self_score 零-LLM 启发式 + 同阈值 0.7/0.35，
         保守防自评噪声驱动激进漂移）补上。消费者：_drive_learning → learn(quality_signal)
         → feedback_quality（DRIFT_SIGNALS 通道）。
         已有外部预置 scratch["quality"]（如测试/将来更强判定源）→ 不覆盖。

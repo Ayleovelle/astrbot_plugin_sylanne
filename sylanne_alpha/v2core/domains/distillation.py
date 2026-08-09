@@ -62,13 +62,12 @@ class DistillationDomain:
 
     name = "distill"
 
-    __slots__ = ("_w", "_err_ema", "_samples", "_last_feat")
+    __slots__ = ("_w", "_err_ema", "_samples")
 
     def __init__(self) -> None:
         self._w: dict[str, list[float]] = {d: [0.0] * N_DISTILL_FEATURES for d in _TARGET_DIMS}
         self._err_ema: dict[str, float] = {d: 1.0 for d in _TARGET_DIMS}
         self._samples: int = 0
-        self._last_feat: list[float] | None = None
 
     # ---- 读接口（PERCEPT/DELIBERATE，纯只读）----
 
@@ -131,7 +130,6 @@ class DistillationDomain:
                 self._w[d][i] = _clamp(self._w[d][i] + step * feats[i], -_W_CLIP, _W_CLIP)
             self._err_ema[d] = (1 - _ERR_ALPHA) * self._err_ema[d] + _ERR_ALPHA * abs(err)
         self._samples += 1
-        self._last_feat = feats
 
     # ---- 持久化（与旧档键名/维序一致，容缺，铁律④）----
 
