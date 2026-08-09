@@ -26,7 +26,7 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from sylanne_alpha.delivery_ledger import SegmentedDeliveryTurn
 from sylanne_alpha.llm_request_pipeline import (
@@ -44,7 +44,7 @@ from sylanne_alpha.message_dispatch import (
     strip_draft_blocks,
 )
 from sylanne_alpha.proactive_bridge import is_night_fast_reply_exempt
-from sylanne_alpha.scope_contracts import TurnDeliveryLease
+from sylanne_alpha.scope_contracts import ResolvedTransportScope, TurnDeliveryLease
 from sylanne_alpha.scope_delivery import (
     DeliveryClaim,
     DeliveryLeaseRejected,
@@ -194,8 +194,19 @@ class LLMResponsePipeline:
         if registry is None:
             return None
         is_issued_request_view = getattr(registry, "is_issued_request_view", None)
+        is_current_transport_delivery = getattr(
+            registry,
+            "is_current_transport_delivery",
+            None,
+        )
+        transport_owner_or_none = getattr(registry, "transport_owner_or_none", None)
         binding_getter = getattr(self._p, "_bound_runtime", None)
-        if not callable(is_issued_request_view) or not callable(binding_getter):
+        if (
+            not callable(is_issued_request_view)
+            or not callable(is_current_transport_delivery)
+            or not callable(transport_owner_or_none)
+            or not callable(binding_getter)
+        ):
             raise DeliveryLeaseRejected("scoped reactive delivery runtime is unavailable")
 
         binding = binding_getter()
@@ -218,6 +229,24 @@ class LLMResponsePipeline:
         turn_generation = getattr(resolved, "turn_generation", None)
         if scope is None or turn_generation is None:
             raise DeliveryLeaseRejected("reactive delivery has no frozen request view")
+        transport = self._event_extra(event, "_sylanne_transport_scope_v1", None)
+        if type(transport) is not ResolvedTransportScope:
+            raise DeliveryLeaseRejected("reactive delivery has no frozen transport")
+        try:
+            owner = transport_owner_or_none(transport)
+        except Exception as exc:
+            raise DeliveryLeaseRejected(
+                "reactive delivery transport owner could not be verified"
+            ) from exc
+        transport_generation = getattr(owner, "delivery_generation", None)
+        if (
+            owner is None
+            or getattr(owner, "scope", None) != scope
+            or type(transport_generation) is not int
+            or isinstance(transport_generation, bool)
+            or transport_generation < 1
+        ):
+            raise DeliveryLeaseRejected("reactive delivery transport owner is stale")
 
         planned_parts = tuple(str(part.get("text", "")) for part in parts)
         if not planned_parts or any(not text for text in planned_parts):
@@ -235,8 +264,20 @@ class LLMResponsePipeline:
         coordinator = ReactiveDeliveryCoordinator(
             ProcessLocalDeliveryTurn(planned_parts=planned_parts),
             is_issued_request_view=is_issued_request_view,
+            is_current_transport_delivery=lambda candidate_view, candidate_generation: (
+                is_current_transport_delivery(
+                    transport,
+                    candidate_view,
+                    candidate_generation,
+                )
+                is True
+            ),
         )
-        claim = coordinator.claim(view=view, lease=lease, event=event)
+        claim = coordinator.claim(
+            view=view,
+            lease=lease,
+            transport_generation=transport_generation,
+        )
         return coordinator, claim
 
     # ------------------------------------------------------------------
@@ -247,6 +288,10 @@ class LLMResponsePipeline:
     _SEMANTIC_CORRELATION_EXTRA = "_syl_semantic_beat_correlation"
     _PROVIDER_HISTORY_TXN_EXTRA = "_syl_provider_history_txn"
     _DELIVERY_TURN_EXTRA = "_syl_segmented_delivery_turn"
+    _DELIVERY_TASK_EXTRA = "_syl_segmented_delivery_task_v1"
+    _DELIVERY_CONTEXT_EXTRA = "_syl_segmented_delivery_context_v1"
+    _DELIVERY_RESPONSE_EXTRA = "_syl_segmented_delivery_response_v1"
+    _REACTIVE_DELIVERY_EXTRA = "_syl_reactive_delivery_v1"
 
     def _sanitize_response(self, text: str) -> str:
         """过滤 LLM 返回中伪造的 [sylanne_*] 系统标签。
@@ -649,14 +694,15 @@ class LLMResponsePipeline:
         if self._event_extra(event, "_syl_realtime_takeover", False) is not True:
             return None
         if run_context is None:
-            run_context = turn.run_context
+            run_context = self._event_extra(event, self._DELIVERY_CONTEXT_EXTRA, None)
         if response is None:
-            response = turn.response
+            response = self._event_extra(event, self._DELIVERY_RESPONSE_EXTRA, None)
         if turn.history_settled:
             return turn.transcript
 
-        task = turn.task
-        if task is not None and not task.done():
+        task = self._event_extra(event, self._DELIVERY_TASK_EXTRA, None)
+        task_done = getattr(task, "done", None)
+        if task is not None and callable(task_done) and not task_done():
             try:
                 await task
             except asyncio.CancelledError:
@@ -668,7 +714,7 @@ class LLMResponsePipeline:
                     turn.session_key,
                     type(exc).__name__,
                 )
-        elif task is not None:
+        elif task is not None and callable(getattr(task, "result", None)):
             try:
                 task.result()
             except asyncio.CancelledError:
@@ -681,7 +727,25 @@ class LLMResponsePipeline:
                     type(exc).__name__,
                 )
 
-        transcript = turn.transcript
+        settlement_fence: Callable[[], bool] | None = None
+        is_current = turn.scoped_reactive is not True
+        if turn.scoped_reactive is True:
+            candidate_fence = self._event_extra(
+                event,
+                self._REACTIVE_DELIVERY_EXTRA,
+                None,
+            )
+            if callable(candidate_fence):
+                settlement_fence = candidate_fence
+                try:
+                    is_current = candidate_fence() is True
+                except Exception:
+                    is_current = False
+
+        # A confirmed prefix can become stale after transport returns.  It may be
+        # visible externally, but it must never be adopted into a superseded
+        # request's AstrBot history, ConversationBuffer, or memory state.
+        transcript = turn.transcript if is_current else ""
         changed = self._rewrite_current_assistant(run_context, transcript)
         if not changed:
             logger.warning(
@@ -700,14 +764,16 @@ class LLMResponsePipeline:
         # The realtime path used to observe the full generated draft immediately.
         # Observe only after transport settles so plugin memory cannot learn unsent
         # tails such as "我想你" that the user never saw.
-        if transcript and not turn.observed:
+        if is_current and transcript and not turn.observed:
             try:
                 await self._background_observe_response(
                     turn.session_key,
                     transcript,
                     skip_conv_sync=True,
+                    is_current=settlement_fence,
                 )
-                turn.observed = True
+                if settlement_fence is None or settlement_fence() is True:
+                    turn.observed = True
             except Exception:
                 # Body/memory observation is secondary. A failure here must never
                 # roll history back from delivered truth to the provider draft.
@@ -721,6 +787,18 @@ class LLMResponsePipeline:
         active_turns = getattr(self._p._store, "segmented_delivery_turns", None)
         if active_turns is not None and active_turns.get(turn.session_key) is turn:
             active_turns.pop(turn.session_key, None)
+        set_extra = getattr(event, "set_extra", None)
+        if callable(set_extra):
+            for key in (
+                self._DELIVERY_TASK_EXTRA,
+                self._DELIVERY_CONTEXT_EXTRA,
+                self._DELIVERY_RESPONSE_EXTRA,
+                self._REACTIVE_DELIVERY_EXTRA,
+            ):
+                try:
+                    set_extra(key, None)
+                except Exception:
+                    pass
         turn.history_settled = True
         logger.info(
             "Sylanne delivery history committed: session=%s delivered=%d/%d chars=%d",
@@ -742,9 +820,18 @@ class LLMResponsePipeline:
         turn = self._event_extra(event, self._DELIVERY_TURN_EXTRA, None)
         if not isinstance(turn, SegmentedDeliveryTurn):
             return False
-        turn.run_context = run_context
-        turn.response = response
-        return turn.task is None and turn.status == "planned"
+        set_extra = getattr(event, "set_extra", None)
+        if not callable(set_extra):
+            return False
+        try:
+            set_extra(self._DELIVERY_CONTEXT_EXTRA, run_context)
+            set_extra(self._DELIVERY_RESPONSE_EXTRA, response)
+        except Exception:
+            return False
+        return (
+            self._event_extra(event, self._DELIVERY_TASK_EXTRA, None) is None
+            and turn.status == "planned"
+        )
 
     def has_pending_segmented_candidate(self, event: Any) -> bool:
         """Whether this turn still awaits final-chain output arbitration."""
@@ -752,7 +839,7 @@ class LLMResponsePipeline:
         turn = self._event_extra(event, self._DELIVERY_TURN_EXTRA, None)
         return (
             isinstance(turn, SegmentedDeliveryTurn)
-            and turn.task is None
+            and self._event_extra(event, self._DELIVERY_TASK_EXTRA, None) is None
             and turn.status == "planned"
             and not turn.history_settled
         )
@@ -763,7 +850,7 @@ class LLMResponsePipeline:
         turn = self._event_extra(event, self._DELIVERY_TURN_EXTRA, None)
         if not isinstance(turn, SegmentedDeliveryTurn):
             return False
-        if turn.task is not None:
+        if self._event_extra(event, self._DELIVERY_TASK_EXTRA, None) is not None:
             return self._event_extra(event, "_syl_realtime_takeover", False) is True
         if turn.status != "planned":
             return False
@@ -787,15 +874,17 @@ class LLMResponsePipeline:
         task: asyncio.Task[Any] | None = None
         background_tasks: list[asyncio.Task[Any]] | None = None
         dispatch_ready = asyncio.Event()
+        origin = str(getattr(event, "unified_msg_origin", "") or "")
 
         async def dispatch_after_commit() -> None:
             await dispatch_ready.wait()
             await self._dispatch_segmented_parts(
-                turn.origin,
+                origin,
                 parts,
                 session_key=turn.session_key,
                 delivery_turn=turn,
                 reactive_delivery=reactive_delivery,
+                original_event=event if reactive_delivery is not None else None,
             )
 
         dispatch_coro = dispatch_after_commit()
@@ -806,8 +895,8 @@ class LLMResponsePipeline:
             )
             if task is None:
                 raise RuntimeError("dispatch task creation returned no task")
-            turn.task = task
             turn.status = "queued"
+            turn.scoped_reactive = reactive_delivery is not None
             background_tasks = ensure_background_tasks_list(self._p)
             background_tasks.append(task)
             task.add_done_callback(
@@ -817,12 +906,31 @@ class LLMResponsePipeline:
                     else None
                 )
             )
-            self._p._store.segmented_tasks.set(turn.session_key, task)
+            set_extra(self._DELIVERY_TASK_EXTRA, task)
+            if self._event_extra(event, self._DELIVERY_TASK_EXTRA, None) is not task:
+                raise RuntimeError("delivery task extra did not round-trip")
+            if reactive_delivery is not None:
+                coordinator, claim = reactive_delivery
+
+                def settlement_fence(
+                    sealed_coordinator: ReactiveDeliveryCoordinator = coordinator,
+                    sealed_claim: DeliveryClaim = claim,
+                ) -> bool:
+                    return sealed_coordinator.claim_is_current(sealed_claim)
+
+                set_extra(self._REACTIVE_DELIVERY_EXTRA, settlement_fence)
+                if (
+                    self._event_extra(event, self._REACTIVE_DELIVERY_EXTRA, None)
+                    is not settlement_fence
+                ):
+                    raise RuntimeError("reactive delivery extra did not round-trip")
+            else:
+                self._p._store.segmented_tasks.set(turn.session_key, task)
             task.add_done_callback(
                 lambda completed: self._on_segment_dispatch_done_maybe_afterthought(
                     completed,
                     turn.session_key,
-                    turn.origin,
+                    origin,
                     turn.expression_drive,
                     delivery_turn=turn,
                 )
@@ -854,14 +962,13 @@ class LLMResponsePipeline:
                     background_tasks.remove(task)
                 except (ValueError, TypeError):
                     pass
-            registry = getattr(self._p._store, "segmented_tasks", None)
-            if registry is not None and task is not None:
+            task_registry = getattr(self._p._store, "segmented_tasks", None)
+            if task_registry is not None and task is not None:
                 try:
-                    if registry.get(turn.session_key) is task:
-                        registry.pop(turn.session_key, None)
+                    if task_registry.get(turn.session_key) is task:
+                        task_registry.pop(turn.session_key, None)
                 except Exception:
                     pass
-            turn.task = None
             turn.status = "failed"
             active_turns = getattr(
                 self._p._store,
@@ -878,6 +985,10 @@ class LLMResponsePipeline:
                 ("_syl_realtime_takeover", False),
                 ("_syl_realtime_candidate", False),
                 (self._DELIVERY_TURN_EXTRA, None),
+                (self._DELIVERY_TASK_EXTRA, None),
+                (self._DELIVERY_CONTEXT_EXTRA, None),
+                (self._DELIVERY_RESPONSE_EXTRA, None),
+                (self._REACTIVE_DELIVERY_EXTRA, None),
             ):
                 try:
                     set_extra(key, value)
@@ -904,7 +1015,10 @@ class LLMResponsePipeline:
         turn = self._event_extra(event, self._DELIVERY_TURN_EXTRA, None)
         if not isinstance(turn, SegmentedDeliveryTurn):
             return False
-        if turn.task is not None or turn.status != "planned":
+        if (
+            self._event_extra(event, self._DELIVERY_TASK_EXTRA, None) is not None
+            or turn.status != "planned"
+        ):
             return False
 
         try:
@@ -1572,7 +1686,6 @@ class LLMResponsePipeline:
             session_key=session_key,
             input_epoch=event_epoch,
             planned_parts=tuple(str(part.get("text", "")) for part in parts),
-            origin=origin,
             dispatch_parts=tuple(dict(part) for part in parts),
             cleaned_text=cleaned,
             expression_drive=expr_drive,
@@ -1618,8 +1731,13 @@ class LLMResponsePipeline:
         # 单一仲裁点决定是启动文本 transport，还是把本轮完整交给框架非文本 chain。
 
     async def _append_bot_reply_buffer(
-        self, session_key: str, text: str, *, skip_conv_sync: bool = False
-    ) -> None:
+        self,
+        session_key: str,
+        text: str,
+        *,
+        skip_conv_sync: bool = False,
+        is_current: Callable[[], bool] | None = None,
+    ) -> bool:
         """仅写入对话缓冲 + ConvMgr 同步（不 tick / 不 observe_response）。
 
         Args:
@@ -1659,6 +1777,12 @@ class LLMResponsePipeline:
                 同签名不一致，是"发送内容≠保存内容"的独立缺陷，留给专门的历史补丁
                 工作项处理，不在本卡范围内。
         """
+        if is_current is not None:
+            try:
+                if is_current() is not True:
+                    return False
+            except Exception:
+                return False
         try:
             from sylanne_alpha.memory_system import ConversationBuffer
 
@@ -1681,11 +1805,18 @@ class LLMResponsePipeline:
                     host.kernel.computation.engine.social_void.reset()
                 except Exception:
                     pass
+            return True
         except Exception as e:
             logger.warning(f"Sylanne append_bot_reply_buffer: {e}", exc_info=True)
+            return False
 
     async def _background_observe_response(
-        self, session_key: str, text: str, *, skip_conv_sync: bool = False
+        self,
+        session_key: str,
+        text: str,
+        *,
+        skip_conv_sync: bool = False,
+        is_current: Callable[[], bool] | None = None,
     ) -> None:
         """后台观测 bot 回复：写入对话缓冲、通知社交场域、更新计算栈。
 
@@ -1695,9 +1826,16 @@ class LLMResponsePipeline:
                 True（框架会保存这条 turn）。
         """
         try:
-            await self._append_bot_reply_buffer(
-                session_key, text, skip_conv_sync=skip_conv_sync
+            appended = await self._append_bot_reply_buffer(
+                session_key,
+                text,
+                skip_conv_sync=skip_conv_sync,
+                is_current=is_current,
             )
+            if not appended:
+                return
+            if is_current is not None and is_current() is not True:
+                return
             await self._p.observe_response(
                 session_key,
                 text=text[:500],
@@ -1858,6 +1996,7 @@ class LLMResponsePipeline:
         self,
         parts: list[dict[str, Any]],
         *,
+        event: Any,
         session_key: str,
         settle_v3: bool,
         delivery_turn: SegmentedDeliveryTurn | None,
@@ -1912,7 +2051,7 @@ class LLMResponsePipeline:
 
         try:
             snapshot = await coordinator.deliver(
-                event=claim.event,
+                event=event,
                 claim=claim,
                 before_send=before_send,
             )
@@ -1956,6 +2095,7 @@ class LLMResponsePipeline:
         settle_v3: bool = True,
         delivery_turn: SegmentedDeliveryTurn | None = None,
         reactive_delivery: tuple[ReactiveDeliveryCoordinator, DeliveryClaim] | None = None,
+        original_event: Any | None = None,
     ) -> None:
         """逐段发送分段回复，每段之间按计划延迟。
 
@@ -1972,8 +2112,13 @@ class LLMResponsePipeline:
         """
         if reactive_delivery is not None:
             coordinator, claim = reactive_delivery
+            if original_event is None:
+                raise DeliveryLeaseRejected(
+                    "scoped reactive delivery requires its original event"
+                )
             await self._dispatch_scoped_reactive_parts(
                 parts,
+                event=original_event,
                 session_key=session_key,
                 settle_v3=settle_v3,
                 delivery_turn=delivery_turn,

@@ -901,6 +901,15 @@ class TransportRuntimeOwner:
     scope: SessionScope
     persona_runtime: PersonaRuntime
     session_runtime: ScopedSessionRuntime
+    delivery_generation: int
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.delivery_generation) is not int
+            or isinstance(self.delivery_generation, bool)
+            or self.delivery_generation < 1
+        ):
+            raise ValueError("delivery_generation must be a positive int")
 
 
 class ScopeRuntimeRegistry:
@@ -937,6 +946,8 @@ class ScopeRuntimeRegistry:
         self._retired_personas: set[PersonaKey] = set()
         self._transport_owners: dict[TransportKey, SessionKey] = {}
         self._highest_transport_generations: dict[TransportIdentityKey, int] = {}
+        self._transport_delivery_generations: dict[TransportKey, int] = {}
+        self._transport_owner_views: dict[TransportKey, RequestRuntimeView] = {}
         self._request_views: OrderedDict[
             RequestViewKey,
             RequestRuntimeView,
@@ -964,6 +975,8 @@ class ScopeRuntimeRegistry:
             or self._latest_sessions
             or self._highest_session_generations
             or self._highest_transport_generations
+            or self._transport_delivery_generations
+            or self._transport_owner_views
             or self._request_views
             or self._transient_context_sinks
             or self._transient_context_requests
@@ -1324,6 +1337,8 @@ class ScopeRuntimeRegistry:
         self,
         transport: ResolvedTransportScope,
         scope: SessionScope,
+        *,
+        request_view: RequestRuntimeView | None = None,
     ) -> bool:
         """Publish one already-frozen runtime for exact pre-request safety work.
 
@@ -1359,11 +1374,45 @@ class ScopeRuntimeRegistry:
         highest_generation = self._highest_transport_generations.get(identity)
         if highest_generation is not None and generation < highest_generation:
             return False
+
+        if request_view is not None:
+            if (
+                type(request_view) is not RequestRuntimeView
+                or request_view.resolved.scope != scope
+                or type(request_view.resolved.turn_generation) is not int
+                or request_view.resolved.turn_generation < 1
+                or not self.is_issued_request_view(request_view)
+            ):
+                return False
+            previous_view = self._transport_owner_views.get(transport_key)
+            if previous_view is request_view:
+                return self._transport_owners.get(transport_key) == session_key
+            if previous_view is not None:
+                previous_turn = previous_view.resolved.turn_generation
+                if (
+                    type(previous_turn) is not int
+                    or request_view.resolved.turn_generation <= previous_turn
+                ):
+                    return False
+
         self._highest_transport_generations[identity] = generation
         for key in list(self._transport_owners):
             if key[:3] == identity and key != transport_key:
                 self._transport_owners.pop(key, None)
+                self._transport_delivery_generations.pop(key, None)
+                self._transport_owner_views.pop(key, None)
         self._transport_owners[transport_key] = session_key
+        current_delivery_generation = self._transport_delivery_generations.get(
+            transport_key,
+            0,
+        )
+        self._transport_delivery_generations[transport_key] = (
+            current_delivery_generation + 1
+        )
+        if request_view is None:
+            self._transport_owner_views.pop(transport_key, None)
+        else:
+            self._transport_owner_views[transport_key] = request_view
         return True
 
     def transport_owner_or_none(
@@ -1382,6 +1431,8 @@ class ScopeRuntimeRegistry:
         session_runtime = self._sessions.get(session_key)
         if session_runtime is None:
             self._transport_owners.pop(transport_key, None)
+            self._transport_delivery_generations.pop(transport_key, None)
+            self._transport_owner_views.pop(transport_key, None)
             self._drop_unused_transport_generation_fence(transport_key[:3])
             return None
         scope = session_runtime.scope
@@ -1394,12 +1445,59 @@ class ScopeRuntimeRegistry:
             or not self.is_live_session(scope)
         ):
             self._transport_owners.pop(transport_key, None)
+            self._transport_delivery_generations.pop(transport_key, None)
+            self._transport_owner_views.pop(transport_key, None)
             self._drop_unused_transport_generation_fence(transport_key[:3])
+            return None
+        delivery_generation = self._transport_delivery_generations.get(transport_key)
+        if (
+            type(delivery_generation) is not int
+            or isinstance(delivery_generation, bool)
+            or delivery_generation < 1
+        ):
+            self._transport_owners.pop(transport_key, None)
+            self._transport_owner_views.pop(transport_key, None)
             return None
         return TransportRuntimeOwner(
             scope=scope,
             persona_runtime=persona_runtime,
             session_runtime=session_runtime,
+            delivery_generation=delivery_generation,
+        )
+
+    def is_current_transport_delivery(
+        self,
+        transport: ResolvedTransportScope,
+        view: RequestRuntimeView,
+        delivery_generation: int,
+    ) -> bool:
+        """Validate one reactive claim against the latest transport publication.
+
+        A scope equality check alone is insufficient: an A→B→A handoff can make
+        an old A view look current again.  The publication generation is minted
+        only after a frozen request view becomes the exact transport owner.
+        """
+
+        if (
+            type(view) is not RequestRuntimeView
+            or type(delivery_generation) is not int
+            or isinstance(delivery_generation, bool)
+            or delivery_generation < 1
+            or not self.is_issued_request_view(view)
+        ):
+            return False
+        try:
+            transport_key = _transport_key(transport)
+        except ScopeMismatch:
+            return False
+        owner = self.transport_owner_or_none(transport)
+        scope = view.resolved.scope
+        return bool(
+            owner is not None
+            and scope is not None
+            and owner.scope == scope
+            and owner.delivery_generation == delivery_generation
+            and self._transport_owner_views.get(transport_key) is view
         )
 
     def is_live_session(self, scope: SessionScope) -> bool:
@@ -1562,6 +1660,8 @@ class ScopeRuntimeRegistry:
         for transport_key, owner_key in list(self._transport_owners.items()):
             if owner_key == session_key:
                 self._transport_owners.pop(transport_key, None)
+                self._transport_delivery_generations.pop(transport_key, None)
+                self._transport_owner_views.pop(transport_key, None)
         self._released_sessions.add(session_key)
         session_runtime = self._sessions.get(session_key)
         if session_runtime is not None:
@@ -1647,6 +1747,8 @@ class ScopeRuntimeRegistry:
             if session_key[:3] == key:
                 transport_identities.add(transport_key[:3])
                 self._transport_owners.pop(transport_key, None)
+                self._transport_delivery_generations.pop(transport_key, None)
+                self._transport_owner_views.pop(transport_key, None)
         for identity in transport_identities:
             self._drop_unused_transport_generation_fence(identity)
         self._released_sessions = {item for item in self._released_sessions if item[:3] != key}
@@ -1676,6 +1778,11 @@ class ScopeRuntimeRegistry:
         ):
             return
         self._highest_transport_generations.pop(identity, None)
+        for transport_key in [
+            item for item in self._transport_delivery_generations if item[:3] == identity
+        ]:
+            self._transport_delivery_generations.pop(transport_key, None)
+            self._transport_owner_views.pop(transport_key, None)
 
     @staticmethod
     def _cancel_runtime_tasks(runtime: PersonaRuntime) -> None:

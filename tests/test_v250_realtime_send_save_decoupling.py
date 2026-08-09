@@ -285,6 +285,18 @@ class _ReactivePlugin(_Plugin):
         self.request_view = _issued_view(self._scope_runtime_registry)
         scope = self.request_view.resolved.scope
         assert scope is not None
+        self.transport = ResolvedTransportScope(
+            bot_ref=scope.bot_ref,
+            session_ref=scope.session_ref,
+            identity_quality="event_self_id",
+            private_scope_enabled=True,
+            disabled_reason=None,
+        )
+        assert self._scope_runtime_registry.publish_transport_owner(
+            self.transport,
+            scope,
+            request_view=self.request_view,
+        )
         self._runtime_binding = SimpleNamespace(
             scope=scope,
             request_runtime_view=self.request_view,
@@ -295,15 +307,18 @@ class _ReactivePlugin(_Plugin):
         return self._runtime_binding
 
 
-def _reactive_delivery_turn(event: _RawSendEvent) -> SegmentedDeliveryTurn:
+def _reactive_delivery_turn(
+    _event: _RawSendEvent,
+    *,
+    second_delay: float = 0.0,
+) -> SegmentedDeliveryTurn:
     return SegmentedDeliveryTurn(
         session_key="sess:realtime-decouple",
         input_epoch=0,
         planned_parts=("first", "second"),
-        origin=event.unified_msg_origin,
         dispatch_parts=(
             {"text": "first", "delay_before_seconds": 0.0},
-            {"text": "second", "delay_before_seconds": 0.0},
+            {"text": "second", "delay_before_seconds": second_delay},
         ),
         cleaned_text="first\nsecond",
     )
@@ -364,6 +379,7 @@ def test_scoped_reactive_turn_sends_only_through_its_original_event() -> None:
         )
         pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
         event = _RawSendEvent(request_view=plugin.request_view)
+        event.set_extra("_sylanne_transport_scope_v1", plugin.transport)
         turn = _reactive_delivery_turn(event)
         event.set_extra(pipe._DELIVERY_TURN_EXTRA, turn)
 
@@ -391,6 +407,7 @@ def test_scoped_reactive_post_send_view_loss_is_unknown_not_expressed() -> None:
                 plugin.request_view
             )
         )
+        event.set_extra("_sylanne_transport_scope_v1", plugin.transport)
         pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
         turn = _reactive_delivery_turn(event)
         event.set_extra(pipe._DELIVERY_TURN_EXTRA, turn)
@@ -403,6 +420,180 @@ def test_scoped_reactive_post_send_view_loss_is_unknown_not_expressed() -> None:
         assert turn.delivered_parts == []
         assert turn.status == "outcome_unknown"
         assert plugin._v3_shadow.settled[-1]["all_segments_succeeded"] is False
+
+    asyncio.run(go())
+
+
+def test_scoped_reactive_missing_claim_bundle_fails_closed_at_history_settlement() -> None:
+    """A reactive turn cannot adopt a delivered prefix without its exact seal."""
+
+    async def go() -> None:
+        plugin = _ReactivePlugin(
+            tempfile.mkdtemp(prefix="rt_reactive_missing_claim_"),
+            _cfg(enabled=True, intercept=True),
+        )
+        pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
+        event = _RawSendEvent(request_view=plugin.request_view)
+        event.set_extra("_sylanne_transport_scope_v1", plugin.transport)
+        turn = _reactive_delivery_turn(event)
+        event.set_extra(pipe._DELIVERY_TURN_EXTRA, turn)
+        assistant = SimpleNamespace(text="provider draft")
+        run_context = SimpleNamespace(
+            messages=[
+                SimpleNamespace(role="user", content="hello"),
+                SimpleNamespace(role="assistant", content=[assistant]),
+            ]
+        )
+        response = SimpleNamespace(completion_text="provider draft")
+        observed: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        async def observe_response(*args: object, **kwargs: object) -> None:
+            observed.append((args, kwargs))
+
+        plugin.observe_response = observe_response
+        assert pipe.bind_segmented_delivery_context(event, run_context, response) is True
+        assert pipe.activate_segmented_delivery(event) is True
+        task = event.get_extra(pipe._DELIVERY_TASK_EXTRA)
+        assert isinstance(task, asyncio.Task)
+        await task
+        event.set_extra(pipe._REACTIVE_DELIVERY_EXTRA, None)
+
+        assert await pipe.settle_segmented_delivery_history(event, None, None) == ""
+        assert [message.role for message in run_context.messages] == ["user"]
+        assert plugin._store.conversation_buffers.get(turn.session_key) is None
+        assert plugin._store.last_bot_texts.get(turn.session_key) is None
+        assert observed == []
+
+    asyncio.run(go())
+
+
+def test_scoped_reactive_takeover_after_confirmed_prefix_drops_history_and_observation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live but superseded view cannot commit an already visible old prefix."""
+
+    async def go() -> None:
+        plugin = _ReactivePlugin(
+            tempfile.mkdtemp(prefix="rt_reactive_takeover_history_"),
+            _cfg(enabled=True, intercept=True),
+        )
+        registry = plugin._scope_runtime_registry
+        first_sent = asyncio.Event()
+        second_delay_started = asyncio.Event()
+        release_second_delay = asyncio.Event()
+
+        async def controlled_wait_delay(_turn: SegmentedDeliveryTurn, seconds: float) -> bool:
+            assert seconds == 1.0
+            second_delay_started.set()
+            await release_second_delay.wait()
+            return True
+
+        monkeypatch.setattr(SegmentedDeliveryTurn, "wait_delay", controlled_wait_delay)
+        event = _RawSendEvent(
+            request_view=plugin.request_view,
+            after_send=first_sent.set,
+        )
+        event.set_extra("_sylanne_transport_scope_v1", plugin.transport)
+        pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
+        turn = _reactive_delivery_turn(event, second_delay=1.0)
+        event.set_extra(pipe._DELIVERY_TURN_EXTRA, turn)
+        assistant = SimpleNamespace(text="provider draft")
+        run_context = SimpleNamespace(
+            messages=[
+                SimpleNamespace(role="user", content="hello"),
+                SimpleNamespace(role="assistant", content=[assistant]),
+            ]
+        )
+        response = SimpleNamespace(completion_text="provider draft")
+        observed: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        async def observe_response(*args: object, **kwargs: object) -> None:
+            observed.append((args, kwargs))
+
+        plugin.observe_response = observe_response
+        assert pipe.bind_segmented_delivery_context(event, run_context, response) is True
+        assert pipe.activate_segmented_delivery(event) is True
+        task = event.get_extra(pipe._DELIVERY_TASK_EXTRA)
+        assert isinstance(task, asyncio.Task)
+        await first_sent.wait()
+        await second_delay_started.wait()
+
+        takeover_scope = build_scopes.__wrapped__().bot_a_persona_b
+        takeover_view = registry.issue_request_view(
+            ResolvedScope(
+                scope=takeover_scope,
+                persona_source=PersonaSource(
+                    persona_id="v250-reactive-takeover",
+                    prompt="static persona",
+                    begin_dialogs=(),
+                    tools=None,
+                    skills=None,
+                    resolution_source="test",
+                ),
+                identity_quality="event_self_id",
+                resolution_source="test",
+                resolved_at_ms=2,
+                private_scope_enabled=True,
+                disabled_reason=None,
+                turn_generation=2,
+            ),
+            subject=None,
+            relation_runtime=None,
+        )
+        assert registry.publish_transport_owner(
+            plugin.transport,
+            takeover_scope,
+            request_view=takeover_view,
+        )
+        release_second_delay.set()
+        await task
+
+        assert event.sent == [("event-plain", "first")]
+        assert turn.delivered_parts == ["first"]
+        assert turn.status == "partial"
+        assert await pipe.settle_segmented_delivery_history(event, None, None) == ""
+        assert [message.role for message in run_context.messages] == ["user"]
+        assert plugin._store.conversation_buffers.get(turn.session_key) is None
+        assert plugin._store.last_bot_texts.get(turn.session_key) is None
+        assert observed == []
+
+    asyncio.run(go())
+
+
+def test_scoped_reactive_observation_rechecks_after_buffer_commit() -> None:
+    """Memory is independently fenced even if the buffer commit already returned."""
+
+    async def go() -> None:
+        plugin = _ReactivePlugin(
+            tempfile.mkdtemp(prefix="rt_reactive_observe_fence_"),
+            _cfg(enabled=True, intercept=True),
+        )
+        pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
+        fence_checks = 0
+
+        def is_current() -> bool:
+            nonlocal fence_checks
+            fence_checks += 1
+            return fence_checks == 1
+
+        observed: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        async def observe_response(*args: object, **kwargs: object) -> None:
+            observed.append((args, kwargs))
+
+        plugin.observe_response = observe_response
+        await pipe._background_observe_response(
+            "sess:realtime-decouple",
+            "visible text",
+            skip_conv_sync=True,
+            is_current=is_current,
+        )
+
+        buffer = plugin._store.conversation_buffers.get("sess:realtime-decouple")
+        assert buffer is not None
+        assert [message["text"] for message in buffer.messages] == ["visible text"]
+        assert observed == []
+        assert fence_checks == 2
 
     asyncio.run(go())
 
@@ -429,7 +620,7 @@ def test_scoped_reactive_activation_rejects_missing_or_forged_view(
         assert event.sent == []
         assert plugin.context.sent == []
         assert plugin._background_tasks == []
-        assert turn.task is None
+        assert event.get_extra(pipe._DELIVERY_TASK_EXTRA) is None
         assert turn.status == "planned"
 
     asyncio.run(go())
@@ -443,6 +634,7 @@ def test_scoped_reactive_dispatch_preserves_unfinished_reply_sentinel() -> None:
         )
         pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
         event = _RawSendEvent(request_view=plugin.request_view)
+        event.set_extra("_sylanne_transport_scope_v1", plugin.transport)
         turn = _reactive_delivery_turn(event)
         sentinel = object()
         plugin._store.unfinished_replies.set(turn.session_key, sentinel)
@@ -1639,6 +1831,8 @@ def test_dispatch_setup_failure_falls_back_to_framework_send(
         )
 
         await pipe._on_llm_response_inner(event, response)
+        run_context = SimpleNamespace(messages=[])
+        assert pipe.bind_segmented_delivery_context(event, run_context, response) is True
         event._result = SimpleNamespace(chain=[Plain(response.completion_text)])
         shell = object.__new__(EmotionalStatePlugin)
         shell._llm_response_pipeline = pipe
@@ -1652,6 +1846,8 @@ def test_dispatch_setup_failure_falls_back_to_framework_send(
         assert [part.text for part in event.get_result().chain] == ["由框架正常发送"]
         assert event.get_extra("_syl_realtime_takeover") is False
         assert event.get_extra(pipe._DELIVERY_TURN_EXTRA) is None
+        assert event.get_extra(pipe._DELIVERY_CONTEXT_EXTRA) is None
+        assert event.get_extra(pipe._DELIVERY_RESPONSE_EXTRA) is None
         assert (
             plugin._store.segmented_delivery_turns.get(
                 "sess:realtime-decouple"

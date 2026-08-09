@@ -1950,6 +1950,9 @@ class EmotionalStatePlugin(Star):
 
         binding = self._bound_runtime()
         scope = resolved_scope.scope
+        request_view = (
+            None if binding is None else binding.request_runtime_view
+        )
         transport = ScopeResolver._event_extra(
             event,
             "_sylanne_transport_scope_v1",
@@ -1958,6 +1961,8 @@ class EmotionalStatePlugin(Star):
             binding is None
             or type(scope) is not SessionScope
             or binding.scope != scope
+            or type(request_view) is not RequestRuntimeView
+            or request_view.resolved is not resolved_scope
             or type(transport) is not ResolvedTransportScope
             or transport.private_scope_enabled is not True
             or transport.bot_ref != scope.bot_ref
@@ -1967,6 +1972,7 @@ class EmotionalStatePlugin(Star):
         return self._scope_runtime_registry.publish_transport_owner(
             transport,
             scope,
+            request_view=request_view,
         )
 
     @staticmethod

@@ -102,8 +102,8 @@ class DeliveryClaim:
 
     lease: TurnDeliveryLease
     fence: int
+    transport_generation: int
     view: RequestRuntimeView = field(repr=False, compare=False)
-    event: _AstrBotSendEvent = field(repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +121,7 @@ class ReactiveDeliveryCoordinator:
     __slots__ = (
         "_active_claim",
         "_fence",
+        "_is_current_transport_delivery",
         "_is_issued_request_view",
         "_state",
         "_transition_history",
@@ -132,6 +133,8 @@ class ReactiveDeliveryCoordinator:
         turn: ProcessLocalDeliveryTurn,
         *,
         is_issued_request_view: Callable[[object], bool],
+        is_current_transport_delivery: Callable[[RequestRuntimeView, int], bool]
+        | None = None,
     ) -> None:
         if type(turn) is not ProcessLocalDeliveryTurn:
             raise TypeError("turn must be an exact ProcessLocalDeliveryTurn")
@@ -139,9 +142,15 @@ class ReactiveDeliveryCoordinator:
             raise DeliveryStateError("turn must be a fresh planned delivery")
         if not callable(is_issued_request_view):
             raise TypeError("is_issued_request_view must be callable")
+        if (
+            is_current_transport_delivery is not None
+            and not callable(is_current_transport_delivery)
+        ):
+            raise TypeError("is_current_transport_delivery must be callable or None")
 
         self._turn = turn
         self._is_issued_request_view = is_issued_request_view
+        self._is_current_transport_delivery = is_current_transport_delivery
         self._state = DeliveryState.PLANNED
         self._transition_history = [DeliveryState.PLANNED]
         self._fence = 0
@@ -172,7 +181,7 @@ class ReactiveDeliveryCoordinator:
         *,
         view: RequestRuntimeView,
         lease: TurnDeliveryLease,
-        event: _AstrBotSendEvent,
+        transport_generation: int = 1,
     ) -> DeliveryClaim:
         """Claim the planned turn using an exact registry-issued request seal."""
 
@@ -181,14 +190,22 @@ class ReactiveDeliveryCoordinator:
         if (
             type(view) is not RequestRuntimeView
             or type(lease) is not TurnDeliveryLease
-            or not self._is_send_event(event)
+            or type(transport_generation) is not int
+            or isinstance(transport_generation, bool)
+            or transport_generation < 1
             or not self._view_is_current(view)
             or not self._lease_matches_view(lease, view)
+            or not self._transport_is_current(view, transport_generation)
         ):
             raise DeliveryLeaseRejected("delivery claim is stale or scope-mismatched")
 
         self._fence += 1
-        claim = DeliveryClaim(lease=lease, fence=self._fence, view=view, event=event)
+        claim = DeliveryClaim(
+            lease=lease,
+            fence=self._fence,
+            transport_generation=transport_generation,
+            view=view,
+        )
         self._active_claim = claim
         self._transition(DeliveryState.CLAIMED)
         return claim
@@ -214,8 +231,8 @@ class ReactiveDeliveryCoordinator:
 
         if self._state is not DeliveryState.CLAIMED:
             raise DeliveryStateError("delivery is not in the claimed state")
-        if type(claim) is not DeliveryClaim or event is not claim.event:
-            raise DeliveryLeaseRejected("delivery event does not match the claimed original event")
+        if type(claim) is not DeliveryClaim or not self._is_send_event(event):
+            raise DeliveryLeaseRejected("delivery requires an original AstrBot send event")
         self._transition(DeliveryState.SENDING)
 
         for index, text in enumerate(self._turn.planned_parts):
@@ -273,6 +290,21 @@ class ReactiveDeliveryCoordinator:
         except Exception:
             return False
 
+    def _transport_is_current(
+        self,
+        view: RequestRuntimeView,
+        transport_generation: int,
+    ) -> bool:
+        predicate = self._is_current_transport_delivery
+        if predicate is None:
+            # Registry-free historical test doubles have no transport-owner
+            # authority. Production always provides the exact predicate.
+            return True
+        try:
+            return predicate(view, transport_generation) is True
+        except Exception:
+            return False
+
     @staticmethod
     def _is_send_event(candidate: object) -> bool:
         return callable(getattr(candidate, "plain_result", None)) and callable(
@@ -308,7 +340,16 @@ class ReactiveDeliveryCoordinator:
             and type(claim.view) is RequestRuntimeView
             and self._view_is_current(claim.view)
             and self._lease_matches_view(claim.lease, claim.view)
+            and self._transport_is_current(
+                claim.view,
+                claim.transport_generation,
+            )
         )
+
+    def claim_is_current(self, claim: DeliveryClaim) -> bool:
+        """Expose the exact sealed predicate for history and memory settlement."""
+
+        return self._claim_is_current(claim)
 
     def _finish_without_send(self) -> None:
         if self._turn.confirmed_parts:

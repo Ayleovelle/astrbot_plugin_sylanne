@@ -6,7 +6,12 @@ from typing import Any, Callable
 
 import pytest
 
-from sylanne_alpha.scope_contracts import ResolvedScope, TurnDeliveryLease
+from sylanne_alpha.delivery_ledger import SegmentedDeliveryTurn
+from sylanne_alpha.scope_contracts import (
+    ResolvedScope,
+    ResolvedTransportScope,
+    TurnDeliveryLease,
+)
 from sylanne_alpha.scope_delivery import (
     DeliveryClaim,
     DeliveryLeaseRejected,
@@ -65,6 +70,45 @@ def _lease(view: RequestRuntimeView) -> TurnDeliveryLease:
     )
 
 
+def _issued_view_for_scope(
+    registry: ScopeRuntimeRegistry,
+    scope: Any,
+    *,
+    turn_generation: int,
+) -> RequestRuntimeView:
+    return registry.issue_request_view(
+        ResolvedScope(
+            scope=scope,
+            persona_source=PersonaSource(
+                persona_id="scope-delivery-transport-fixture",
+                prompt="quiet",
+                begin_dialogs=(),
+                tools=None,
+                skills=None,
+                resolution_source="test",
+            ),
+            identity_quality="event_self_id",
+            resolution_source="test",
+            resolved_at_ms=turn_generation,
+            private_scope_enabled=True,
+            disabled_reason=None,
+            turn_generation=turn_generation,
+        ),
+        subject=None,
+        relation_runtime=None,
+    )
+
+
+def _transport_scope(scope: Any) -> ResolvedTransportScope:
+    return ResolvedTransportScope(
+        bot_ref=scope.bot_ref,
+        session_ref=scope.session_ref,
+        identity_quality="event_self_id",
+        private_scope_enabled=True,
+        disabled_reason=None,
+    )
+
+
 def test_turn_delivery_lease_binds_bot_and_persona_generations(scopes: Any) -> None:
     scope = scopes.bot_a_persona_a
     lease = TurnDeliveryLease(
@@ -113,10 +157,17 @@ def _coordinator(
     registry: ScopeRuntimeRegistry,
     *,
     parts: tuple[str, ...] = ("first", "second"),
+    is_current_transport_delivery: Callable[[RequestRuntimeView, int], bool]
+    | None = None,
 ) -> ReactiveDeliveryCoordinator:
+    kwargs: dict[str, object] = {
+        "is_issued_request_view": registry.is_issued_request_view,
+    }
+    if is_current_transport_delivery is not None:
+        kwargs["is_current_transport_delivery"] = is_current_transport_delivery
     return ReactiveDeliveryCoordinator(
         ProcessLocalDeliveryTurn(planned_parts=parts),
-        is_issued_request_view=registry.is_issued_request_view,
+        **kwargs,
     )
 
 
@@ -157,7 +208,7 @@ def test_delivery_uses_only_event_plain_result_and_send_after_exact_claim(
 
         assert coordinator.state is DeliveryState.PLANNED
         event = _Event()
-        claim = coordinator.claim(view=view, lease=_lease(view), event=event)
+        claim = coordinator.claim(view=view, lease=_lease(view))
         assert coordinator.state is DeliveryState.CLAIMED
 
         snapshot = await coordinator.deliver(event=event, claim=claim)
@@ -187,17 +238,15 @@ def test_unissued_view_and_generation_mismatch_cannot_be_claimed(scopes: Any) ->
         session_runtime=view.session_runtime,
     )
     coordinator = _coordinator(registry)
-    event = _Event()
-
     with pytest.raises(DeliveryLeaseRejected):
-        coordinator.claim(view=forged, lease=_lease(forged), event=event)
+        coordinator.claim(view=forged, lease=_lease(forged))
 
     stale_lease = replace(
         _lease(view),
         scope_generation=_lease(view).scope_generation + 1,
     )
     with pytest.raises(DeliveryLeaseRejected):
-        coordinator.claim(view=view, lease=stale_lease, event=event)
+        coordinator.claim(view=view, lease=stale_lease)
 
     assert coordinator.state is DeliveryState.PLANNED
 
@@ -218,27 +267,23 @@ def test_bot_and_persona_generation_mismatch_cannot_be_claimed(
     )
 
     with pytest.raises(DeliveryLeaseRejected):
-        coordinator.claim(view=view, lease=lease, event=_Event())
+        coordinator.claim(view=view, lease=lease)
 
 
-def test_claim_is_sealed_to_the_original_event_identity(scopes: Any) -> None:
+def test_claim_keeps_no_raw_event(scopes: Any) -> None:
     async def scenario() -> None:
         registry, view = _issued_view(scopes)
         coordinator = _coordinator(registry, parts=("only",))
         original_event = _Event()
-        replacement_event = _Event()
         claim = coordinator.claim(
             view=view,
             lease=_lease(view),
-            event=original_event,
         )
 
-        with pytest.raises(DeliveryLeaseRejected):
-            await coordinator.deliver(event=replacement_event, claim=claim)
-
-        assert original_event.send_calls == []
-        assert replacement_event.send_calls == []
-        assert coordinator.state is DeliveryState.CLAIMED
+        assert not hasattr(claim, "event")
+        snapshot = await coordinator.deliver(event=original_event, claim=claim)
+        assert snapshot.state is DeliveryState.SENT_CONFIRMED
+        assert original_event.send_calls == [("plain", "only")]
 
     asyncio.run(scenario())
 
@@ -260,7 +305,7 @@ def test_released_and_recreated_view_cannot_revalidate_the_old_claim(
             assert registry.is_issued_request_view(replacement) is True
 
         event = _Event(after_send=release_and_recreate)
-        claim = coordinator.claim(view=view, lease=_lease(view), event=event)
+        claim = coordinator.claim(view=view, lease=_lease(view))
         snapshot = await coordinator.deliver(event=event, claim=claim)
 
         assert snapshot.state is DeliveryState.OUTCOME_UNKNOWN
@@ -288,7 +333,7 @@ def test_concurrent_terminal_delivery_callback_is_rejected_and_never_retried(
         registry, view = _issued_view(scopes)
         coordinator = _coordinator(registry, parts=("only",))
         event = _BlockingEvent()
-        claim = coordinator.claim(view=view, lease=_lease(view), event=event)
+        claim = coordinator.claim(view=view, lease=_lease(view))
         first = asyncio.create_task(coordinator.deliver(event=event, claim=claim))
         await event.started.wait()
 
@@ -312,7 +357,7 @@ def test_stale_view_or_fence_fails_before_send(
         registry, view = _issued_view(scopes)
         coordinator = _coordinator(registry)
         event = _Event()
-        claim = coordinator.claim(view=view, lease=_lease(view), event=event)
+        claim = coordinator.claim(view=view, lease=_lease(view))
         if invalidate == "view":
             assert registry.release_request_view(view) is True
         else:
@@ -333,7 +378,7 @@ def test_exact_view_and_fence_are_revalidated_before_every_segment(scopes: Any) 
         registry, view = _issued_view(scopes)
         coordinator = _coordinator(registry)
         event = _Event(after_send=lambda: registry.release_request_view(view))
-        claim = coordinator.claim(view=view, lease=_lease(view), event=event)
+        claim = coordinator.claim(view=view, lease=_lease(view))
 
         snapshot = await coordinator.deliver(event=event, claim=claim)
 
@@ -352,7 +397,7 @@ def test_before_send_gate_preserves_one_claim_and_stops_before_the_next_segment(
         registry, view = _issued_view(scopes)
         coordinator = _coordinator(registry)
         event = _Event()
-        claim = coordinator.claim(view=view, lease=_lease(view), event=event)
+        claim = coordinator.claim(view=view, lease=_lease(view))
         gate_calls: list[tuple[int, str]] = []
 
         async def before_send(index: int, text: str) -> bool:
@@ -380,7 +425,7 @@ def test_cancellation_while_waiting_at_the_before_send_gate_finishes_before_send
         registry, view = _issued_view(scopes)
         coordinator = _coordinator(registry, parts=("only",))
         event = _Event()
-        claim = coordinator.claim(view=view, lease=_lease(view), event=event)
+        claim = coordinator.claim(view=view, lease=_lease(view))
         started = asyncio.Event()
         release = asyncio.Event()
 
@@ -413,7 +458,7 @@ def test_send_exception_is_outcome_unknown_and_never_retried(scopes: Any) -> Non
         registry, view = _issued_view(scopes)
         coordinator = _coordinator(registry, parts=("only",))
         event = _Event(send_error=RuntimeError("transport result unknown"))
-        claim = coordinator.claim(view=view, lease=_lease(view), event=event)
+        claim = coordinator.claim(view=view, lease=_lease(view))
 
         with pytest.raises(RuntimeError, match="transport result unknown"):
             await coordinator.deliver(event=event, claim=claim)
@@ -444,7 +489,7 @@ def test_cancellation_during_send_is_outcome_unknown_and_propagates(scopes: Any)
         registry, view = _issued_view(scopes)
         coordinator = _coordinator(registry, parts=("only",))
         event = _BlockingEvent()
-        claim = coordinator.claim(view=view, lease=_lease(view), event=event)
+        claim = coordinator.claim(view=view, lease=_lease(view))
 
         task = asyncio.create_task(coordinator.deliver(event=event, claim=claim))
         await event.started.wait()
@@ -480,7 +525,7 @@ def test_send_return_not_after_message_hook_confirms_local_completion(
         registry, view = _issued_view(scopes)
         coordinator = _coordinator(registry, parts=("only",))
         event = _BlockingEvent()
-        claim = coordinator.claim(view=view, lease=_lease(view), event=event)
+        claim = coordinator.claim(view=view, lease=_lease(view))
 
         task = asyncio.create_task(coordinator.deliver(event=event, claim=claim))
         await event.started.wait()
@@ -501,9 +546,9 @@ def test_claim_requires_exact_types(scopes: Any) -> None:
     event = _Event()
 
     with pytest.raises(DeliveryLeaseRejected):
-        coordinator.claim(view=object(), lease=_lease(view), event=event)  # type: ignore[arg-type]
+        coordinator.claim(view=object(), lease=_lease(view))  # type: ignore[arg-type]
     with pytest.raises(DeliveryLeaseRejected):
-        coordinator.claim(view=view, lease=object(), event=event)  # type: ignore[arg-type]
+        coordinator.claim(view=view, lease=object())  # type: ignore[arg-type]
 
 
 def test_forged_claim_with_current_values_cannot_send(scopes: Any) -> None:
@@ -511,12 +556,12 @@ def test_forged_claim_with_current_values_cannot_send(scopes: Any) -> None:
         registry, view = _issued_view(scopes)
         coordinator = _coordinator(registry, parts=("only",))
         event = _Event()
-        claim = coordinator.claim(view=view, lease=_lease(view), event=event)
+        claim = coordinator.claim(view=view, lease=_lease(view))
         forged = DeliveryClaim(
             lease=claim.lease,
             fence=claim.fence,
+            transport_generation=claim.transport_generation,
             view=claim.view,
-            event=claim.event,
         )
 
         snapshot = await coordinator.deliver(event=event, claim=forged)
@@ -573,7 +618,7 @@ def test_plain_result_failure_is_known_before_send(
         registry, view = _issued_view(scopes)
         coordinator = _coordinator(registry)
         event = _Event(plain_error_at=plain_error_at)
-        claim = coordinator.claim(view=view, lease=_lease(view), event=event)
+        claim = coordinator.claim(view=view, lease=_lease(view))
 
         with pytest.raises(RuntimeError, match="plain result failed before send"):
             await coordinator.deliver(event=event, claim=claim)
@@ -585,3 +630,220 @@ def test_plain_result_failure_is_known_before_send(
             await coordinator.deliver(event=event, claim=claim)
 
     asyncio.run(scenario())
+
+
+def test_transport_aba_allows_only_latest_a_claim_to_send(scopes: Any) -> None:
+    async def scenario() -> None:
+        registry = ScopeRuntimeRegistry.for_test()
+        transport = _transport_scope(scopes.bot_a_persona_a)
+
+        def current_transport(view: RequestRuntimeView, generation: int) -> bool:
+            return registry.is_current_transport_delivery(transport, view, generation)
+
+        first_a_view = _issued_view_for_scope(
+            registry,
+            scopes.bot_a_persona_a,
+            turn_generation=1,
+        )
+        assert registry.publish_transport_owner(
+            transport,
+            scopes.bot_a_persona_a,
+            request_view=first_a_view,
+        )
+        first_a_owner = registry.transport_owner_or_none(transport)
+        assert first_a_owner is not None
+        first_a = _coordinator(
+            registry,
+            parts=("first-a",),
+            is_current_transport_delivery=current_transport,
+        )
+        first_a_event = _Event()
+        first_a_claim = first_a.claim(
+            view=first_a_view,
+            lease=_lease(first_a_view),
+            transport_generation=first_a_owner.delivery_generation,
+        )
+
+        b_view = _issued_view_for_scope(
+            registry,
+            scopes.bot_a_persona_b,
+            turn_generation=2,
+        )
+        assert registry.publish_transport_owner(
+            transport,
+            scopes.bot_a_persona_b,
+            request_view=b_view,
+        )
+        b_owner = registry.transport_owner_or_none(transport)
+        assert b_owner is not None
+        b = _coordinator(
+            registry,
+            parts=("b",),
+            is_current_transport_delivery=current_transport,
+        )
+        b_event = _Event()
+        b_claim = b.claim(
+            view=b_view,
+            lease=_lease(b_view),
+            transport_generation=b_owner.delivery_generation,
+        )
+
+        latest_a_view = _issued_view_for_scope(
+            registry,
+            scopes.bot_a_persona_a,
+            turn_generation=3,
+        )
+        assert registry.publish_transport_owner(
+            transport,
+            scopes.bot_a_persona_a,
+            request_view=latest_a_view,
+        )
+        latest_a_owner = registry.transport_owner_or_none(transport)
+        assert latest_a_owner is not None
+        latest_a = _coordinator(
+            registry,
+            parts=("latest-a",),
+            is_current_transport_delivery=current_transport,
+        )
+        latest_a_event = _Event()
+        latest_a_claim = latest_a.claim(
+            view=latest_a_view,
+            lease=_lease(latest_a_view),
+            transport_generation=latest_a_owner.delivery_generation,
+        )
+
+        assert (await first_a.deliver(event=first_a_event, claim=first_a_claim)).confirmed_parts == 0
+        assert (await b.deliver(event=b_event, claim=b_claim)).confirmed_parts == 0
+        assert (await latest_a.deliver(event=latest_a_event, claim=latest_a_claim)).confirmed_parts == 1
+        assert first_a_event.send_calls == []
+        assert b_event.send_calls == []
+        assert latest_a_event.send_calls == [("plain", "latest-a")]
+
+    asyncio.run(scenario())
+
+
+def test_other_bot_same_transport_token_does_not_invalidate_scoped_claim(
+    scopes: Any,
+) -> None:
+    async def scenario() -> None:
+        registry = ScopeRuntimeRegistry.for_test()
+        a_transport = _transport_scope(scopes.bot_a_persona_a)
+        b_transport = _transport_scope(scopes.bot_b_persona_a)
+        a_view = _issued_view_for_scope(
+            registry,
+            scopes.bot_a_persona_a,
+            turn_generation=1,
+        )
+        assert registry.publish_transport_owner(
+            a_transport,
+            scopes.bot_a_persona_a,
+            request_view=a_view,
+        )
+        a_owner = registry.transport_owner_or_none(a_transport)
+        assert a_owner is not None
+
+        coordinator = _coordinator(
+            registry,
+            parts=("a",),
+            is_current_transport_delivery=lambda view, generation: registry.is_current_transport_delivery(
+                a_transport,
+                view,
+                generation,
+            ),
+        )
+        event = _Event()
+        claim = coordinator.claim(
+            view=a_view,
+            lease=_lease(a_view),
+            transport_generation=a_owner.delivery_generation,
+        )
+
+        b_view = _issued_view_for_scope(
+            registry,
+            scopes.bot_b_persona_a,
+            turn_generation=1,
+        )
+        assert registry.publish_transport_owner(
+            b_transport,
+            scopes.bot_b_persona_a,
+            request_view=b_view,
+        )
+
+        assert (await coordinator.deliver(event=event, claim=claim)).state is DeliveryState.SENT_CONFIRMED
+        assert event.send_calls == [("plain", "a")]
+
+    asyncio.run(scenario())
+
+
+def test_transport_takeover_during_before_send_await_fails_before_plain_result(
+    scopes: Any,
+) -> None:
+    async def scenario() -> None:
+        registry = ScopeRuntimeRegistry.for_test()
+        transport = _transport_scope(scopes.bot_a_persona_a)
+        a_view = _issued_view_for_scope(
+            registry,
+            scopes.bot_a_persona_a,
+            turn_generation=1,
+        )
+        assert registry.publish_transport_owner(
+            transport,
+            scopes.bot_a_persona_a,
+            request_view=a_view,
+        )
+        owner = registry.transport_owner_or_none(transport)
+        assert owner is not None
+        coordinator = _coordinator(
+            registry,
+            parts=("a",),
+            is_current_transport_delivery=lambda view, generation: registry.is_current_transport_delivery(
+                transport,
+                view,
+                generation,
+            ),
+        )
+        claim = coordinator.claim(
+            view=a_view,
+            lease=_lease(a_view),
+            transport_generation=owner.delivery_generation,
+        )
+        event = _Event()
+        b_view = _issued_view_for_scope(
+            registry,
+            scopes.bot_a_persona_b,
+            turn_generation=2,
+        )
+
+        async def before_send(_index: int, _text: str) -> bool:
+            await asyncio.sleep(0)
+            assert registry.publish_transport_owner(
+                transport,
+                scopes.bot_a_persona_b,
+                request_view=b_view,
+            )
+            return True
+
+        snapshot = await coordinator.deliver(
+            event=event,
+            claim=claim,
+            before_send=before_send,
+        )
+
+        assert snapshot.state is DeliveryState.FAILED_BEFORE_SEND
+        assert event.plain_calls == []
+        assert event.send_calls == []
+
+    asyncio.run(scenario())
+
+
+def test_reactive_delivery_records_do_not_retain_event_or_transport_address() -> None:
+    forbidden = {
+        "event",
+        "umo",
+        "origin",
+        "address",
+        "run_context",
+        "response",
+    }
+    assert not forbidden.intersection(item.name for item in fields(DeliveryClaim))
+    assert not forbidden.intersection(item.name for item in fields(SegmentedDeliveryTurn))
