@@ -91,6 +91,12 @@ except ImportError:
 
             return decorator
 
+        def on_waiting_llm_request(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
         def on_llm_response(self, *args, **kwargs):
             def decorator(func):
                 return func
@@ -215,6 +221,7 @@ from sylanne_alpha.agents import (  # noqa: E402
 )
 from sylanne_alpha.social_field import SocialFieldCollector  # noqa: E402
 from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline  # noqa: E402
+from sylanne_alpha.follow_up_epoch import active_follow_up_target, event_extra  # noqa: E402
 from sylanne_alpha.public_api import PublicAPI  # noqa: E402
 from sylanne_alpha.state_persistence import StatePersistence  # noqa: E402
 from sylanne_alpha.memory_facade import MemoryFacade  # noqa: E402
@@ -2757,6 +2764,8 @@ class EmotionalStatePlugin(Star):
     ) -> None:
         """Advance one exact scoped delivery fence without creating private state."""
 
+        if bool(event_extra(event, "_syl_input_epoch_committed", False)):
+            return
         set_extra = getattr(event, "set_extra", None)
         registry = getattr(self, "_scope_runtime_registry", None)
         if registry is not None:
@@ -2789,6 +2798,8 @@ class EmotionalStatePlugin(Star):
         if callable(set_extra):
             try:
                 set_extra("_syl_input_epoch", input_epoch)
+                set_extra("_syl_input_epoch_committed", True)
+                set_extra("_syl_follow_up_deferred", False)
             except Exception:
                 pass
 
@@ -2806,6 +2817,90 @@ class EmotionalStatePlugin(Star):
                 session_key,
                 exc_info=True,
             )
+
+    def _defer_active_runner_follow_up(self, event: Any) -> bool:
+        """Defer only an AstrBot candidate before it can create a transport turn.
+
+        The compatibility probe is read-only. In particular, it neither resolves
+        a Persona nor chooses a Sylanne store; the framework remains responsible
+        for deciding whether to consume the follow-up.
+        """
+
+        if getattr(self, "_scope_runtime_registry", None) is None:
+            return False
+        if bool(event_extra(event, "_syl_input_epoch_committed", False)):
+            return False
+        if bool(event_extra(event, "_syl_follow_up_deferred", False)):
+            return True
+        is_follow_up, target_run_id = active_follow_up_target(event)
+        if not is_follow_up:
+            return False
+        set_extra = getattr(event, "set_extra", None)
+        if not callable(set_extra):
+            return False
+        try:
+            set_extra("_syl_follow_up_deferred", True)
+            set_extra("_syl_follow_up_target_run_id", target_run_id)
+            set_extra("_syl_input_epoch_committed", False)
+            if not bool(event_extra(event, "_syl_follow_up_deferred", False)):
+                raise RuntimeError("follow-up marker did not round-trip")
+        except Exception:
+            logger.warning(
+                "Sylanne follow-up deferral marker failed; treating inbound as new",
+                exc_info=True,
+            )
+            try:
+                set_extra("_syl_follow_up_deferred", False)
+            except Exception:
+                pass
+            return False
+        return True
+
+    def _promote_deferred_follow_up(self, event: Any) -> None:
+        """Commit an unconsumed follow-up through its existing exact owner.
+
+        AstrBot invokes this hook only after it has declined to consume the
+        candidate. The incoming event intentionally has no frozen Persona view
+        yet, so the only write authority is the previously published transport
+        owner. A missing or retired owner is a fail-closed zero-write outcome.
+        """
+
+        if not bool(event_extra(event, "_syl_follow_up_deferred", False)):
+            return
+        if bool(event_extra(event, "_syl_input_epoch_committed", False)):
+            return
+        registry = getattr(self, "_scope_runtime_registry", None)
+        try:
+            resolver = EmotionalStatePlugin._scope_resolver_instance(self)
+            transport = None if resolver is None else resolver.resolve_transport(event)
+            owner = (
+                None
+                if transport is None or registry is None
+                else registry.transport_owner_or_none(transport)
+            )
+        except Exception:
+            owner = None
+            transport = None
+        if owner is not None and transport is not None:
+            EmotionalStatePlugin._advance_transport_delivery_fence(
+                self,
+                event,
+                transport,
+            )
+        else:
+            # No old scoped owner means there is no delivery fence we may safely
+            # advance. Let the fresh request establish its own transport turn.
+            set_extra = getattr(event, "set_extra", None)
+            if callable(set_extra):
+                try:
+                    set_extra("_syl_follow_up_deferred", False)
+                except Exception:
+                    pass
+
+        # A candidate consumed by AstrBot never reaches this hook, so only an
+        # unconsumed inbound starts the fresh resolving transport turn here.
+        if EmotionalStatePlugin._begin_scope_transport(self, event):
+            EmotionalStatePlugin._on_transport_ready_safety(self, event)
 
     def _advance_inbound_delivery_epoch(self, event: Any, session_key: str) -> None:
         """Compatibility wrapper for callers that need registration plus fence."""
@@ -3343,6 +3438,9 @@ class EmotionalStatePlugin(Star):
                         pass
                 ScopeResolver.set_event_extra(event, ingress_marker, "complete")
                 return
+            if EmotionalStatePlugin._defer_active_runner_follow_up(self, event):
+                ScopeResolver.set_event_extra(event, ingress_marker, "complete")
+                return
             transport_ready = EmotionalStatePlugin._begin_scope_transport(self, event)
             if transport_ready is not True:
                 ScopeResolver.set_event_extra(event, ingress_marker, "failed")
@@ -3576,10 +3674,12 @@ class EmotionalStatePlugin(Star):
                 return
         else:
             if strict_subject_carrier:
-                # This is the sole production sender read. Persona/config has
-                # already prepared successfully, while no scope/runtime/private
-                # owner exists yet. The raw value survives only long enough to
-                # mint the opaque turn proof used by the freeze step below.
+                # Apart from the no-write AstrBot follow-up equality probe, this
+                # is the sole production sender read that can mint scope
+                # authority. Persona/config has already prepared successfully,
+                # while no scope/runtime/private owner exists yet. The raw value
+                # survives only long enough to mint the opaque turn proof used by
+                # the freeze step below.
                 try:
                     raw_identity = self._session_ctx.resolve_authenticated_identity(
                         event
@@ -5587,46 +5687,34 @@ class EmotionalStatePlugin(Star):
     def _last_request_text_for_session(self, session_key: str = "") -> str:
         return str(self._store.last_request_text.get(session_key, ""))
 
+    @filter.on_waiting_llm_request(priority=1000)
+    async def on_waiting_llm_request(
+        self,
+        event: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Promote an unconsumed follow-up before AstrBot starts its new turn."""
+
+        EmotionalStatePlugin._promote_deferred_follow_up(self, event)
+        await EmotionalStatePlugin._on_waiting_llm_request_scoped(
+            self,
+            event,
+            *args,
+            **kwargs,
+        )
+
     @_scoped_private_event_hook
-    async def on_waiting_llm_request(self, event: Any, **kwargs: Any) -> None:
-        """把 AstrBot 没有并入旧任务的补话，提交成一个真正的新轮。
-
-        调用顺序是这里的关键：AstrBot 会先等待 follow-up ticket 的裁决。
-        已被工具轮消费的消息会直接结束，不会触发本钩子；只有未消费、准备
-        自己请求 LLM 的消息才会走到这里。因此不能把这段逻辑挪回 on_message，
-        否则又会把“给当前任务补一句”误判成“取消当前任务”。
-        """
-
-        if bool(
-            EmotionalStatePlugin._event_extra(
-                event,
-                "_syl_follow_up_deferred",
-                False,
-            )
-        ):
-            session_key = self._session_ctx.session_key(event)
-            input_epoch = EmotionalStatePlugin._commit_inbound_delivery_epoch(
-                self,
-                event,
-                session_key,
-                reason="follow_up_promoted_to_new_turn",
-            )
-            logger.info(
-                "Sylanne follow-up promoted to a new turn: "
-                "session=%s epoch=%d target_run_id=%s",
-                session_key,
-                input_epoch,
-                EmotionalStatePlugin._event_extra(
-                    event,
-                    "_syl_follow_up_target_run_id",
-                    "unknown",
-                ),
-            )
-
-        realtime_dispatch = getattr(self, "_realtime_dispatch", None)
-        waiting_hook = getattr(realtime_dispatch, "on_waiting_llm_request", None)
-        if callable(waiting_hook):
-            await waiting_hook(event, **kwargs)
+    async def _on_waiting_llm_request_scoped(
+        self,
+        event: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        dispatch = getattr(self, "_realtime_dispatch", None)
+        callback = getattr(dispatch, "on_waiting_llm_request", None)
+        if callable(callback):
+            await callback(event, *args, **kwargs)
 
     def sylanne_alpha_switches(self) -> dict[str, Any]:
         return self._public_api.sylanne_alpha_switches()

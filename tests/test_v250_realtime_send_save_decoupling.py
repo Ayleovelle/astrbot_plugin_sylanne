@@ -1320,6 +1320,287 @@ def test_inbound_registration_dedups_without_killing_its_first_llm_pass() -> Non
     )
 
 
+def test_non_wake_follow_up_probe_does_not_read_sender() -> None:
+    """A normal inbound must not inspect raw sender before scope proof exists."""
+
+    from sylanne_alpha.follow_up_epoch import active_follow_up_target
+
+    class NormalEvent:
+        is_at_or_wake_command = False
+
+        def __init__(self) -> None:
+            self.sender_reads = 0
+
+        def get_sender_id(self) -> str:
+            self.sender_reads += 1
+            return "raw-sender"
+
+    event = NormalEvent()
+    assert active_follow_up_target(event) == (False, "")
+    assert event.sender_reads == 0
+
+
+@pytest.mark.parametrize(
+    (
+        "active_sender",
+        "incoming_sender",
+        "done",
+        "stop_requested",
+        "is_wake",
+        "expected",
+    ),
+    [
+        ("same-user", "same-user", False, False, True, True),
+        ("same-user", "other-user", False, False, True, False),
+        ("same-user", "same-user", True, False, True, False),
+        ("same-user", "same-user", False, True, True, False),
+        ("same-user", "same-user", False, False, False, False),
+    ],
+)
+def test_follow_up_probe_matches_astrbot_runner_guards(
+    monkeypatch: pytest.MonkeyPatch,
+    active_sender: str,
+    incoming_sender: str,
+    done: bool,
+    stop_requested: bool,
+    is_wake: bool,
+    expected: bool,
+) -> None:
+    """Keep every PR #70 eligibility guard when moving it behind scope fences."""
+
+    from astrbot.core.pipeline.process_stage import follow_up as astrbot_follow_up
+    from sylanne_alpha.follow_up_epoch import active_follow_up_target
+
+    original_event = SimpleNamespace(
+        unified_msg_origin="adapter:FriendMessage:42",
+        message_obj=SimpleNamespace(message_id="run-original"),
+    )
+    original_event.get_sender_id = lambda: active_sender
+    original_event.get_extra = (
+        lambda key: stop_requested if key == "agent_stop_requested" else None
+    )
+    runner = SimpleNamespace(
+        done=lambda: done,
+        run_context=SimpleNamespace(context=SimpleNamespace(event=original_event)),
+    )
+    monkeypatch.setattr(
+        astrbot_follow_up,
+        "_ACTIVE_AGENT_RUNNERS",
+        {"adapter:FriendMessage:42": runner},
+    )
+    incoming_event = SimpleNamespace(
+        unified_msg_origin="adapter:FriendMessage:42",
+        message_obj=SimpleNamespace(message_id="follow-up-message"),
+        is_at_or_wake_command=is_wake,
+    )
+    incoming_event.get_sender_id = lambda: incoming_sender
+
+    is_follow_up, target_run_id = active_follow_up_target(incoming_event)
+
+    assert is_follow_up is expected
+    assert target_run_id == ("run-original" if expected else "")
+
+
+def test_follow_up_promotion_hook_is_registered_before_other_waiting_hooks() -> None:
+    """The unconsumed candidate must fence before lower-priority waiting hooks."""
+
+    from astrbot.core.star.register.star_handler import star_handlers_registry
+
+    handler = next(
+        metadata
+        for metadata in star_handlers_registry.get_handlers_by_module_name("main")
+        if metadata.handler_name == "on_waiting_llm_request"
+    )
+
+    assert handler.extras_configs.get("priority") == 1000
+
+
+def test_active_runner_follow_up_defers_scoped_fence_until_waiting(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A captured follow-up must not create a second transport turn or kill the reply."""
+
+    from astrbot.core.pipeline.process_stage import follow_up as astrbot_follow_up
+
+    resolver = _scope_resolver(tmp_path)
+    resolved = asyncio.run(
+        resolver.resolve_test_values(
+            platform_id="adapter",
+            self_id="10001",
+            umo="adapter:FriendMessage:42",
+            persona_id="follow-up-persona",
+            now_ms=1,
+        )
+    )
+    assert resolved.scope is not None
+    registry = ScopeRuntimeRegistry.for_test()
+    registry.bind_repository(resolver._repository)
+    registry.for_scope(resolved.scope)
+    registry.exact_session(resolved.scope)
+
+    current_event = _ScopedEv()
+    transport = resolver.resolve_transport(current_event)
+    assert registry.publish_transport_owner(transport, resolved.scope) is True
+    owner = registry.transport_owner_or_none(transport)
+    assert owner is not None
+    old_turn = SegmentedDeliveryTurn(
+        session_key=resolved.scope.storage_token,
+        input_epoch=0,
+        planned_parts=("older reply",),
+    )
+    owner.persona_runtime.store.segmented_delivery_turns.set(
+        resolved.scope.storage_token,
+        old_turn,
+    )
+
+    shell = object.__new__(EmotionalStatePlugin)
+    shell.config = _cfg(enabled=True, intercept=True)
+    shell._config = shell.config
+    shell._scope_resolver_v1 = resolver
+    shell._scope_runtime_registry = registry
+    shell._inbound_seen = {}
+
+    runner_event = _ScopedEv()
+    runner_event.message_obj = SimpleNamespace(message_id="active-run")
+    runner_event.get_sender_id = lambda: "same-user"
+    runner = SimpleNamespace(
+        done=lambda: False,
+        run_context=SimpleNamespace(context=SimpleNamespace(event=runner_event)),
+    )
+    monkeypatch.setattr(
+        astrbot_follow_up,
+        "_ACTIVE_AGENT_RUNNERS",
+        {"adapter:FriendMessage:42": runner},
+    )
+
+    event = _ScopedEv()
+    event.message_obj = SimpleNamespace(message_id="follow-up")
+    event.get_sender_id = lambda: "same-user"
+    event.is_at_or_wake_command = True
+    asyncio.run(EmotionalStatePlugin.on_message(shell, event))
+
+    assert event.get_extra("_syl_follow_up_deferred") is True
+    assert event.get_extra("_syl_follow_up_target_run_id") == "active-run"
+    assert event.get_extra("_sylanne_transport_scope_v1") is None
+    assert event.get_extra("_sylanne_transport_turn_v1") is None
+    assert owner.persona_runtime.store.conversation_input_epoch.get(
+        resolved.scope.storage_token,
+        0,
+    ) == 0
+    assert old_turn.interrupt_requested is False
+    assert old_turn.should_stop(0) is False
+
+    duplicate = _ScopedEv()
+    duplicate.message_obj = SimpleNamespace(message_id="follow-up")
+    duplicate.get_sender_id = lambda: "same-user"
+    duplicate.is_at_or_wake_command = True
+    duplicate_stopped: list[bool] = []
+    duplicate.stop_event = lambda: duplicate_stopped.append(True)
+    asyncio.run(EmotionalStatePlugin.on_message(shell, duplicate))
+    assert duplicate.get_extra("_syl_inbound_duplicate") is True
+    assert duplicate.get_extra("_syl_follow_up_deferred") is None
+    assert duplicate_stopped == [True]
+    assert owner.persona_runtime.store.conversation_input_epoch.get(
+        resolved.scope.storage_token,
+        0,
+    ) == 0
+
+    asyncio.run(EmotionalStatePlugin.on_waiting_llm_request(shell, event))
+
+    assert event.get_extra("_syl_follow_up_deferred") is False
+    assert event.get_extra("_syl_input_epoch_committed") is True
+    assert event.get_extra("_syl_input_epoch") == 1
+    promoted_turn = event.get_extra("_sylanne_transport_turn_v1")
+    assert getattr(promoted_turn, "turn_state", None) == "resolving"
+    assert owner.persona_runtime.store.conversation_input_epoch.get(
+        resolved.scope.storage_token,
+        0,
+    ) == 1
+    assert old_turn.interrupt_requested is True
+
+    asyncio.run(EmotionalStatePlugin.on_waiting_llm_request(shell, event))
+    assert owner.persona_runtime.store.conversation_input_epoch.get(
+        resolved.scope.storage_token,
+        0,
+    ) == 1
+
+
+def test_active_runner_follow_up_requires_the_same_sender(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A different sender stays a normal inbound turn even on the same transport."""
+
+    from astrbot.core.pipeline.process_stage import follow_up as astrbot_follow_up
+
+    resolver = _scope_resolver(tmp_path)
+    resolved = asyncio.run(
+        resolver.resolve_test_values(
+            platform_id="adapter",
+            self_id="10001",
+            umo="adapter:FriendMessage:42",
+            persona_id="follow-up-persona",
+            now_ms=1,
+        )
+    )
+    assert resolved.scope is not None
+    registry = ScopeRuntimeRegistry.for_test()
+    registry.bind_repository(resolver._repository)
+    registry.for_scope(resolved.scope)
+    registry.exact_session(resolved.scope)
+    current_event = _ScopedEv()
+    transport = resolver.resolve_transport(current_event)
+    assert registry.publish_transport_owner(transport, resolved.scope) is True
+    owner = registry.transport_owner_or_none(transport)
+    assert owner is not None
+    old_turn = SegmentedDeliveryTurn(
+        session_key=resolved.scope.storage_token,
+        input_epoch=0,
+        planned_parts=("older reply",),
+    )
+    owner.persona_runtime.store.segmented_delivery_turns.set(
+        resolved.scope.storage_token,
+        old_turn,
+    )
+
+    shell = object.__new__(EmotionalStatePlugin)
+    shell.config = _cfg(enabled=True, intercept=True)
+    shell._config = shell.config
+    shell._scope_resolver_v1 = resolver
+    shell._scope_runtime_registry = registry
+    shell._inbound_seen = {}
+
+    runner_event = _ScopedEv()
+    runner_event.get_sender_id = lambda: "active-user"
+    runner = SimpleNamespace(
+        done=lambda: False,
+        run_context=SimpleNamespace(context=SimpleNamespace(event=runner_event)),
+    )
+    monkeypatch.setattr(
+        astrbot_follow_up,
+        "_ACTIVE_AGENT_RUNNERS",
+        {"adapter:FriendMessage:42": runner},
+    )
+    event = _ScopedEv()
+    event.message_obj = SimpleNamespace(message_id="different-user")
+    event.get_sender_id = lambda: "other-user"
+    event.is_at_or_wake_command = True
+
+    asyncio.run(EmotionalStatePlugin.on_message(shell, event))
+
+    assert event.get_extra("_syl_follow_up_deferred") is False
+    assert (
+        getattr(event.get_extra("_sylanne_transport_turn_v1"), "turn_state", None)
+        == "resolving"
+    )
+    assert owner.persona_runtime.store.conversation_input_epoch.get(
+        resolved.scope.storage_token,
+        0,
+    ) == 1
+    assert old_turn.interrupt_requested is True
+
+
 def test_dispatch_setup_failure_falls_back_to_framework_send(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
