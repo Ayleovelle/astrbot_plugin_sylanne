@@ -828,6 +828,7 @@ def test_active_runner_follow_up_defers_epoch_and_preserves_final_reply(
         assert sent == ["最终分析结果"]
         assert assistant_part.text == "最终分析结果"
         assert response.completion_text == "最终分析结果"
+        assert plugin._store.conversation_input_epoch.get(session_key) == 1
 
     asyncio.run(scenario())
 
@@ -918,6 +919,8 @@ def test_unconsumed_follow_up_promotes_once_and_interrupts_old_delivery(
         assert follow_up_event.get_extra("_syl_input_epoch_committed") is True
         assert follow_up_event.get_extra("_syl_follow_up_deferred") is False
         assert turn.interrupted is True
+        assert duplicate_event.get_extra("_syl_input_epoch") is None
+        assert duplicate_event.get_extra("_syl_input_epoch_committed") is None
 
     asyncio.run(scenario())
 
