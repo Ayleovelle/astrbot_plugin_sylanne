@@ -1,6 +1,10 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { personaApiFetch } from '../api/client'
+import type { PersonaDossierResponse } from '../api/types'
+import PersonaDossier from '../components/persona/PersonaDossier.vue'
 import { useLiveStore } from '../stores/live'
+import { useScopeStore } from '../stores/scope'
 import { useI18n } from '../composables/useI18n'
 import Card from '../components/ui/Card.vue'
 import BarRow from '../components/ui/BarRow.vue'
@@ -21,7 +25,12 @@ const FIVE_DEFAULTS: Record<string, number> = {
 }
 
 const live = useLiveStore()
+const scope = useScopeStore()
 const { t } = useI18n()
+const dossierOpen = ref(false)
+const dossier = ref<PersonaDossierResponse['persona'] | null>(null)
+const dossierLoading = ref(false)
+let activeDossierRequest: AbortController | null = null
 
 const fiveEntries = computed(() => {
   const five = live.state?.personality?.five
@@ -54,18 +63,81 @@ const driftItems = computed<TimelineItem[]>(() => {
   if (!drift || !drift.length) return []
   return drift.map((d) => ({ time: d.time ?? '', text: d.text ?? '' }))
 })
+
+function clearDossier(): void {
+  activeDossierRequest?.abort()
+  activeDossierRequest = null
+  dossier.value = null
+  dossierLoading.value = false
+  dossierOpen.value = false
+}
+
+function updateDossierOpen(value: boolean): void {
+  if (!value) {
+    clearDossier()
+    return
+  }
+  dossierOpen.value = true
+}
+
+async function openDossier(): Promise<void> {
+  const snapshot = scope.personaSnapshot()
+  if (!snapshot) return
+
+  activeDossierRequest?.abort()
+  const controller = new AbortController()
+  activeDossierRequest = controller
+  dossier.value = null
+  dossierLoading.value = true
+  dossierOpen.value = true
+  try {
+    const response = await personaApiFetch(snapshot, { signal: controller.signal })
+    if (!controller.signal.aborted && scope.isPersonaCurrent(snapshot, response)) {
+      dossier.value = response.persona
+    }
+  } catch {
+    // A closed, changed, or unavailable Persona leaves no stale dossier behind.
+  } finally {
+    if (activeDossierRequest === controller) {
+      activeDossierRequest = null
+      dossierLoading.value = false
+    }
+  }
+}
+
+watch(
+  () => [
+    scope.selection.botRef,
+    scope.selection.personaRef,
+    scope.selectedPersonaGeneration,
+    scope.personaEpoch,
+  ],
+  clearDossier,
+)
+
+onBeforeUnmount(clearDossier)
 </script>
 
 <template>
   <div v-if="live.state" class="page-split">
     <div class="pane-left">
-      <Card :title="t('pers.radar')">
+      <Card
+        :title="t('pers.radar')"
+        interactive
+        :aria-label="t('pers.dossier_open')"
+        @activate="openDossier"
+      >
         <RadarChart :axes="radarAxes" :max="1" />
       </Card>
     </div>
 
     <div class="pane-right">
-      <Card :title="t('pers.six')">
+      <Card
+        :title="t('pers.six')"
+        interactive
+        :aria-label="t('pers.dossier_open')"
+        @activate="openDossier"
+      >
         <BarRow
           v-for="row in sixRows"
           :key="row.label"
@@ -77,7 +149,12 @@ const driftItems = computed<TimelineItem[]>(() => {
         <EmptyState v-if="!sixRows.length" />
       </Card>
 
-      <Card :title="t('pers.drift')">
+      <Card
+        :title="t('pers.drift')"
+        interactive
+        :aria-label="t('pers.dossier_open')"
+        @activate="openDossier"
+      >
         <Timeline v-if="driftItems.length" :items="driftItems" />
         <EmptyState v-else />
       </Card>
@@ -87,6 +164,13 @@ const driftItems = computed<TimelineItem[]>(() => {
   <div v-else class="loading-state">
     <span class="mono">{{ t('common.loading') }}</span>
   </div>
+
+  <PersonaDossier
+    :open="dossierOpen"
+    :dossier="dossier"
+    :loading="dossierLoading"
+    @update:open="updateDossierOpen"
+  />
 </template>
 
 <style scoped>
