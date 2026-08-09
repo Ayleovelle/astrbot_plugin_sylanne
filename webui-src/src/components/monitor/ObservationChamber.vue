@@ -1,15 +1,18 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { fetchObservationHistory } from '../../api/client'
-import type { ObservationHistoryResponse, StateResponse } from '../../api/types'
+import { scopedApiFetch } from '../../api/client'
+import { isAstrBotPage } from '../../api/astrBotBridge'
+import type { ObservationHistoryResponse, ScopedObservationHistoryResponse, StateResponse } from '../../api/types'
 import { useI18n } from '../../composables/useI18n'
+import { useScopeStore } from '../../stores/scope'
 import Modal from '../ui/Modal.vue'
 import ObservationTrendChart from './ObservationTrendChart.vue'
 import { buildCurrentReadings, createObservationRequestGuard, formatObservationBytes, formatObservationOldest, normalizeHistoryBuckets, normalizedMeterPercent, type ObservationGroup } from '../../views/monitorObservation'
 
-const props = defineProps<{ open: boolean; group: ObservationGroup | null; session: string; state: StateResponse | null; originRect: DOMRect | null }>()
+const props = defineProps<{ open: boolean; group: ObservationGroup | null; state: StateResponse | null; originRect: DOMRect | null }>()
 const emit = defineEmits<{ 'update:open': [value: boolean] }>()
 const { t } = useI18n()
+const scope = useScopeStore()
 const guard = createObservationRequestGuard()
 const history = ref<ObservationHistoryResponse | null>(null)
 const historyKey = ref('')
@@ -17,7 +20,13 @@ const loading = ref(false)
 const error = ref('')
 let controller: AbortController | null = null
 const readings = computed(() => props.group && props.state ? buildCurrentReadings(props.state, props.group) : [])
-const requestKey = computed(() => props.group ? `${props.session}:${props.group}` : '')
+const scopeKey = computed(() => {
+  const selected = scope.snapshot()
+  if (!selected) return ''
+  const s = selected.selection
+  return `${selected.selectionEpoch}:${s.botRef}:${s.personaRef}:${s.sessionRef}`
+})
+const requestKey = computed(() => props.group && scopeKey.value ? `${scopeKey.value}:${props.group}` : '')
 const visibleHistory = computed(() => historyKey.value === requestKey.value ? history.value : null)
 const buckets = computed(() => normalizeHistoryBuckets(visibleHistory.value?.points || []))
 const trendState = computed<'loading' | 'error' | 'chart' | 'empty'>(() => {
@@ -26,17 +35,53 @@ const trendState = computed<'loading' | 'error' | 'chart' | 'empty'>(() => {
   return 'empty'
 })
 const title = computed(() => props.group ? t(`monitor.${props.group}`) : '')
-function close(): void { guard.invalidate(); controller?.abort(); controller = null; emit('update:open', false) }
-async function load(): Promise<void> {
-  if (!props.open || !props.group || !props.session) return
-  controller?.abort(); controller = new AbortController(); const local = controller; const group = props.group; const session = props.session; const token = guard.begin(session, group)
-  loading.value = true; error.value = ''
-  try { const result = await fetchObservationHistory({ session, group, max_points: 240 }, local.signal); if (guard.isCurrent(token, session, group)) { history.value = result; historyKey.value = `${session}:${group}`; error.value = '' } }
-  catch (cause) { if (guard.isCurrent(token, session, group) && !(cause instanceof Error && cause.name === 'AbortError')) error.value = cause instanceof Error ? cause.message : String(cause) }
-  finally { if (guard.isCurrent(token, session, group)) loading.value = false }
+function cancelRequest(): void {
+  controller?.abort()
+  controller = null
 }
-watch(() => [props.open, props.group, props.session] as const, ([open]) => { if (open) void load(); else { guard.invalidate(); controller?.abort(); controller = null } }, { immediate: true, flush: 'sync' })
-onBeforeUnmount(() => { guard.invalidate(); controller?.abort() })
+function close(): void { guard.invalidate(); cancelRequest(); emit('update:open', false) }
+async function load(): Promise<void> {
+  const snapshot = scope.snapshot()
+  if (!props.open || !props.group || !snapshot) return
+  cancelRequest()
+  // Pages bridge requests cannot be cancelled. The request guard still drops
+  // their stale responses after close/scope changes.
+  const local = isAstrBotPage() ? null : new AbortController()
+  controller = local
+  const group = props.group; const key = scopeKey.value; const token = guard.begin(key, group)
+  loading.value = true; error.value = ''
+  try {
+    const result = await scopedApiFetch<ScopedObservationHistoryResponse>(
+      snapshot,
+      'observation-history',
+      local ? { signal: local.signal } : {},
+    )
+    if (guard.isCurrent(token, key, group) && scope.isCurrent(snapshot, result)) {
+      const source = result.observation_history
+      history.value = {
+        schema_version: 'sylanne.observation.history.v1',
+        group,
+        points: source?.points || [],
+        sample_count: source?.sample_count || 0,
+        downsampled: false,
+        partial: false,
+        storage: {
+          used_bytes: source?.storage?.used_bytes || 0,
+          limit_bytes: source?.storage?.limit_bytes ?? null,
+          oldest_ms: source?.storage?.oldest_ms ?? null,
+          segment_count: source?.storage?.segment_count || 0,
+          cleanup_active: false,
+        },
+      }
+      historyKey.value = `${key}:${group}`
+      error.value = ''
+    }
+  }
+  catch (cause) { if (guard.isCurrent(token, key, group) && !(cause instanceof Error && cause.name === 'AbortError')) error.value = cause instanceof Error ? cause.message : String(cause) }
+  finally { if (guard.isCurrent(token, key, group)) loading.value = false }
+}
+watch(() => [props.open, props.group, scope.selectionEpoch] as const, ([open]) => { if (open) void load(); else { guard.invalidate(); cancelRequest() } }, { immediate: true, flush: 'sync' })
+onBeforeUnmount(() => { guard.invalidate(); cancelRequest() })
 const storage = computed(() => visibleHistory.value?.storage)
 const latest = computed(() => buckets.value.at(-1))
 const latestValues = computed(() => latest.value ? Object.entries(latest.value.metrics).flatMap(([key, value]) => value.last === undefined ? [] : [{ key, value: value.last }]) : [])

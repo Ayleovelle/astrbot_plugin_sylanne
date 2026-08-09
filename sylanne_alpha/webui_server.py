@@ -346,7 +346,10 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         result = service.catalog_payload()
         if isinstance(result, ScopedApiError):
             return scoped_error(result)
-        return web.json_response(result)
+        # The catalog is the first authenticated response on a fresh standalone
+        # page.  It must seed the CSRF double-submit token before the client can
+        # POST an exact-scope nonce bootstrap; no session payload is exposed here.
+        return web.json_response({**result, "csrf_token": _csrf_token})
 
     async def handle_scope_bootstrap(request: web.Request) -> web.Response:
         service = scoped_api_service_for_plugin(_plugin(plugin))

@@ -11,6 +11,59 @@ export interface SessionInfo {
   [k: string]: unknown
 }
 
+export interface ScopePath {
+  bot_ref: string
+  persona_ref: string
+  session_ref: string
+}
+
+export interface ScopeGenerations {
+  bot: number
+  persona_lifecycle: number
+  session: number
+  scope: number
+  relation?: number
+  turn?: number
+}
+
+export interface ScopeCatalogEntry {
+  scope: ScopePath
+  generations: ScopeGenerations
+}
+
+export interface ScopeCatalogResponse {
+  ok: boolean
+  scopes: ScopeCatalogEntry[]
+  csrf_token?: string
+}
+
+export interface ScopeBootstrapResponse {
+  ok: boolean
+  scope: ScopePath
+  scope_nonce: string
+}
+
+export interface ScopeSelection {
+  botRef: string
+  personaRef: string
+  sessionRef: string
+}
+
+export interface ScopeRequestSnapshot {
+  selection: Required<ScopeSelection>
+  selectionEpoch: number
+  scopeGeneration: number
+}
+
+export interface ScopedApiResponse {
+  ok?: boolean
+  scope?: ScopePath
+  scope_generation?: number
+  generations?: ScopeGenerations
+  status?: string
+  [k: string]: unknown
+}
+
 export interface EmotionState {
   warmth?: number
   arousal?: number
@@ -80,7 +133,6 @@ export type ObservationHistoryGroup =
   | 'feedback'
 
 export interface ObservationHistoryParams {
-  session: string
   group: ObservationHistoryGroup
   from_ms?: number
   to_ms?: number
@@ -106,7 +158,6 @@ export interface ObservationHistoryStorage {
 
 export interface ObservationHistoryResponse {
   schema_version: 'sylanne.observation.history.v1'
-  session: string
   group: ObservationHistoryGroup
   points: ObservationHistoryPoint[]
   sample_count: number
@@ -161,11 +212,10 @@ export interface PersonalityState {
   [k: string]: unknown
 }
 
-export interface StateResponse {
+export interface StateResponse extends ScopedApiResponse {
   schema_version?: string
   runtime?: unknown
-  current_session?: string
-  session_id?: string
+  tick_count?: number
   emotion?: EmotionState
   gate?: GateState
   route_stats?: Record<string, number>
@@ -181,6 +231,34 @@ export interface StateResponse {
   theme?: string
   life_simulation?: Record<string, unknown>
   [k: string]: unknown
+}
+
+export interface ScopedStateResponse extends ScopedApiResponse {
+  state?: StateResponse
+}
+
+export interface ScopedDiagnosticsResponse extends ScopedApiResponse {
+  diagnostics?: {
+    route_counts?: Record<string, number>
+  }
+}
+
+export interface ScopedMemoryPoolsResponse extends ScopedApiResponse {
+  memory_pools?: {
+    l1_count?: number
+    l2_count?: number
+    l3_node_count?: number
+    l3_edge_count?: number
+    tick?: number
+  }
+}
+
+export interface ScopedObservationHistoryResponse extends ScopedApiResponse {
+  observation_history?: {
+    sample_count?: number
+    points?: ObservationHistoryPoint[]
+    storage?: Partial<ObservationHistoryStorage>
+  }
 }
 
 // --- v2core cognition (Wave: cognitive-cycle page) ---

@@ -1,7 +1,7 @@
 // Single API client for the frozen backend contract.
 // - Bearer token (localStorage 'sylanne_token')
-// - CSRF double-submit: capture csrf_token from any JSON body, echo as
-//   X-CSRF-Token on non-GET (the backend hands it back inside /api/state).
+// - CSRF double-submit: capture csrf_token from JSON responses (including the
+//   scope catalog), then echo it as X-CSRF-Token on standalone non-GET calls.
 // - 401 anywhere -> clear token + notify (hard logout), matching the old UI.
 // - Resolves /api/* under BOTH serving contexts: standalone (port 2718, '/')
 //   and AstrBot-native (served under '/astrbot_plugin_sylanne/...').
@@ -9,8 +9,11 @@
 import { devMock } from './devMock'
 import { bridgeFetch, getAstrBotBridge } from './astrBotBridge'
 import type {
-  ObservationHistoryParams,
-  ObservationHistoryResponse,
+  ScopeBootstrapResponse,
+  ScopeCatalogResponse,
+  ScopePath,
+  ScopeRequestSnapshot,
+  ScopedApiResponse,
 } from './types'
 
 const TOKEN_KEY = 'sylanne_token'
@@ -67,36 +70,16 @@ export class ApiError extends Error {
   }
 }
 
-export function fetchObservationHistory(
-  params: ObservationHistoryParams,
-  signal?: AbortSignal,
-): Promise<ObservationHistoryResponse> {
-  const query = new URLSearchParams()
-  query.set('session', params.session)
-  query.set('group', params.group)
-  if (params.from_ms !== undefined) {
-    query.set('from_ms', String(params.from_ms))
-  }
-  if (params.to_ms !== undefined) {
-    query.set('to_ms', String(params.to_ms))
-  }
-  if (params.max_points !== undefined) {
-    query.set('max_points', String(params.max_points))
-  }
-  const path = `/api/observation_history?${query.toString()}`
-  if (getAstrBotBridge()) {
-    return apiFetch<ObservationHistoryResponse>(path)
-  }
-  return apiFetch<ObservationHistoryResponse>(path, { signal })
-}
-
 export interface ApiOptions {
   method?: string
   body?: unknown
   signal?: AbortSignal
   auth?: boolean
-  /** internal — set on the one allowed retry to prevent recursion */
-  _retried?: boolean
+  headers?: Record<string, string>
+}
+
+export function fetchScopeCatalog(): Promise<ScopeCatalogResponse> {
+  return apiFetch<ScopeCatalogResponse>('/api/scopes')
 }
 
 export async function apiFetch<T = unknown>(path: string, opts: ApiOptions = {}): Promise<T> {
@@ -112,7 +95,7 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiOptions = {})
 
   const method = (opts.method || 'GET').toUpperCase()
   const standaloneAuth = !usesHostAuthentication()
-  const headers: Record<string, string> = {}
+  const headers: Record<string, string> = { ...opts.headers }
   const token = getToken()
   if (standaloneAuth && opts.auth !== false && token) {
     headers['Authorization'] = 'Bearer ' + token
@@ -123,11 +106,6 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiOptions = {})
     headers['Content-Type'] = 'application/json'
     body = JSON.stringify(opts.body)
   }
-  // Remember whether csrfToken was empty when THIS request was built — a
-  // hard-load straight into a page that immediately POSTs (e.g. #/config)
-  // can race /api/state's csrf_token capture, so a 403 in that specific
-  // case is worth one recovery retry (below), not just a hard failure.
-  const hadNoCsrfAtSend = standaloneAuth && method !== 'GET' && !csrfToken
   if (standaloneAuth && method !== 'GET' && csrfToken) {
     headers['X-CSRF-Token'] = csrfToken
   }
@@ -160,21 +138,6 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiOptions = {})
     throw new ApiError(401, 'unauthorized')
   }
 
-  // CSRF race recovery: a non-GET sent before /api/state ever populated
-  // csrfToken can get rejected with 403. Fetch /api/state once (it carries
-  // csrf_token in its body) and retry the original request exactly once.
-  // _retried guards against ever looping — the retry cannot retry again.
-  if (res.status === 403 && !opts._retried && hadNoCsrfAtSend) {
-    try {
-      await apiFetch('/api/state')
-    } catch {
-      /* fall through to normal 403 handling below */
-    }
-    if (csrfToken) {
-      return apiFetch<T>(path, { ...opts, _retried: true })
-    }
-  }
-
   const text = await res.text()
   let data: unknown = undefined
   if (text) {
@@ -202,4 +165,97 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiOptions = {})
     throw new ApiError(res.status, msg, data)
   }
   return data as T
+}
+
+const SCOPE_NONCE_HEADER = 'X-Sylanne-Scope-Nonce'
+
+function encodedScopePath(scope: ScopePath): string {
+  return [scope.bot_ref, scope.persona_ref, scope.session_ref]
+    .map((part) => encodeURIComponent(part))
+    .join('/')
+}
+
+function snapshotScope(snapshot: ScopeRequestSnapshot): ScopePath {
+  const scope = {
+    bot_ref: snapshot.selection.botRef,
+    persona_ref: snapshot.selection.personaRef,
+    session_ref: snapshot.selection.sessionRef,
+  }
+  if (!scope.bot_ref || !scope.persona_ref || !scope.session_ref) {
+    throw new ApiError(400, 'complete scope required')
+  }
+  return scope
+}
+
+function sameScope(left: ScopePath, right: ScopePath): boolean {
+  return (
+    left.bot_ref === right.bot_ref &&
+    left.persona_ref === right.persona_ref &&
+    left.session_ref === right.session_ref
+  )
+}
+
+function pathWithScopeNonce(path: string, scopeNonce: string): string {
+  const url = new URL(path, 'https://sylanne.invalid')
+  url.searchParams.set('scope_nonce', scopeNonce)
+  return `${url.pathname}${url.search}`
+}
+
+function bodyWithScopeNonce(body: unknown, scopeNonce: string): Record<string, unknown> {
+  if (body !== undefined && (body === null || Array.isArray(body) || typeof body !== 'object')) {
+    throw new ApiError(400, 'scoped Pages POST body must be an object')
+  }
+  return { ...(body as Record<string, unknown> | undefined), scope_nonce: scopeNonce }
+}
+
+export function scopedApiPath(snapshot: ScopeRequestSnapshot, endpoint = ''): string {
+  const scope = snapshotScope(snapshot)
+  const root = `/api/v1/bots/${encodeURIComponent(scope.bot_ref)}/personas/${encodeURIComponent(
+    scope.persona_ref,
+  )}/sessions/${encodeURIComponent(scope.session_ref)}`
+  return endpoint ? `${root}/${endpoint.replace(/^\/+|\/+$/g, '')}` : root
+}
+
+export function scopeBootstrapPath(snapshot: ScopeRequestSnapshot): string {
+  return `/api/scopes/${encodedScopePath(snapshotScope(snapshot)).replace(
+    /^([^/]+)\/([^/]+)\/([^/]+)$/,
+    '$1/personas/$2/sessions/$3',
+  )}/nonce`
+}
+
+export async function scopedApiFetch<T extends ScopedApiResponse>(
+  snapshot: ScopeRequestSnapshot,
+  endpoint = '',
+  options: ApiOptions = {},
+): Promise<T> {
+  const scope = snapshotScope(snapshot)
+  const bootstrap = await apiFetch<ScopeBootstrapResponse>(scopeBootstrapPath(snapshot), {
+    method: 'POST',
+  })
+  if (!bootstrap || !sameScope(bootstrap.scope, scope) || !bootstrap.scope_nonce) {
+    throw new ApiError(409, 'scoped bootstrap mismatch', bootstrap)
+  }
+  const path = scopedApiPath(snapshot, endpoint)
+  const bridge = getAstrBotBridge()
+  if (bridge) {
+    const { headers: _headers, ...bridgeOptions } = options
+    const method = (options.method || 'GET').toUpperCase()
+    if (method === 'GET') {
+      return apiFetch<T>(pathWithScopeNonce(path, bootstrap.scope_nonce), bridgeOptions)
+    }
+    if (method === 'POST') {
+      return apiFetch<T>(path, {
+        ...bridgeOptions,
+        body: bodyWithScopeNonce(options.body, bootstrap.scope_nonce),
+      })
+    }
+    return apiFetch<T>(path, bridgeOptions)
+  }
+  return apiFetch<T>(path, {
+    ...options,
+    headers: {
+      ...options.headers,
+      [SCOPE_NONCE_HEADER]: bootstrap.scope_nonce,
+    },
+  })
 }

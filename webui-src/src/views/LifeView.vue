@@ -4,7 +4,7 @@
 // timer while the tab was active (lifeTickId), separate from the 5s
 // /api/state poll. Reproduced here: onMounted does an immediate fetch of all
 // four /api/life/* endpoints, then a 30s setInterval; cleared onUnmounted.
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { apiFetch } from '../api/client'
 import { num } from '../composables/useAdapt'
 import { useI18n } from '../composables/useI18n'
@@ -12,7 +12,6 @@ import {
   conciseFeedbackError,
   useInteractionFeedback,
 } from '../composables/useInteractionFeedback'
-import { useSessionStore } from '../stores/session'
 import type {
   LifeAuditEntry,
   LifeAuditResponse,
@@ -36,7 +35,6 @@ import Button from '../components/ui/Button.vue'
 import Modal from '../components/ui/Modal.vue'
 
 const { t } = useI18n()
-const session = useSessionStore()
 const feedback = useInteractionFeedback()
 
 // ---- data: own 30s poll of /api/life/* (status/events/projects/audit) ----
@@ -100,11 +98,6 @@ function stop(): void {
 
 onMounted(start)
 onUnmounted(stop)
-
-// life-sim events/projects/audit aren't session-scoped in the backend
-// contract, but re-fetching on session change keeps this page consistent
-// with the rest of the shell's "watch session, refetch" convention.
-watch(() => session.current, () => void fetchAll())
 
 // ---- initial control values: GET /api/settings ONCE on mount ----
 

@@ -661,6 +661,7 @@ async def test_aiohttp_scope_catalog_and_bootstrap_issue_exact_nonce(tmp_path) -
                 assert catalog.status == 200
                 body = await catalog.json()
             assert body["scopes"][0]["scope"]["session_ref"] == scope.session_ref.token
+            assert body["csrf_token"] == webui_server._csrf_token
             assert scope.storage_token not in repr(body)
 
             bootstrap_path = (
@@ -669,7 +670,7 @@ async def test_aiohttp_scope_catalog_and_bootstrap_issue_exact_nonce(tmp_path) -
             )
             async with client.post(
                 f"http://127.0.0.1:{port}{bootstrap_path}",
-                headers={"X-CSRF-Token": webui_server._csrf_token},
+                headers={"X-CSRF-Token": body["csrf_token"]},
             ) as bootstrap:
                 assert bootstrap.status == 200
                 bootstrap_body = await bootstrap.json()

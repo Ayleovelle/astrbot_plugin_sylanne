@@ -1,23 +1,27 @@
 <script setup lang="ts">
 // Memory pools page. Owns its own 10s poll of /api/memory_pools (mirrors the
-// old dashboard's adaptMemoryPools()) plus two action flows:
-//   - consolidation: POST /api/memory_consolidate -> countdown -> GET /api/memory_sink
-//   - meltdown: nonce fetch -> type-to-arm -> abortable countdown -> POST /api/memory_meltdown
+// old dashboard's adaptMemoryPools()) plus the supported meltdown action.
 // Both are destructive-adjacent (meltdown genuinely irreversible), so the
 // meltdown flow is deliberately defensive: a `cancelled` flag is checked
 // right before the POST fires, so dismissing the Modal mid-countdown (Esc /
 // backdrop) can never let the network call slip through afterward.
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { apiFetch } from '../api/client'
+import { scopedApiFetch } from '../api/client'
 import { num } from '../composables/useAdapt'
 import { useI18n } from '../composables/useI18n'
 import {
   conciseFeedbackError,
   useInteractionFeedback,
 } from '../composables/useInteractionFeedback'
-import { useSessionStore } from '../stores/session'
+import { useScopeStore } from '../stores/scope'
 import { useAuthStore } from '../stores/auth'
-import type { MemoryPoolItem, MemoryPoolsResponse } from '../api/types'
+import type {
+  MemoryPoolItem,
+  MemoryPoolsResponse,
+  ScopedApiResponse,
+  ScopedMemoryPoolsResponse,
+  ScopeRequestSnapshot,
+} from '../api/types'
 import Card from '../components/ui/Card.vue'
 import StatGrid from '../components/ui/StatGrid.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
@@ -27,7 +31,7 @@ import Modal from '../components/ui/Modal.vue'
 import TextInput from '../components/ui/TextInput.vue'
 
 const { t } = useI18n()
-const session = useSessionStore()
+const scope = useScopeStore()
 const auth = useAuthStore()
 const feedback = useInteractionFeedback()
 
@@ -36,23 +40,41 @@ const feedback = useInteractionFeedback()
 const pools = ref<MemoryPoolsResponse | null>(null)
 const poolsError = ref('')
 let timer: number | null = null
-let inflight = false
+let poolsGeneration = 0
 
-function query(): string {
-  return session.current ? '?session=' + encodeURIComponent(session.current) : ''
+function toMemoryPools(data: ScopedMemoryPoolsResponse): MemoryPoolsResponse {
+  const pools = data.memory_pools || {}
+  const l1 = pools.l1_count || 0
+  const l2 = pools.l2_count || 0
+  const l3Nodes = pools.l3_node_count || 0
+  const l3Edges = pools.l3_edge_count || 0
+  return {
+    summary: {
+      total: l1 + l2 + l3Nodes + l3Edges,
+      l1_count: l1,
+      l2_count: l2,
+      l3_node_count: l3Nodes,
+      l3_edge_count: l3Edges,
+    },
+  }
 }
 
 async function fetchPools(): Promise<void> {
-  if (inflight) return
-  inflight = true
+  const requestGeneration = ++poolsGeneration
+  const snapshot = scope.snapshot()
+  if (!snapshot) {
+    pools.value = null
+    poolsError.value = ''
+    return
+  }
   try {
-    const data = await apiFetch<MemoryPoolsResponse>('/api/memory_pools' + query())
-    pools.value = data
+    const data = await scopedApiFetch<ScopedMemoryPoolsResponse>(snapshot, 'memory-pools')
+    if (requestGeneration !== poolsGeneration || !scope.isCurrent(snapshot, data)) return
+    pools.value = toMemoryPools(data)
     poolsError.value = ''
   } catch (e) {
+    if (requestGeneration !== poolsGeneration || !scope.isCurrent(snapshot)) return
     poolsError.value = e instanceof Error ? e.message : 'fetch failed'
-  } finally {
-    inflight = false
   }
 }
 
@@ -67,8 +89,12 @@ onUnmounted(() => {
   }
 })
 watch(
-  () => session.current,
-  () => void fetchPools(),
+  () => scope.selectionEpoch,
+  () => {
+    resetConsolidation()
+    abortMeltdown()
+    void fetchPools()
+  },
 )
 
 // ---- adapt: mirrors old adaptMemoryPools() — prefer layers.*, fallback flat ----
@@ -112,16 +138,16 @@ const summaryItems = computed(() => {
 })
 
 // ---- consolidation ----
+// The scoped backend currently exposes no consolidation/sink contract. Keep
+// this reset path so a scope change cannot retain an old timer, feedback, or
+// result if the capability is added later.
 
 const consolidating = ref(false)
 const consolidateCountdown = ref(0)
 const sinkResult = ref<number | null>(null)
 let consolidateTimer: number | null = null
 let organizingFeedbackId: number | null = null
-// Guards against a duplicate finishConsolidate() call — the ===0 branch and
-// the interval-completion branch could otherwise both fire and the second,
-// stale GET /api/memory_sink would clobber the real sunk result.
-let consolidateFinished = false
+let consolidationScope: ScopeRequestSnapshot | null = null
 
 function clearConsolidateTimer(): void {
   if (consolidateTimer !== null) {
@@ -130,83 +156,20 @@ function clearConsolidateTimer(): void {
   }
 }
 
-async function startConsolidate(): Promise<void> {
-  if (consolidating.value) return
-  consolidating.value = true
-  consolidateFinished = false
-  sinkResult.value = null
-  organizingFeedbackId = feedback.show(
-    t('feedback.memory_organizing'),
-    'neutral',
-    { sticky: true },
-  )
-  try {
-    const resp = await apiFetch<{ estimated_seconds?: number }>('/api/memory_consolidate', {
-      method: 'POST',
-      body: { session: session.current },
-    })
-    const seconds = num(resp as Record<string, unknown>, ['estimated_seconds'], 3)
-    consolidateCountdown.value = Math.max(0, Math.ceil(seconds))
-    clearConsolidateTimer()
-    if (consolidateCountdown.value === 0) {
-      // Nothing to wait on (e.g. empty L1) — finish immediately and never
-      // schedule the interval, so it can't also fire finishConsolidate().
-      await finishConsolidate()
-      return
-    }
-    consolidateTimer = window.setInterval(() => {
-      consolidateCountdown.value -= 1
-      if (consolidateCountdown.value <= 0) {
-        clearConsolidateTimer()
-        void finishConsolidate()
-      }
-    }, 1000)
-  } catch (e) {
-    consolidating.value = false
-    organizingFeedbackId = null
-    const detail = conciseFeedbackError(e, '')
-    feedback.show(
-      detail
-        ? `${t('feedback.memory_failed')} · ${detail}`
-        : t('feedback.memory_failed'),
-      'error',
-    )
-  }
-}
-
-async function finishConsolidate(): Promise<void> {
-  if (consolidateFinished) return
-  consolidateFinished = true
-  try {
-    const resp = await apiFetch<{ sunk?: number }>('/api/memory_sink' + query())
-    sinkResult.value = num(resp as Record<string, unknown>, ['sunk'], 0)
-    organizingFeedbackId = null
-    feedback.show(
-      `${t('feedback.memory_completed')} · ${sinkResult.value}`,
-      'success',
-    )
-    void fetchPools()
-  } catch (e) {
-    sinkResult.value = null
-    organizingFeedbackId = null
-    const detail = conciseFeedbackError(e, '')
-    feedback.show(
-      detail
-        ? `${t('feedback.memory_failed')} · ${detail}`
-        : t('feedback.memory_failed'),
-      'error',
-    )
-  } finally {
-    consolidating.value = false
-  }
-}
-
-onUnmounted(() => {
+function resetConsolidation(): void {
   clearConsolidateTimer()
+  consolidating.value = false
+  consolidateCountdown.value = 0
+  sinkResult.value = null
+  if (consolidationScope !== null) consolidationScope = null
   if (organizingFeedbackId !== null) {
     feedback.clear(organizingFeedbackId)
     organizingFeedbackId = null
   }
+}
+
+onUnmounted(() => {
+  resetConsolidation()
 })
 
 // ---- meltdown ----
@@ -220,6 +183,7 @@ const meltdownInput = ref('')
 const meltdownCountdown = ref(0)
 const meltdownError = ref('')
 let meltdownTimer: number | null = null
+let meltdownScope: ScopeRequestSnapshot | null = null
 // Guards the one truly dangerous race: Modal dismissed (Esc/backdrop) while
 // the countdown is running must NEVER let the queued POST fire afterward.
 let meltdownCancelled = false
@@ -238,17 +202,25 @@ function resetMeltdownState(): void {
   meltdownInput.value = ''
   meltdownCountdown.value = 0
   meltdownError.value = ''
+  meltdownScope = null
 }
 
 async function openMeltdown(): Promise<void> {
+  const snapshot = scope.snapshot()
+  if (!snapshot) return
   meltdownCancelled = false
   meltdownOpen.value = true
   meltdownStage.value = 'confirm'
   meltdownInput.value = ''
   meltdownError.value = ''
   try {
-    const resp = await apiFetch<{ nonce?: string }>('/api/meltdown_nonce' + query())
-    meltdownNonce.value = String(resp.nonce ?? '')
+    const resp = await scopedApiFetch<ScopedApiResponse & { meltdown_nonce?: string }>(
+      snapshot,
+      'memory/meltdown-nonce',
+    )
+    if (!scope.isCurrent(snapshot, resp)) return
+    meltdownScope = snapshot
+    meltdownNonce.value = String(resp.meltdown_nonce ?? '')
     if (!meltdownNonce.value) {
       meltdownError.value = 'nonce fetch failed'
       feedback.show(t('feedback.meltdown_prepare_failed'), 'error')
@@ -303,13 +275,15 @@ watch(meltdownOpen, (isOpen) => {
 
 async function fireMeltdown(): Promise<void> {
   if (meltdownCancelled) return
+  const snapshot = meltdownScope
+  if (!snapshot || !scope.isCurrent(snapshot)) return
   try {
-    const resp = await apiFetch<{ ok?: boolean }>('/api/memory_meltdown', {
+    const resp = await scopedApiFetch<ScopedApiResponse & { cleared?: boolean }>(snapshot, 'memory/meltdown', {
       method: 'POST',
-      body: { session: session.current, nonce: meltdownNonce.value },
+      body: { meltdown_nonce: meltdownNonce.value },
     })
-    if (meltdownCancelled) return
-    if (!resp.ok) {
+    if (meltdownCancelled || !scope.isCurrent(snapshot, resp)) return
+    if (!resp.ok && !resp.cleared) {
       meltdownError.value = 'meltdown failed'
       feedback.show(t('feedback.meltdown_execute_failed'), 'error')
       return
@@ -388,20 +362,7 @@ onUnmounted(() => {
       </Card>
 
       <Card :title="t('mem.consolidate')" class="consolidate-card">
-        <div class="consolidate-row">
-          <Button
-            variant="primary"
-            :loading="consolidating"
-            :disabled="consolidating"
-            @click="startConsolidate"
-          >
-            {{ t('mem.sink') }}
-          </Button>
-          <span v-if="consolidating && consolidateCountdown > 0" class="countdown mono">
-            {{ consolidateCountdown }}s
-          </span>
-          <span v-if="sinkResult !== null" class="sink-result mono">sunk: {{ sinkResult }}</span>
-        </div>
+        <EmptyState />
       </Card>
 
       <Card :title="t('mem.meltdown')" class="meltdown-card">

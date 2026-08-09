@@ -1,15 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import type { StateResponse } from '../api/types'
+import type { ScopeCatalogResponse, ScopedApiResponse } from '../api/types'
 import { useLiveStore } from './live'
-import { useSessionStore } from './session'
+import { useScopeStore } from './scope'
 
-const { apiFetchMock } = vi.hoisted(() => ({
-  apiFetchMock: vi.fn(),
+const { fetchScopeCatalogMock, scopedApiFetchMock, isAstrBotPageMock } = vi.hoisted(() => ({
+  fetchScopeCatalogMock: vi.fn(),
+  scopedApiFetchMock: vi.fn(),
+  isAstrBotPageMock: vi.fn(),
 }))
 
 vi.mock('../api/client', () => ({
-  apiFetch: apiFetchMock,
+  fetchScopeCatalog: fetchScopeCatalogMock,
+  scopedApiFetch: scopedApiFetchMock,
+}))
+
+vi.mock('../api/astrBotBridge', () => ({
+  isAstrBotPage: isAstrBotPageMock,
 }))
 
 interface Deferred<T> {
@@ -28,172 +35,276 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject }
 }
 
-function stateFor(session: string): StateResponse {
-  return { session_id: session, current_session: session }
+function catalog(
+  entries: Array<{ bot: string; persona: string; session: string; generation: number }>,
+): ScopeCatalogResponse {
+  return {
+    ok: true,
+    scopes: entries.map((entry) => ({
+      scope: {
+        bot_ref: entry.bot,
+        persona_ref: entry.persona,
+        session_ref: entry.session,
+      },
+      generations: {
+        bot: 1,
+        persona_lifecycle: 1,
+        session: 1,
+        scope: entry.generation,
+      },
+    })),
+  }
 }
 
-function requestSignal(index: number): AbortSignal | undefined {
-  const options = apiFetchMock.mock.calls[index]?.[1] as
-    | { signal?: AbortSignal }
-    | undefined
-  return options?.signal
+function scopedState(
+  bot: string,
+  persona: string,
+  session: string,
+  generation: number,
+  tickCount: number,
+): ScopedApiResponse {
+  return {
+    ok: true,
+    scope: {
+      bot_ref: bot,
+      persona_ref: persona,
+      session_ref: session,
+    },
+    scope_generation: generation,
+    state: {
+      tick_count: tickCount,
+      gate: {},
+      boundary: {},
+    },
+  }
 }
 
-function makeAbortError(): Error {
-  const error = new Error('aborted')
-  error.name = 'AbortError'
-  return error
+function selectScope(bot: string, persona: string, session: string): void {
+  const scope = useScopeStore()
+  scope.selectBot(bot)
+  scope.selectPersona(persona)
+  scope.selectSession(session)
 }
 
-describe('live state request isolation', () => {
+describe('live scoped polling', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
-    apiFetchMock.mockReset()
+    fetchScopeCatalogMock.mockReset()
+    scopedApiFetchMock.mockReset()
+    isAstrBotPageMock.mockReturnValue(false)
   })
 
   afterEach(() => {
     useLiveStore().stop()
   })
 
-  it('starts session B immediately and ignores a late session A response', async () => {
-    const requestA = deferred<StateResponse>()
-    const requestB = deferred<StateResponse>()
-    apiFetchMock
-      .mockImplementationOnce(() => requestA.promise)
-      .mockImplementationOnce(() => requestB.promise)
-
-    const session = useSessionStore()
-    const live = useLiveStore()
-    session.setCurrent('A')
-    const resultA = live.fetchOnce()
-    session.setCurrent('B')
-    const resultB = live.fetchOnce()
-
-    requestB.resolve(stateFor('B'))
-    const appliedB = await resultB
-    requestA.resolve(stateFor('A'))
-    const appliedA = await resultA
-
-    expect(apiFetchMock).toHaveBeenCalledTimes(2)
-    expect(apiFetchMock).toHaveBeenNthCalledWith(
-      1,
-      '/api/state?session=A',
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+  it('loads the catalog before its first exact scoped state request', async () => {
+    fetchScopeCatalogMock.mockResolvedValue(
+      catalog([
+        {
+          bot: 'bot_v1_A',
+          persona: 'persona_v1_P',
+          session: 'session_v1_S',
+          generation: 1,
+        },
+      ]),
     )
-    expect(apiFetchMock).toHaveBeenNthCalledWith(
-      2,
-      '/api/state?session=B',
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    scopedApiFetchMock.mockResolvedValue(
+      scopedState('bot_v1_A', 'persona_v1_P', 'session_v1_S', 1, 8),
     )
-    expect(requestSignal(0)?.aborted).toBe(true)
-    expect(requestSignal(1)?.aborted).toBe(false)
-    expect(appliedB).toBe(true)
-    expect(appliedA).toBe(false)
-    expect(live.state).toEqual(stateFor('B'))
-  })
 
-  it('keeps a stale session A rejection silent while B is loading', async () => {
-    const requestA = deferred<StateResponse>()
-    const requestB = deferred<StateResponse>()
-    apiFetchMock
-      .mockImplementationOnce(() => requestA.promise)
-      .mockImplementationOnce(() => requestB.promise)
-
-    const session = useSessionStore()
-    const live = useLiveStore()
-    session.setCurrent('A')
-    const resultA = live.fetchOnce()
-    session.setCurrent('B')
-    const resultB = live.fetchOnce()
-
-    requestA.reject(new Error('stale A failed'))
-    expect(await resultA).toBe(false)
-    expect(live.error).toBe('')
-    expect(live.loading).toBe(true)
-
-    requestB.resolve(stateFor('B'))
-    expect(await resultB).toBe(true)
-    expect(live.error).toBe('')
-    expect(live.loading).toBe(false)
-    expect(live.state).toEqual(stateFor('B'))
-  })
-
-  it('rejects a response when the requested session is no longer selected', async () => {
-    const requestA = deferred<StateResponse>()
-    apiFetchMock.mockImplementationOnce(() => requestA.promise)
-
-    const session = useSessionStore()
-    const live = useLiveStore()
-    session.setCurrent('A')
-    const resultA = live.fetchOnce()
-    session.setCurrent('B')
-
-    requestA.resolve(stateFor('A'))
-
-    expect(await resultA).toBe(false)
-    expect(live.state).toBeNull()
-    expect(live.error).toBe('')
-  })
-
-  it('applies the initial default response while selecting its first session', async () => {
-    const response = {
-      ...stateFor('A'),
-      sessions: [{ id: 'A' }, { id: 'B' }],
-    }
-    apiFetchMock.mockResolvedValueOnce(response)
-
-    const session = useSessionStore()
     const live = useLiveStore()
 
-    expect(session.current).toBe('')
     expect(await live.fetchOnce()).toBe(true)
-    expect(session.current).toBe('A')
-    expect(live.state).toEqual(response)
+    expect(fetchScopeCatalogMock).toHaveBeenCalledOnce()
+    expect(scopedApiFetchMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        selection: {
+          botRef: 'bot_v1_A',
+          personaRef: 'persona_v1_P',
+          sessionRef: 'session_v1_S',
+        },
+      }),
+      'state',
+      expect.anything(),
+    )
+    expect(live.state).toMatchObject({ tick_count: 8 })
   })
 
-  it('invalidates a late response and resets loading when stopped', async () => {
-    const requestA = deferred<StateResponse>()
-    apiFetchMock.mockImplementationOnce(() => requestA.promise)
-
-    useSessionStore().setCurrent('A')
+  it('clears stale state and errors when the selected scope is incomplete', async () => {
+    const scope = useScopeStore()
+    scope.setCatalog(
+      catalog([
+        {
+          bot: 'bot_v1_A',
+          persona: 'persona_v1_PA',
+          session: 'session_v1_SA',
+          generation: 1,
+        },
+        {
+          bot: 'bot_v1_B',
+          persona: 'persona_v1_PB',
+          session: 'session_v1_SB',
+          generation: 1,
+        },
+      ]),
+    )
+    scope.selectBot('bot_v1_A')
     const live = useLiveStore()
-    const resultA = live.fetchOnce()
-    const signal = requestSignal(0)
+    live.state = { tick_count: 99 }
+    live.error = 'previous scope failed'
 
-    live.stop()
-    const loadingAfterStop = live.loading
-    const abortedAfterStop = signal?.aborted
-    requestA.resolve(stateFor('A'))
+    expect(await live.fetchOnce()).toBe(false)
+    expect(live.state).toBeNull()
+    expect(live.error).toBe('')
+    expect(scopedApiFetchMock).not.toHaveBeenCalled()
+  })
 
-    expect(await resultA).toBe(false)
-    expect(abortedAfterStop).toBe(true)
-    expect(loadingAfterStop).toBe(false)
+  it('discards a late response after the selected exact scope changes', async () => {
+    const scope = useScopeStore()
+    scope.setCatalog(
+      catalog([
+        {
+          bot: 'bot_v1_A',
+          persona: 'persona_v1_PA',
+          session: 'session_v1_SA',
+          generation: 1,
+        },
+        {
+          bot: 'bot_v1_B',
+          persona: 'persona_v1_PB',
+          session: 'session_v1_SB',
+          generation: 1,
+        },
+      ]),
+    )
+    selectScope('bot_v1_A', 'persona_v1_PA', 'session_v1_SA')
+    const late = deferred<ScopedApiResponse>()
+    scopedApiFetchMock.mockReturnValueOnce(late.promise)
+    const live = useLiveStore()
+
+    const request = live.fetchOnce()
+    selectScope('bot_v1_B', 'persona_v1_PB', 'session_v1_SB')
+    late.resolve(scopedState('bot_v1_A', 'persona_v1_PA', 'session_v1_SA', 1, 1))
+
+    expect(await request).toBe(false)
     expect(live.state).toBeNull()
     expect(live.error).toBe('')
   })
 
-  it('does not report an aborted current request as an error', async () => {
-    apiFetchMock.mockImplementation(
-      (_path: string, options?: { signal?: AbortSignal }) =>
-        new Promise<StateResponse>((_resolve, reject) => {
-          if (!options?.signal) {
-            reject(new Error('missing abort signal'))
-            return
-          }
-          options.signal.addEventListener(
-            'abort',
-            () => reject(makeAbortError()),
-            { once: true },
-          )
-        }),
+  it('reloads the catalog and retries one time when the response generation changes', async () => {
+    const scope = useScopeStore()
+    scope.setCatalog(
+      catalog([
+        {
+          bot: 'bot_v1_A',
+          persona: 'persona_v1_P',
+          session: 'session_v1_S',
+          generation: 1,
+        },
+      ]),
     )
-
+    fetchScopeCatalogMock.mockResolvedValue(
+      catalog([
+        {
+          bot: 'bot_v1_A',
+          persona: 'persona_v1_P',
+          session: 'session_v1_S',
+          generation: 2,
+        },
+      ]),
+    )
+    scopedApiFetchMock
+      .mockResolvedValueOnce(scopedState('bot_v1_A', 'persona_v1_P', 'session_v1_S', 2, 1))
+      .mockResolvedValueOnce(scopedState('bot_v1_A', 'persona_v1_P', 'session_v1_S', 2, 2))
     const live = useLiveStore()
-    const result = live.fetchOnce()
-    live.stop()
 
-    expect(await result).toBe(false)
+    expect(await live.fetchOnce()).toBe(true)
+    expect(fetchScopeCatalogMock).toHaveBeenCalledOnce()
+    expect(scopedApiFetchMock).toHaveBeenCalledTimes(2)
+    expect(scope.selectedScopeGeneration).toBe(2)
+    expect(live.state).toMatchObject({ tick_count: 2 })
+  })
+
+  it('clears stale state when a generation refresh removes the complete scope', async () => {
+    const scope = useScopeStore()
+    scope.setCatalog(
+      catalog([
+        {
+          bot: 'bot_v1_A',
+          persona: 'persona_v1_P',
+          session: 'session_v1_S',
+          generation: 1,
+        },
+      ]),
+    )
+    fetchScopeCatalogMock.mockResolvedValue(catalog([]))
+    scopedApiFetchMock.mockResolvedValue(
+      scopedState('bot_v1_A', 'persona_v1_P', 'session_v1_S', 2, 2),
+    )
+    const live = useLiveStore()
+    live.state = { tick_count: 1 }
+    live.error = 'old scope error'
+
+    expect(await live.fetchOnce()).toBe(false)
+    expect(live.state).toBeNull()
     expect(live.error).toBe('')
-    expect(live.loading).toBe(false)
+  })
+
+  it('clears stale state when a scope-stale refresh removes the complete scope', async () => {
+    const scope = useScopeStore()
+    scope.setCatalog(
+      catalog([
+        {
+          bot: 'bot_v1_A',
+          persona: 'persona_v1_P',
+          session: 'session_v1_S',
+          generation: 1,
+        },
+      ]),
+    )
+    fetchScopeCatalogMock.mockResolvedValue(catalog([]))
+    scopedApiFetchMock.mockRejectedValue({
+      status: 409,
+      data: { error: 'scope_stale' },
+    })
+    const live = useLiveStore()
+    live.state = { tick_count: 1 }
+    live.error = 'old scope error'
+
+    expect(await live.fetchOnce()).toBe(false)
+    expect(live.state).toBeNull()
+    expect(live.error).toBe('')
+  })
+
+  it('serializes Pages polling and queues one fresh poll after the active request settles', async () => {
+    const scope = useScopeStore()
+    scope.setCatalog(
+      catalog([
+        {
+          bot: 'bot_v1_A',
+          persona: 'persona_v1_P',
+          session: 'session_v1_S',
+          generation: 1,
+        },
+      ]),
+    )
+    isAstrBotPageMock.mockReturnValue(true)
+    const first = deferred<ScopedApiResponse>()
+    scopedApiFetchMock
+      .mockReturnValueOnce(first.promise)
+      .mockResolvedValueOnce(scopedState('bot_v1_A', 'persona_v1_P', 'session_v1_S', 1, 2))
+    const live = useLiveStore()
+
+    const running = live.fetchOnce()
+    await vi.waitFor(() => expect(scopedApiFetchMock).toHaveBeenCalledTimes(1))
+    expect(isAstrBotPageMock).toHaveReturnedWith(true)
+    expect(await live.fetchOnce()).toBe(false)
+    expect(scopedApiFetchMock).toHaveBeenCalledTimes(1)
+
+    first.resolve(scopedState('bot_v1_A', 'persona_v1_P', 'session_v1_S', 1, 1))
+    expect(await running).toBe(true)
+    await vi.waitFor(() => expect(scopedApiFetchMock).toHaveBeenCalledTimes(2))
+    expect(live.state).toMatchObject({ tick_count: 2 })
   })
 })

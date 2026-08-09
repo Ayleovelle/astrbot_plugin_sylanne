@@ -1,14 +1,10 @@
 <script setup lang="ts">
-// Admin diagnostics page. Read-only anatomy table over three new backend
-// admin endpoints (session KV/epoch inspection, quarantine view, pending
-// deletes). Own fetch on mount + manual Refresh + a gentle 15s poll — this is
-// diagnostic data, not a hot loop, so no aggressive polling (mirrors
-// MemoryView/MonitorView's inflight-guarded interval pattern).
+// Admin diagnostics page. The scoped backend does not currently expose the
+// authoritative admin contracts, so every pane stays intentionally empty.
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { apiFetch } from '../api/client'
 import { num } from '../composables/useAdapt'
 import { useI18n } from '../composables/useI18n'
-import { useSessionStore } from '../stores/session'
+import { useScopeStore } from '../stores/scope'
 import type {
   AdminInspectResponse,
   AdminKvSlot,
@@ -24,7 +20,7 @@ import Timeline, { type TimelineItem } from '../components/ui/Timeline.vue'
 import Button from '../components/ui/Button.vue'
 
 const { t } = useI18n()
-const session = useSessionStore()
+const scope = useScopeStore()
 
 // ---- data: own fetch of the 3 admin endpoints ----
 
@@ -39,37 +35,19 @@ const pendingError = ref('')
 let timer: number | null = null
 let inflight = false
 
-function sessionQuery(): string {
-  return session.current ? '?session=' + encodeURIComponent(session.current) : ''
-}
-
 async function fetchInspect(): Promise<void> {
-  try {
-    inspect.value = await apiFetch<AdminInspectResponse>('/api/admin/inspect' + sessionQuery())
-    inspectError.value = ''
-  } catch (e) {
-    inspectError.value = e instanceof Error ? e.message : 'fetch failed'
-  }
+  inspect.value = null
+  inspectError.value = ''
 }
 
 async function fetchQuarantine(): Promise<void> {
-  try {
-    quarantine.value = await apiFetch<AdminQuarantineResponse>(
-      '/api/admin/quarantine_view' + sessionQuery(),
-    )
-    quarantineError.value = ''
-  } catch (e) {
-    quarantineError.value = e instanceof Error ? e.message : 'fetch failed'
-  }
+  quarantine.value = null
+  quarantineError.value = ''
 }
 
 async function fetchPendingDeletes(): Promise<void> {
-  try {
-    pendingDeletes.value = await apiFetch<AdminPendingDeletesResponse>('/api/admin/pending_deletes')
-    pendingError.value = ''
-  } catch (e) {
-    pendingError.value = e instanceof Error ? e.message : 'fetch failed'
-  }
+  pendingDeletes.value = null
+  pendingError.value = ''
 }
 
 async function fetchAll(): Promise<void> {
@@ -92,13 +70,7 @@ onUnmounted(() => {
     timer = null
   }
 })
-watch(
-  () => session.current,
-  () => {
-    void fetchInspect()
-    void fetchQuarantine()
-  },
-)
+watch(() => scope.selectionEpoch, () => void fetchInspect())
 
 function refresh(): void {
   void fetchAll()

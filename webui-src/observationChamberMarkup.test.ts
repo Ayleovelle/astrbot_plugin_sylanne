@@ -38,7 +38,7 @@ describe('observation chamber markup contracts', () => {
     expect(monitor).toContain('originRect.value =')
     expect(monitor).toContain(':origin-rect="originRect"')
     expect(monitor).toContain('onBeforeRouteLeave')
-    expect(monitor).toContain('watch(() => session.current')
+    expect(monitor).toContain('watch(() => scope.selectionEpoch')
     expect(chamber.match(/<Modal/g) ?? []).toHaveLength(1)
     expect(chamber).toContain('variant="observation"')
     expect(chamber).toContain(':origin-rect="originRect"')
@@ -46,7 +46,9 @@ describe('observation chamber markup contracts', () => {
   })
 
   it('loads real history with a retryable generation guard', () => {
-    expect(chamber).toContain('fetchObservationHistory')
+    expect(chamber).toContain('scopedApiFetch')
+    expect(chamber).toContain("'observation-history'")
+    expect(chamber).toContain('scope.isCurrent(snapshot, result)')
     expect(chamber).toContain('createObservationRequestGuard')
     expect(chamber).toContain('new AbortController()')
     expect(chamber).toContain('guard.isCurrent')

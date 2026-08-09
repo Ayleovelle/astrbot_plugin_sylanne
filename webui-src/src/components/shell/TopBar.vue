@@ -5,7 +5,7 @@ import { useI18n } from '../../composables/useI18n'
 import { useInteractionFeedback } from '../../composables/useInteractionFeedback'
 import { useTheme, useLang } from '../../composables/useTheme'
 import { useAuthStore } from '../../stores/auth'
-import { useSessionStore, sessionId, sessionLabel } from '../../stores/session'
+import { useScopeStore } from '../../stores/scope'
 import { useLiveStore } from '../../stores/live'
 import { usesHostAuthentication } from '../../api/client'
 
@@ -20,25 +20,29 @@ const pageName = computed(() => {
 const { theme, toggleTheme } = useTheme()
 const { lang, toggleLang } = useLang()
 const auth = useAuthStore()
-const session = useSessionStore()
+const scope = useScopeStore()
 const live = useLiveStore()
 const feedback = useInteractionFeedback()
 
 const online = computed(() => !!live.state && !live.error)
 const canLogout = !usesHostAuthentication()
 
-async function onSessionChange(e: Event): Promise<void> {
-  const id = (e.target as HTMLSelectElement).value
-  session.setCurrent(id)
+type ScopeTier = 'bot' | 'persona' | 'session'
+
+async function onScopeChange(tier: ScopeTier, e: Event): Promise<void> {
+  const ref = (e.target as HTMLSelectElement).value
+  if (tier === 'bot') scope.selectBot(ref)
+  if (tier === 'persona') scope.selectPersona(ref)
+  if (tier === 'session') scope.selectSession(ref)
+  const selected = scope.selection.sessionRef || scope.selection.personaRef || scope.selection.botRef
   feedback.show(
-    `${t('feedback.session_switching')} · ${id}`,
+    `${t('feedback.session_switching')} · ${selected}`,
     'neutral',
     { sticky: true },
   )
   const applied = await live.fetchOnce()
-  if (session.current !== id) return
   if (applied) {
-    feedback.show(`${t('feedback.session_switched')} · ${id}`, 'success')
+    feedback.show(`${t('feedback.session_switched')} · ${scope.selection.sessionRef}`, 'success')
   } else {
     feedback.clear()
   }
@@ -75,19 +79,36 @@ function logout(): void {
       </span>
 
       <select
-        v-if="session.sessions.length"
-        class="session-pill mono"
-        :value="session.current"
-        :title="t('chrome.session')"
-        @change="onSessionChange"
+        v-if="scope.bots.length"
+        class="scope-pill mono"
+        :value="scope.selection.botRef"
+        title="Bot"
+        @change="onScopeChange('bot', $event)"
       >
-        <option
-          v-for="s in session.sessions"
-          :key="sessionId(s)"
-          :value="sessionId(s)"
-        >
-          {{ sessionLabel(s) }}
-        </option>
+        <option value="" disabled>Bot</option>
+        <option v-for="bot in scope.bots" :key="bot" :value="bot">{{ bot }}</option>
+      </select>
+
+      <select
+        v-if="scope.selection.botRef"
+        class="scope-pill mono"
+        :value="scope.selection.personaRef"
+        title="Persona"
+        @change="onScopeChange('persona', $event)"
+      >
+        <option value="" disabled>Persona</option>
+        <option v-for="persona in scope.personas" :key="persona" :value="persona">{{ persona }}</option>
+      </select>
+
+      <select
+        v-if="scope.selection.personaRef"
+        class="scope-pill mono"
+        :value="scope.selection.sessionRef"
+        :title="t('chrome.session')"
+        @change="onScopeChange('session', $event)"
+      >
+        <option value="" disabled>{{ t('chrome.session') }}</option>
+        <option v-for="session in scope.sessions" :key="session" :value="session">{{ session }}</option>
       </select>
 
       <button class="chip" :title="t('chrome.theme')" @click="onThemeToggle">
@@ -172,7 +193,7 @@ function logout(): void {
   background: var(--green);
   animation: dotBreath 3.2s ease-in-out infinite;
 }
-.session-pill {
+.scope-pill {
   background: var(--card);
   border: 1px solid var(--card-border);
   border-radius: var(--r-pill);
@@ -230,7 +251,7 @@ function logout(): void {
     justify-content: flex-end;
     gap: var(--space-2);
   }
-  .session-pill {
+  .scope-pill {
     width: clamp(72px, 24vw, 100px);
     min-width: 0;
     padding: var(--space-2) var(--space-3);
@@ -242,6 +263,41 @@ function logout(): void {
   .logout-chip {
     width: auto;
     padding: 0 var(--space-2);
+  }
+}
+
+@media (max-width: 420px) {
+  .top {
+    align-items: center;
+    flex-wrap: nowrap;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .left {
+    flex: 0 0 auto;
+  }
+  .controls {
+    width: auto;
+    min-width: 0;
+    flex: 1 1 0;
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+  .controls::-webkit-scrollbar {
+    display: none;
+  }
+  .scope-pill {
+    flex: 0 0 72px;
+    width: 72px;
+    max-width: 72px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .logout-chip {
+    flex: none;
   }
 }
 </style>

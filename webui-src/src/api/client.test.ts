@@ -3,9 +3,11 @@ import {
   ApiError,
   apiBase,
   apiFetch,
-  fetchObservationHistory,
+  fetchScopeCatalog,
+  scopedApiFetch,
   usesHostAuthentication,
 } from './client'
+import type { ScopeRequestSnapshot, ScopedApiResponse } from './types'
 
 function stubToken(token = 'standalone-secret'): void {
   vi.stubGlobal('localStorage', {
@@ -22,6 +24,27 @@ function jsonResponse(data: unknown): Response {
     statusText: 'OK',
     text: vi.fn().mockResolvedValue(JSON.stringify(data)),
   } as unknown as Response
+}
+
+function errorResponse(status: number, data: unknown): Response {
+  return {
+    ok: false,
+    status,
+    statusText: 'Forbidden',
+    text: vi.fn().mockResolvedValue(JSON.stringify(data)),
+  } as unknown as Response
+}
+
+function scopeSnapshot(): ScopeRequestSnapshot {
+  return {
+    selection: {
+      botRef: 'bot_v1_A',
+      personaRef: 'persona_v1_P',
+      sessionRef: 'session_v1_S',
+    },
+    selectionEpoch: 3,
+    scopeGeneration: 7,
+  }
 }
 
 describe('apiBase', () => {
@@ -66,54 +89,10 @@ describe('apiBase', () => {
     vi.stubGlobal('fetch', fetchMock)
     stubToken()
 
-    await expect(apiFetch('/api/state?session=friend%3A42')).resolves.toEqual({ tick_count: 7 })
-    expect(apiGet).toHaveBeenCalledWith('api/state', { session: 'friend:42' })
+    await expect(apiFetch('/api/scopes?refresh=1')).resolves.toEqual({ tick_count: 7 })
+    expect(apiGet).toHaveBeenCalledWith('api/scopes', { refresh: '1' })
     expect(fetchMock).not.toHaveBeenCalled()
     expect(usesHostAuthentication()).toBe(true)
-  })
-
-  it('uses the AstrBot bridge for observation history without passing its signal', async () => {
-    const apiGet = vi.fn().mockResolvedValue({
-      schema_version: 'sylanne.observation.history.v1',
-      session: 'friend:42',
-      group: 'timing',
-      points: [],
-      sample_count: 0,
-      downsampled: false,
-      partial: false,
-      storage: {
-        used_bytes: 0,
-        limit_bytes: null,
-        oldest_ms: null,
-        segment_count: 0,
-        cleanup_active: false,
-      },
-    })
-    vi.stubGlobal('window', {
-      AstrBotPluginPage: { apiGet, apiPost: vi.fn() },
-    })
-    vi.stubGlobal('location', {
-      pathname: '/api/plugin/page/content/astrbot_plugin_sylanne/dashboard/index.html',
-    })
-    vi.stubGlobal('fetch', vi.fn())
-    const signal = new AbortController().signal
-
-    await fetchObservationHistory(
-      {
-        session: 'friend:42',
-        group: 'timing',
-        from_ms: 10,
-        max_points: 12,
-      },
-      signal,
-    )
-
-    expect(apiGet).toHaveBeenCalledWith('api/observation_history', {
-      session: 'friend:42',
-      group: 'timing',
-      from_ms: '10',
-      max_points: '12',
-    })
   })
 
   it('uses the AstrBot bridge for POST without leaking standalone auth', async () => {
@@ -132,8 +111,183 @@ describe('apiBase', () => {
     expect(apiPost).toHaveBeenCalledWith('api/settings', { enabled: true })
   })
 
+  it('routes a scoped GET through AstrBot Pages with its nonce in bridge params', async () => {
+    const apiPost = vi.fn().mockResolvedValue({
+      ok: true,
+      scope: {
+        bot_ref: 'bot_v1_A',
+        persona_ref: 'persona_v1_P',
+        session_ref: 'session_v1_S',
+      },
+      scope_nonce: 'scope_nonce_v1_test',
+    })
+    const payload: ScopedApiResponse = {
+      ok: true,
+      scope: {
+        bot_ref: 'bot_v1_A',
+        persona_ref: 'persona_v1_P',
+        session_ref: 'session_v1_S',
+      },
+      scope_generation: 7,
+    }
+    const apiGet = vi.fn().mockResolvedValue(payload)
+    const fetchMock = vi.fn()
+    vi.stubGlobal('window', { AstrBotPluginPage: { apiGet, apiPost } })
+    vi.stubGlobal('location', {
+      pathname: '/api/plugin/page/content/astrbot_plugin_sylanne/dashboard/index.html',
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    stubToken()
+
+    await expect(scopedApiFetch<ScopedApiResponse>(scopeSnapshot(), 'state')).resolves.toEqual(
+      payload,
+    )
+
+    expect(apiPost).toHaveBeenCalledWith(
+      'api/scopes/bot_v1_A/personas/persona_v1_P/sessions/session_v1_S/nonce',
+      undefined,
+    )
+    expect(apiGet).toHaveBeenCalledWith(
+      'api/v1/bots/bot_v1_A/personas/persona_v1_P/sessions/session_v1_S/state',
+      { scope_nonce: 'scope_nonce_v1_test' },
+    )
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('routes a scoped POST through AstrBot Pages with its nonce in the request body', async () => {
+    const bootstrap = {
+      ok: true,
+      scope: {
+        bot_ref: 'bot_v1_A',
+        persona_ref: 'persona_v1_P',
+        session_ref: 'session_v1_S',
+      },
+      scope_nonce: 'scope_nonce_v1_test',
+    }
+    const payload: ScopedApiResponse = {
+      ok: true,
+      scope: bootstrap.scope,
+      scope_generation: 7,
+    }
+    const apiGet = vi.fn()
+    const apiPost = vi.fn().mockResolvedValueOnce(bootstrap).mockResolvedValueOnce(payload)
+    const fetchMock = vi.fn()
+    vi.stubGlobal('window', { AstrBotPluginPage: { apiGet, apiPost } })
+    vi.stubGlobal('location', {
+      pathname: '/api/plugin/page/content/astrbot_plugin_sylanne/dashboard/index.html',
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      scopedApiFetch<ScopedApiResponse>(scopeSnapshot(), 'memory/meltdown', {
+        method: 'POST',
+        body: { meltdown_nonce: 'arm_v1' },
+      }),
+    ).resolves.toEqual(payload)
+
+    expect(apiPost).toHaveBeenNthCalledWith(
+      1,
+      'api/scopes/bot_v1_A/personas/persona_v1_P/sessions/session_v1_S/nonce',
+      undefined,
+    )
+    expect(apiPost).toHaveBeenNthCalledWith(
+      2,
+      'api/v1/bots/bot_v1_A/personas/persona_v1_P/sessions/session_v1_S/memory/meltdown',
+      { meltdown_nonce: 'arm_v1', scope_nonce: 'scope_nonce_v1_test' },
+    )
+    expect(apiGet).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('does not recover a scoped nonce bootstrap through legacy state when CSRF is absent', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      errorResponse(403, { error: 'csrf required' }),
+    )
+    vi.stubGlobal('window', {})
+    vi.stubGlobal('location', { pathname: '/dashboard' })
+    vi.stubGlobal('fetch', fetchMock)
+    stubToken()
+
+    const error = await scopedApiFetch<ScopedApiResponse>(scopeSnapshot(), 'state').catch(
+      (caught: unknown) => caught,
+    )
+
+    expect(error).toMatchObject({ status: 403 })
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/scopes/bot_v1_A/personas/persona_v1_P/sessions/session_v1_S/nonce',
+      expect.objectContaining({ method: 'POST' }),
+    )
+  })
+
+  it('uses the catalog CSRF token for a standalone scoped bootstrap', async () => {
+    const bootstrap = {
+      ok: true,
+      scope: {
+        bot_ref: 'bot_v1_A',
+        persona_ref: 'persona_v1_P',
+        session_ref: 'session_v1_S',
+      },
+      scope_nonce: 'scope_nonce_v1_test',
+    }
+    const payload: ScopedApiResponse = {
+      ok: true,
+      scope: bootstrap.scope,
+      scope_generation: 7,
+    }
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ ok: true, scopes: [], csrf_token: 'catalog-csrf' }))
+      .mockResolvedValueOnce(jsonResponse(bootstrap))
+      .mockResolvedValueOnce(jsonResponse(payload))
+    vi.stubGlobal('window', {})
+    vi.stubGlobal('location', { pathname: '/dashboard' })
+    vi.stubGlobal('fetch', fetchMock)
+    stubToken()
+
+    await expect(fetchScopeCatalog()).resolves.toMatchObject({ csrf_token: 'catalog-csrf' })
+    await expect(scopedApiFetch<ScopedApiResponse>(scopeSnapshot(), 'state')).resolves.toEqual(
+      payload,
+    )
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/scopes/bot_v1_A/personas/persona_v1_P/sessions/session_v1_S/nonce',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({ 'X-CSRF-Token': 'catalog-csrf' }),
+      }),
+    )
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      '/api/v1/bots/bot_v1_A/personas/persona_v1_P/sessions/session_v1_S/state',
+      expect.objectContaining({
+        method: 'GET',
+        headers: expect.objectContaining({
+          'X-Sylanne-Scope-Nonce': 'scope_nonce_v1_test',
+        }),
+      }),
+    )
+  })
+
+  it('loads the authoritative scope catalog without a legacy session selector', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({ ok: true, scopes: [] }),
+    )
+    vi.stubGlobal('window', {})
+    vi.stubGlobal('location', { pathname: '/dashboard' })
+    vi.stubGlobal('fetch', fetchMock)
+    stubToken()
+
+    await expect(fetchScopeCatalog()).resolves.toEqual({ ok: true, scopes: [] })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/scopes',
+      expect.objectContaining({ method: 'GET' }),
+    )
+  })
+
   it.each([
-    ['/api/settings?session=a', { method: 'POST', body: {} }, 'POST does not support query'],
+    ['/api/settings?mode=a', { method: 'POST', body: {} }, 'POST does not support query'],
     ['/api/state', { method: 'DELETE' }, 'does not support DELETE'],
     [
       '/api/state',
@@ -189,49 +343,4 @@ describe('apiBase', () => {
     expect(usesHostAuthentication()).toBe(false)
   })
 
-  it('fetches standalone observation history with a relative URL, bearer, and signal', async () => {
-    const payload = {
-      schema_version: 'sylanne.observation.history.v1',
-      session: 'standalone',
-      group: 'emotion',
-      points: [],
-      sample_count: 0,
-      downsampled: false,
-      partial: false,
-      storage: {
-        used_bytes: 0,
-        limit_bytes: null,
-        oldest_ms: null,
-        segment_count: 0,
-        cleanup_active: false,
-      },
-    }
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(payload))
-    vi.stubGlobal('window', {})
-    vi.stubGlobal('location', { pathname: '/dashboard' })
-    vi.stubGlobal('fetch', fetchMock)
-    stubToken()
-    const signal = new AbortController().signal
-
-    await expect(
-      fetchObservationHistory(
-        {
-          session: 'standalone',
-          group: 'emotion',
-          from_ms: 10,
-          to_ms: 20,
-          max_points: 5,
-        },
-        signal,
-      ),
-    ).resolves.toEqual(payload)
-
-    expect(fetchMock.mock.calls[0][0]).toBe(
-      '/api/observation_history?session=standalone&group=emotion&from_ms=10&to_ms=20&max_points=5',
-    )
-    expect(fetchMock.mock.calls[0][1]).toMatchObject({
-      signal,
-      headers: { Authorization: 'Bearer standalone-secret' },
-    })
-  })
 })

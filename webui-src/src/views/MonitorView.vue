@@ -11,7 +11,7 @@ import RouteBar from '../components/ui/RouteBar.vue'
 import type { RouteDistribution } from '../api/types'
 import { buildTimingRows, type TimingRow } from './monitorTiming'
 import ObservationChamber from '../components/monitor/ObservationChamber.vue'
-import { useSessionStore } from '../stores/session'
+import { useScopeStore } from '../stores/scope'
 import type { ObservationGroup } from './monitorObservation'
 
 // Mirrors the old dashboard's adaptState()/num() helper (UI/index.html,
@@ -32,7 +32,7 @@ function num(obj: Record<string, unknown> | undefined, keys: string[], dflt: num
 }
 
 const live = useLiveStore()
-const session = useSessionStore()
+const scope = useScopeStore()
 const { t } = useI18n()
 const activeObservation = ref<ObservationGroup | null>(null)
 const observationOpen = ref(false)
@@ -46,7 +46,7 @@ function openObservation(group: ObservationGroup, event: MouseEvent | KeyboardEv
   observationOpen.value = true
 }
 function closeObservation(): void { observationOpen.value = false; activeObservation.value = null; originRect.value = null }
-watch(() => session.current, closeObservation, { flush: 'sync' })
+watch(() => scope.selectionEpoch, closeObservation, { flush: 'sync' })
 onBeforeRouteLeave(() => closeObservation())
 
 const EMOTION_KEYS = [
@@ -197,7 +197,7 @@ const timingRows = computed<TimingRow[]>(() => buildTimingRows(live.state))
   <div v-else class="loading-state">
     <span class="mono">{{ t('common.loading') }}</span>
   </div>
-  <ObservationChamber :open="observationOpen" :group="activeObservation" :session="session.current" :state="live.state" :origin-rect="originRect" @update:open="closeObservation" />
+  <ObservationChamber :open="observationOpen" :group="activeObservation" :state="live.state" :origin-rect="originRect" @update:open="closeObservation" />
 </template>
 
 <style scoped>

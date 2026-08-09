@@ -1,9 +1,9 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import {
-  apiFetch,
   setToken,
   clearToken,
+  fetchScopeCatalog,
   getToken,
   ApiError,
   usesHostAuthentication,
@@ -15,14 +15,15 @@ export const useAuthStore = defineStore('auth', () => {
   const status = ref<AuthStatus>(usesHostAuthentication() || getToken() ? 'ok' : 'anon')
   const error = ref('')
 
-  // Validate a token by hitting the authenticated /api/state (matches old verifyToken).
+  // The catalog is authenticated but contains no selected-session payload.  It is
+  // therefore safe to use as the login probe before a complete scope exists.
   async function login(token: string): Promise<boolean> {
     if (usesHostAuthentication()) return verifyExisting()
     status.value = 'authing'
     error.value = ''
     setToken(token)
     try {
-      await apiFetch('/api/state')
+      await fetchScopeCatalog()
       status.value = 'ok'
       return true
     } catch (e) {
@@ -43,7 +44,7 @@ export const useAuthStore = defineStore('auth', () => {
       return false
     }
     try {
-      await apiFetch('/api/state')
+      await fetchScopeCatalog()
       status.value = 'ok'
       return true
     } catch (e) {

@@ -1,10 +1,9 @@
 <script setup lang="ts">
-// 认知核 / Cognition page — the old dashboard's "spine"/CORE view, rebuilt.
-// Own 5s poll of /api/v2core_state (independent of useLiveStore's /api/state
-// poll), scoped to the active session like live.ts does for /api/state.
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { apiFetch } from '../api/client'
-import { useSessionStore } from '../stores/session'
+// The exact scoped API deliberately exposes only the redacted live state.
+// Cognition's former per-session endpoint is therefore not queried outside the
+// selected scope boundary.
+import { computed } from 'vue'
+import { useLiveStore } from '../stores/live'
 import { useI18n } from '../composables/useI18n'
 import { num } from '../composables/useAdapt'
 import type { V2CoreStateResponse } from '../api/types'
@@ -15,41 +14,11 @@ import StatGrid from '../components/ui/StatGrid.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
 
 const { t } = useI18n()
-const session = useSessionStore()
+const live = useLiveStore()
 
-const resp = ref<V2CoreStateResponse | null>(null)
-let timer: number | null = null
-let inflight = false
-
-async function fetchOnce(): Promise<void> {
-  if (inflight) return
-  inflight = true
-  const s = session.current
-  const q = s ? '?session=' + encodeURIComponent(s) : ''
-  try {
-    resp.value = await apiFetch<V2CoreStateResponse>('/api/v2core_state' + q)
-  } catch {
-    resp.value = null
-  } finally {
-    inflight = false
-  }
-}
-
-function start(): void {
-  stop()
-  void fetchOnce()
-  timer = window.setInterval(() => void fetchOnce(), 5000)
-}
-function stop(): void {
-  if (timer !== null) {
-    clearInterval(timer)
-    timer = null
-  }
-}
-
-onMounted(start)
-onUnmounted(stop)
-watch(() => session.current, () => void fetchOnce())
+const resp = computed<V2CoreStateResponse | null>(() =>
+  live.state ? { enabled: false, session: live.state.scope?.session_ref } : null,
+)
 
 // enabled:false whenever v2core never ran for this session — normal, not an error.
 const disabled = computed(() => !resp.value || resp.value.enabled === false)

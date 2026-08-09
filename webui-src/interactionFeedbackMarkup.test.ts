@@ -62,17 +62,20 @@ describe('visual-novel interaction feedback', () => {
     }
   })
 
-  it('guards session switching and narrates only the current request', () => {
+  it('guards scoped switching and narrates only the current request', () => {
     const handler = section(
       topBar,
-      'async function onSessionChange',
-      'function logout',
+      'async function onScopeChange',
+      'function onThemeToggle',
     )
 
+    expect(handler).toContain('scope.selectBot(ref)')
+    expect(handler).toContain('scope.selectPersona(ref)')
+    expect(handler).toContain('scope.selectSession(ref)')
     expect(handler).toContain("t('feedback.session_switching')")
     expect(handler).toContain('sticky: true')
     expect(handler).toContain('const applied = await live.fetchOnce()')
-    expect(handler).toContain('if (session.current !== id) return')
+    expect(handler).not.toContain('session.current')
     expect(handler).toContain("t('feedback.session_switched')")
     expect(handler).toContain('feedback.clear()')
     expect(topBar).toContain('function onThemeToggle')
@@ -123,16 +126,11 @@ describe('visual-novel interaction feedback', () => {
     expect(life).toContain('controlsMsg.value')
   })
 
-  it('narrates explicit memory workflows while leaving pool polling silent', () => {
+  it('keeps memory reads scoped and fails closed for unavailable workflows', () => {
     const poll = section(
       memory,
       'async function fetchPools()',
       '\nonMounted(() =>',
-    )
-    const consolidate = section(
-      memory,
-      'async function startConsolidate()',
-      '\nonUnmounted(() => {\n  clearConsolidateTimer()',
     )
     const meltdown = section(
       memory,
@@ -141,28 +139,14 @@ describe('visual-novel interaction feedback', () => {
     )
 
     expect(poll).not.toContain('feedback.show')
-    expect(consolidate).toContain("t('feedback.memory_organizing')")
-    expect(consolidate).toContain("t('feedback.memory_completed')")
-    expect(consolidate).toContain("t('feedback.memory_failed')")
-    expect(consolidate).toContain('sinkResult.value')
-    expect(memory).toContain('let organizingFeedbackId: number | null = null')
-    expect(consolidate).toContain(
-      'organizingFeedbackId = feedback.show(',
-    )
-    expect(consolidate).toMatch(
-      /organizingFeedbackId = null\s+feedback\.show\(\s*`\$\{t\('feedback\.memory_completed'\)/,
-    )
-    expect(
-      consolidate.match(
-        /organizingFeedbackId = null\s+const detail = conciseFeedbackError/g,
-      ) ?? [],
-    ).toHaveLength(2)
-    expect(memory).toMatch(
-      /onUnmounted\(\(\) => \{\s*clearConsolidateTimer\(\)\s*if \(organizingFeedbackId !== null\) \{\s*feedback\.clear\(organizingFeedbackId\)\s*organizingFeedbackId = null\s*\}/,
-    )
+    expect(poll).toContain('scopedApiFetch<ScopedMemoryPoolsResponse>')
+    expect(memory).not.toContain('apiFetch(')
+    expect(memory).not.toContain('async function startConsolidate()')
     expect(meltdown).toContain("t('feedback.meltdown_prepare_failed')")
     expect(meltdown).toContain("t('feedback.meltdown_execute_failed')")
-    expect(meltdown).toMatch(/if\s*\(\s*!resp\.ok\s*\)/)
+    expect(meltdown).toContain('const snapshot = scope.snapshot()')
+    expect(meltdown).toContain('scopedApiFetch')
+    expect(meltdown).toMatch(/if\s*\(\s*!resp\.ok/)
     expect(memory).toContain('meltdownError.value')
   })
 
