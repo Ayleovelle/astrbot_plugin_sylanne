@@ -8,6 +8,7 @@ from dataclasses import fields
 import pytest
 
 from sylanne_alpha.memory_system import MemorySystem
+from sylanne_alpha.plugin_services import PluginServices
 from sylanne_alpha.scope_repository import ScopeRepository
 from sylanne_alpha.state_persistence import StatePersistence
 from tests.scope_fixtures import scopes
@@ -93,6 +94,39 @@ def test_registry_present_state_persistence_never_replays_legacy_memory_fallback
     asyncio.run(persistence.save_sylanne_memory_state("scope_v1_bound", MemorySystem()))
     assert plugin.kv_reads == 0
     assert plugin.kv_writes == 0
+
+
+def test_state_persistence_constructor_retains_explicit_services_and_session_state() -> None:
+    """The compatibility constructor preserves its optional dependency injection."""
+
+    class _Map:
+        def get(self, _key, _default=None):
+            return None
+
+        def set(self, _key, _value) -> None:
+            pass
+
+        def set_on_evict(self, _callback) -> None:
+            pass
+
+    class _Plugin:
+        class _Store:
+            memory_systems = _Map()
+            sylanne_memory_cache = _Map()
+
+        _store = _Store()
+
+    services = PluginServices(config={"injected": True})
+    session_state = object()
+    persistence = StatePersistence(
+        _Plugin(),
+        services=services,
+        session_state=session_state,
+    )
+
+    assert persistence._services is services
+    assert persistence._session_state is session_state
+    assert persistence._p is persistence._plugin
 
 
 def test_claim_is_cross_instance_idempotent_but_rejects_another_destination(

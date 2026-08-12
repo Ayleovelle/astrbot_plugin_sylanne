@@ -20,6 +20,7 @@ import zlib
 from typing import TYPE_CHECKING, Any
 
 from sylanne_alpha.memory_migration_spine import MEMORY_KV_KEYS_MANIFEST
+from sylanne_alpha.plugin_services import PluginServices
 from sylanne_alpha.utils import safe_ensure_future
 
 if TYPE_CHECKING:
@@ -188,7 +189,13 @@ class StatePersistence:
     通过 self._plugin 委托访问插件实例。
     """
 
-    def __init__(self, plugin: PluginHost) -> None:
+    def __init__(
+        self,
+        plugin: PluginHost,
+        *,
+        services: PluginServices | None = None,
+        session_state: Any = None,
+    ) -> None:
         """初始化持久化层。
 
         Args:
@@ -197,6 +204,9 @@ class StatePersistence:
             session_state: 集中式会话状态容器（可选）。
         """
         self._plugin = plugin
+        # Keep the legacy delegate alias while remaining persistence paths are
+        # incrementally migrated to ``_plugin``.
+        self._p = plugin
         self._session_state = session_state
         if services is not None:
             self._services = services
