@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextvars
 import sys
 from dataclasses import replace
@@ -652,6 +653,83 @@ async def test_claimed_session_child_inherits_generation_but_unbound_task_cannot
     )
 
     assert store.last_user_texts.get(scope.storage_token) == "inherited child"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exposure", ["get", "items", "values", "snapshot_items"])
+async def test_old_generation_cannot_mutate_new_deque_through_read_exposure(
+    scopes,
+    exposure: str,
+) -> None:
+    registry = ScopeRuntimeRegistry.for_test()
+    old_scope = scopes.bot_a_persona_a
+    new_scope = replace(old_scope, scope_generation=1)
+    registry.exact_session(old_scope)
+    store = registry.for_scope(old_scope).store
+    finish = asyncio.Event()
+
+    async def _old_task() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await finish.wait()
+            if exposure == "get":
+                leaked = store.conversation_buffers.get(old_scope.storage_token)
+            elif exposure == "items":
+                leaked = dict(store.conversation_buffers.items()).get(
+                    old_scope.storage_token
+                )
+            elif exposure == "values":
+                leaked = next(iter(store.conversation_buffers.values()), None)
+            else:
+                leaked = dict(store.conversation_buffers.snapshot_items()).get(
+                    old_scope.storage_token
+                )
+            if leaked is not None:
+                leaked.append("old late append")
+
+    task = asyncio.create_task(_old_task())
+    store.segmented_tasks.set(old_scope.storage_token, task)
+    await asyncio.sleep(0)
+
+    registry.exact_session(new_scope)
+    current = collections.deque(["new generation"])
+    store.conversation_buffers.set(new_scope.storage_token, current)
+    finish.set()
+    await asyncio.gather(*tuple(store._task_cleanup_waiters), return_exceptions=True)
+
+    assert task.cancelled()
+    assert list(current) == ["new generation"]
+
+
+@pytest.mark.asyncio
+async def test_old_generation_cannot_clear_new_generation_maps(scopes) -> None:
+    registry = ScopeRuntimeRegistry.for_test()
+    old_scope = scopes.bot_a_persona_a
+    new_scope = replace(old_scope, scope_generation=1)
+    registry.exact_session(old_scope)
+    store = registry.for_scope(old_scope).store
+    finish = asyncio.Event()
+
+    async def _old_task() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await finish.wait()
+            store.conversation_buffers.clear()
+
+    task = asyncio.create_task(_old_task())
+    store.segmented_tasks.set(old_scope.storage_token, task)
+    await asyncio.sleep(0)
+
+    registry.exact_session(new_scope)
+    current = collections.deque(["new generation"])
+    store.conversation_buffers.set(new_scope.storage_token, current)
+    finish.set()
+    await asyncio.gather(*tuple(store._task_cleanup_waiters), return_exceptions=True)
+
+    assert task.cancelled()
+    assert store.conversation_buffers.get(new_scope.storage_token) is current
 
 
 def test_exact_session_queue_gateway_cannot_cross_persona_scope(

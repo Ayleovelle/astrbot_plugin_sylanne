@@ -63,6 +63,8 @@ class SessionMap(Generic[V]):
 
     # ---- 基本语义存取 ----
     def get(self, key: str, default: V | None = None) -> V | None:
+        if not self._allows_mutation(key):
+            return default
         return self._d.get(key, default)
 
     def set(self, key: str, value: V) -> None:
@@ -73,7 +75,7 @@ class SessionMap(Generic[V]):
             self._on_set(self._name, key, value)
 
     def has(self, key: str) -> bool:
-        return key in self._d
+        return self._allows_mutation(key) and key in self._d
 
     def pop(self, key: str, default: V | None = None) -> V | None:
         if not self._allows_mutation(key):
@@ -97,24 +99,54 @@ class SessionMap(Generic[V]):
         对其 append/pop/字段赋值会就地反映到容器内。
         """
         if not self._allows_mutation(key):
-            raise RuntimeError("stale session task cannot mutate current owner state")
+            return None  # type: ignore[return-value]
         return self._d[key]
 
     # ---- 迭代/统计（清理、持久化、扫描用）----
     def keys(self) -> Any:
-        return self._d.keys()
+        return [key for key in self._d.keys() if self._allows_mutation(key)]
 
     def values(self) -> Any:
-        return self._d.values()
+        return [
+            value
+            for key, value in self._d.items()
+            if self._allows_mutation(key)
+        ]
 
     def items(self) -> Any:
-        return self._d.items()
+        return [
+            (key, value)
+            for key, value in self._d.items()
+            if self._allows_mutation(key)
+        ]
 
     def snapshot_items(self) -> list[tuple[str, V]]:
         """返回 items 的快照列表（迭代中需修改容器时用，避免 RuntimeError）。"""
-        return list(self._d.items())
+        return list(self.items())
 
     def clear(self) -> None:
+        for key in list(self._d.keys()):
+            if self._allows_mutation(key):
+                self._d.pop(key, None)
+
+    def _snapshot_items_unchecked(self) -> list[tuple[str, V]]:
+        """Store-internal lifecycle view; never expose this as a session API."""
+
+        return list(self._d.items())
+
+    def _values_unchecked(self) -> list[V]:
+        """Store-internal lifecycle values; bypasses request leases deliberately."""
+
+        return list(self._d.values())
+
+    def _pop_unchecked(self, key: str, default: V | None = None) -> V | None:
+        """Store-internal exact-owner cleanup primitive."""
+
+        return self._d.pop(key, default)
+
+    def _clear_unchecked(self) -> None:
+        """Store-internal global lifecycle cleanup primitive."""
+
         self._d.clear()
 
     def set_on_evict(self, callback: Any) -> None:
@@ -126,13 +158,13 @@ class SessionMap(Generic[V]):
             self._d._on_evict = callback
 
     def __len__(self) -> int:
-        return len(self._d)
+        return len(self.keys())
 
     def __contains__(self, key: str) -> bool:
-        return key in self._d
+        return self.has(key)
 
     def __repr__(self) -> str:
-        return f"SessionMap({self._name!r}, n={len(self._d)})"
+        return f"SessionMap({self._name!r}, n={len(self)})"
 
 
 class SessionStateStore:
@@ -549,7 +581,11 @@ class SessionStateStore:
 
         tasks: list[Any] = []
         owned_tasks = self._task_values(
-            *(owned for task_map in self._task_maps() for owned in task_map.values())
+            *(
+                owned
+                for task_map in self._task_maps()
+                for owned in task_map._values_unchecked()
+            )
         )
         for task in owned_tasks:
             if bool(getattr(task, "done", lambda: True)()):
@@ -563,8 +599,8 @@ class SessionStateStore:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         for task_map in self._task_maps():
-            task_map.clear()
-        for _session_key, fragment in self.fragment_buffers.snapshot_items():
+            task_map._clear_unchecked()
+        for _session_key, fragment in self.fragment_buffers._snapshot_items_unchecked():
             self._cancel_fragment_buffer(_session_key, fragment)
         self.reset_all()
         while self._task_cleanup_waiters:
@@ -574,24 +610,28 @@ class SessionStateStore:
     def reset_all(self) -> None:
         """整体清空所有会话态（供 state_persistence 的全局 reset 用）。"""
         owned_tasks = self._task_values(
-            *(owned for task_map in self._task_maps() for owned in task_map.values())
+            *(
+                owned
+                for task_map in self._task_maps()
+                for owned in task_map._values_unchecked()
+            )
         )
         self._cancel_and_drain_tasks(
             "reset-all",
             owned_tasks,
             after_drain=self._clear_all_state,
         )
-        for _session_key, fragment in self.fragment_buffers.snapshot_items():
+        for _session_key, fragment in self.fragment_buffers._snapshot_items_unchecked():
             self._cancel_fragment_buffer(_session_key, fragment)
         self._clear_all_state()
 
     def _clear_session_state(self, session_key: str) -> None:
         for m in self._maps:
-            m._d.pop(session_key, None)
+            m._pop_unchecked(session_key, None)
 
     def _clear_all_state(self) -> None:
         for m in self._maps:
-            m.clear()
+            m._clear_unchecked()
         self._conv_sync_session_umos.clear()
         for umo in list(self.conv_sync_locks.keys()):
             self._release_unused_conv_sync_lock(umo)
