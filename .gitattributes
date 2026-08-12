@@ -1,2 +1,7 @@
 UI/index.html text eol=lf
 pages/dashboard/index.html text eol=lf
+webui-src/**/*.ts text eol=lf
+webui-src/**/*.vue text eol=lf
+webui-src/**/*.css text eol=lf
+webui-src/*.html text eol=lf
+webui-src/*.json text eol=lf
