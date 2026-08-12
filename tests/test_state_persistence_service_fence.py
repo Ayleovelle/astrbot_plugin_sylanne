@@ -74,6 +74,26 @@ class _PluginWithDifferentKv(_PluginWithoutKv):
         await self._backend.delete(key)
 
 
+class _LegacyShardKv:
+    def __init__(self) -> None:
+        self.values: dict[str, Any] = {}
+        self.calls: list[tuple[str, str]] = []
+
+    def get(self, key: str) -> Any:
+        self.calls.append(("get", key))
+        return copy.deepcopy(self.values.get(key))
+
+    def set(self, key: str, value: Any) -> None:
+        self.calls.append(("set", key))
+        self.values[key] = copy.deepcopy(value)
+
+
+class _PluginWithLegacyShardKv(_PluginWithoutKv):
+    def __init__(self) -> None:
+        super().__init__()
+        self.kv = _LegacyShardKv()
+
+
 class _ConversationManager:
     def __init__(self) -> None:
         self.callback: Any = None
@@ -89,6 +109,21 @@ def _services(backend: _Backend, *, context: Any = None) -> PluginServices:
         get_kv_data=backend.get,
         put_kv_data=backend.put,
         delete_kv_data=backend.delete,
+    )
+
+
+def _partial_services(
+    backend: _Backend,
+    *,
+    get: bool = True,
+    put: bool = True,
+    delete: bool = True,
+) -> PluginServices:
+    return PluginServices(
+        config={"sylanne_alpha_kernel_persist_debounce_seconds": 60.0},
+        get_kv_data=backend.get if get else None,
+        put_kv_data=backend.put if put else None,
+        delete_kv_data=backend.delete if delete else None,
     )
 
 
@@ -206,6 +241,148 @@ def test_explicit_services_guard_does_not_fail_open_when_plugin_has_no_kv() -> N
         await persistence.save_sylanne_memory_state(session_key, empty)
 
         assert backend.values[primary_key] == archive
+
+    asyncio.run(go())
+
+
+def test_explicit_services_without_delete_preserve_bytes_and_pending_intent() -> None:
+    async def go() -> None:
+        service_backend = _Backend()
+        plugin_backend = _Backend()
+        plugin = _PluginWithDifferentKv(plugin_backend)
+        persistence = StatePersistence(
+            plugin,
+            services=_partial_services(service_backend, delete=False),
+        )
+        persistence._pending_delete_scan_done = True
+        session_key = "sess:missing-delete"
+        safe = persistence._safe_session_key(session_key)
+        protected_keys = (
+            persistence.sylanne_memory_kv_key(session_key),
+            persistence.sylanne_memory_backup_v2_kv_key(session_key),
+            quarantine_kv_key(safe),
+        )
+        for key in protected_keys:
+            service_backend.values[key] = {"protected": key}
+        service_backend.values[PENDING_DELETE_INDEX_KV_KEY] = {
+            "version": 1,
+            "entries": {},
+        }
+
+        assert await persistence._delete_kv_key_with_retry(protected_keys[0]) is False
+        await persistence.delete_sylanne_memory_state(session_key)
+
+        assert all(key in service_backend.values for key in protected_keys)
+        assert safe in persistence._pending_delete_mirror
+        assert safe in service_backend.values[PENDING_DELETE_INDEX_KV_KEY]["entries"]
+        before_clear = _backend_bytes(service_backend)
+        assert await persistence._clear_pending_delete(session_key) is False
+        assert _backend_bytes(service_backend) == before_clear
+        assert plugin_backend.calls == []
+
+    asyncio.run(go())
+
+
+def test_explicit_services_without_get_cannot_hydrate_or_overwrite_archives() -> None:
+    async def go() -> None:
+        service_backend = _Backend()
+        plugin_backend = _Backend()
+        plugin = _PluginWithDifferentKv(plugin_backend)
+        persistence = StatePersistence(
+            plugin,
+            services=_partial_services(service_backend, get=False),
+        )
+
+        hydrate_key = "sess:missing-get-hydrate"
+        hydrate_primary = persistence.sylanne_memory_kv_key(hydrate_key)
+        protected_hydrate = {
+            "version": "2.0.0",
+            "records": [{"text": "protected hydrate archive"}],
+        }
+        service_backend.values[hydrate_primary] = copy.deepcopy(protected_hydrate)
+        live = MemorySystem()
+        plugin._store.memory_systems.set(hydrate_key, live)
+
+        await persistence.hydrate_memory_system(hydrate_key)
+        assert live._hydrated is False
+        await persistence.save_sylanne_memory_state(hydrate_key, live)
+        assert service_backend.values[hydrate_primary] == protected_hydrate
+
+        backup_key = "sess:missing-get-backup"
+        backup_primary = persistence.sylanne_memory_kv_key(backup_key)
+        protected_v2 = {
+            "version": "2.0.0",
+            "records": [{"text": "protected v2 archive"}],
+        }
+        service_backend.values[backup_primary] = copy.deepcopy(protected_v2)
+        await persistence.save_sylanne_memory_state(
+            backup_key,
+            _memory("replacement must be refused", backup_key),
+        )
+        assert service_backend.values[backup_primary] == protected_v2
+        assert (
+            persistence.sylanne_memory_backup_v2_kv_key(backup_key)
+            not in service_backend.values
+        )
+        assert plugin_backend.calls == []
+
+    asyncio.run(go())
+
+
+def test_malformed_pending_delete_index_stays_unresolved_and_immutable() -> None:
+    malformed_blobs: tuple[Any, ...] = (
+        "not-a-dict",
+        {"version": 99, "entries": {}},
+        {"version": 1, "entries": {"sess:bad-entry": "not-metadata"}},
+    )
+
+    async def probe(blob: Any) -> None:
+        backend = _Backend()
+        plugin = _PluginWithoutKv()
+        persistence = StatePersistence(plugin, services=_services(backend))
+        persistence._pending_delete_mirror["sess:existing"] = {
+            "epoch": 7,
+            "ts": 8.0,
+        }
+        backend.values[PENDING_DELETE_INDEX_KV_KEY] = copy.deepcopy(blob)
+        before = _backend_bytes(backend)
+
+        await persistence._scan_pending_deletes()
+        assert persistence._pending_delete_scan_done is False
+        assert "sess:existing" in persistence._pending_delete_mirror
+        assert await persistence._clear_pending_delete_safe("sess:existing") is False
+        assert _backend_bytes(backend) == before
+
+    async def go() -> None:
+        for blob in malformed_blobs:
+            await probe(blob)
+
+    asyncio.run(go())
+
+
+def test_memory_shards_use_only_explicit_service_callbacks() -> None:
+    async def go() -> None:
+        backend = _Backend()
+        plugin = _PluginWithLegacyShardKv()
+        persistence = StatePersistence(plugin, services=_services(backend))
+        session_key = "sess:shard-service"
+        shard_key = persistence._shard_key(session_key, "memory")
+        memory_data = {"items": [{"text": "service-owned"}]}
+
+        assert await persistence.persist_memory_shard(session_key, memory_data) is True
+        assert json.loads(backend.values[shard_key]) == memory_data
+        assert await persistence.load_memory_shard(session_key) == memory_data
+        assert plugin.kv.calls == []
+
+        fenced = StatePersistence(
+            plugin,
+            services=_partial_services(backend, get=False, put=False),
+        )
+        backend_before = _backend_bytes(backend)
+        assert await fenced.persist_memory_shard(session_key, {"blocked": True}) is False
+        assert await fenced.load_memory_shard(session_key) is None
+        assert _backend_bytes(backend) == backend_before
+        assert plugin.kv.calls == []
 
     asyncio.run(go())
 

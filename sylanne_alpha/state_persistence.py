@@ -265,6 +265,9 @@ class StatePersistence:
         # _scan_pending_deletes 载入；扫描完成前为空。在此之前 WebUI load 一律不准入
         # store（只返回游离副本渲染），防抢跑的读把崩溃残留的删除意图漏检、复活归档。
         self._pending_delete_scan_done: bool = False
+        # 索引读失败或结构畸形时，禁止 register/clear 用当前进程镜像覆盖未知的
+        # 持久索引。只有后续一次完整、合法的扫描才能解除该闸门。
+        self._pending_delete_index_mutation_blocked: bool = False
         # v2.5.0 跨群 profile 软同步（§3/§4.1/§8 B1-B4）：per-person 锁，键为
         # f"{platform}:{sender_id}"，只护 PersonProfile 的读改写临界区
         # （load → 纯函数合并 → save），与 per-session 锁体系
@@ -566,6 +569,28 @@ class StatePersistence:
         self._kv_put()
         self._kv_delete()
         return self._services
+
+    def _kv_operation_ready(self, *required: str) -> bool:
+        """Return whether this authority supplies every callback for an operation."""
+        services = self._kv_services()
+        callbacks = {
+            "get": services.get_kv_data,
+            "put": services.put_kv_data,
+            "delete": services.delete_kv_data,
+        }
+        return all(callable(callbacks[name]) for name in required)
+
+    def _kv_absence_is_safe_noop(self) -> bool:
+        """Only a default authority with no KV callbacks at all is a true no-KV host."""
+        services = self._kv_services()
+        return not self._services_explicit and not any(
+            callable(callback)
+            for callback in (
+                services.get_kv_data,
+                services.put_kv_data,
+                services.delete_kv_data,
+            )
+        )
 
     # ------------------------------------------------------------------
     # Kernel 持久化
@@ -1237,7 +1262,13 @@ class StatePersistence:
             return True
         get_fn = self._kv_get()
         if not callable(get_fn):
-            return True  # 无 KV 读 API——本守卫不适用
+            if self._kv_absence_is_safe_noop():
+                return True
+            logger.warning(
+                "Sylanne memory guard: KV authority lacks get callback; "
+                f"fail-closed refusing un-hydrated overwrite ({session_key!r})"
+            )
+            return False
         kv_key = self.sylanne_memory_kv_key(session_key)
         try:
             existing = await get_fn(kv_key, None)
@@ -1280,16 +1311,23 @@ class StatePersistence:
         except Exception:
             return False
 
-    async def _delete_kv_best_effort(self, key: str) -> None:
-        """尽力删除一个 KV 键（无删除 API 或删除失败都只 debug 记录，不抛）。"""
+    async def _delete_kv_best_effort(self, key: str) -> bool:
+        """尽力删除一个 KV 键，并显式返回是否完成。"""
         delete_fn = self._kv_delete()
-        if callable(delete_fn):
-            try:
-                await delete_fn(key)
-            except Exception as e:
-                logger.debug(
-                    f"Sylanne memory: best-effort delete of {key!r} failed: {e}"
-                )
+        if not callable(delete_fn):
+            if self._kv_absence_is_safe_noop():
+                return True
+            logger.warning(
+                f"Sylanne memory: refusing delete of {key!r}; KV authority lacks "
+                "delete callback"
+            )
+            return False
+        try:
+            await delete_fn(key)
+            return True
+        except Exception as e:
+            logger.debug(f"Sylanne memory: best-effort delete of {key!r} failed: {e}")
+            return False
 
     async def save_sylanne_memory_state(
         self, session_key: str, state: Any = None
@@ -1389,7 +1427,13 @@ class StatePersistence:
         get_fn = self._kv_get()
         put_fn = self._kv_put()
         if not callable(get_fn) or not callable(put_fn):
-            return True  # 无 KV API（如纯文件回退环境）——本闸门不适用，不阻塞写入
+            if self._kv_absence_is_safe_noop():
+                return True
+            logger.warning(
+                "Sylanne memory v3 backup: KV authority lacks required get/put "
+                f"callbacks; fail-closed skipping write ({session_key!r})"
+            )
+            return False
 
         try:
             already_backed_up = await get_fn(backup_key, None)
@@ -1410,7 +1454,8 @@ class StatePersistence:
                 "Sylanne memory v3 backup: 既有备份完整性校验失败（损坏/CRC 不符），"
                 f"删除后重新备份再放行 v3 写入 ({session_key!r})"
             )
-            await self._delete_kv_best_effort(backup_key)
+            if not await self._delete_kv_best_effort(backup_key):
+                return False
 
         try:
             existing = await get_fn(kv_key, None)
@@ -1545,7 +1590,7 @@ class StatePersistence:
     #     drainer 任务里），反过来 submit 同一 session 队列会命中
     #     re-entrancy 断言（永久停摆）。
 
-    async def _persist_pending_delete_index_locked(self) -> None:
+    async def _persist_pending_delete_index_locked(self) -> bool:
         """把当前 `self._pending_delete_mirror` 整体写回索引 KV。
 
         调用方必须已经持有 `self._pending_delete_lock`——本方法自身不加锁
@@ -1554,53 +1599,73 @@ class StatePersistence:
         在锁保护下维护的权威状态，直接整体落盘既避免了一次多余的 KV 读，也
         避免了"读到的 KV 快照与当前镜像不一致"这另一类 TOCTOU。
 
-        Fail-safe：KV 写失败只记 warning，绝不向上抛出——不能让索引记账失败
-        中断调用方所在的 delete/purge op 的其余步骤。进程内镜像已经是最新
-        状态，本进程内的 fail-closed 判定不受影响；只有"跨重启"这一层保护
-        会打折扣（这次落盘失败、进程恰好又崩溃，则这条 entry 在下次启动的
-        索引里不可见）——这与本索引本身"尽力而为的跨重启防护"定位一致，
-        不是本次改动新增的数据丢失风险。
+        Fail-closed：KV 写失败不抛异常，但返回 False。register 调用方据此停止
+        后续破坏性删除并保留进程内镜像；clear 调用方则恢复刚摘除的镜像 entry，
+        绝不把"索引没写成"误报成"删除意图已安全记账/清除"。
         """
+        if self._pending_delete_index_mutation_blocked:
+            return False
         put_fn = self._kv_put()
         if not callable(put_fn):
-            return
+            return self._kv_absence_is_safe_noop()
         blob = {"version": 1, "entries": dict(self._pending_delete_mirror)}
         try:
             await put_fn(PENDING_DELETE_INDEX_KV_KEY, blob)
+            return True
         except Exception as e:
             logger.warning(
                 "Sylanne memory pending-delete index KV persist failed (in-process "
                 f"mirror still updated; cross-restart protection degraded for this "
                 f"entry until next successful persist): {e}"
             )
+            return False
 
-    async def _register_pending_delete_safe(self, safe: str, epoch: int) -> None:
+    async def _register_pending_delete_safe(self, safe: str, epoch: int) -> bool:
         """按已经安全化的 key 登记（scan 只知道 safe，不知道原始 session_key）。"""
         async with self._pending_delete_lock:
+            if self._pending_delete_index_mutation_blocked:
+                return False
             self._pending_delete_mirror[safe] = {"epoch": epoch, "ts": time.time()}
-            await self._persist_pending_delete_index_locked()
+            return await self._persist_pending_delete_index_locked()
 
-    async def _clear_pending_delete_safe(self, safe: str) -> None:
+    async def _clear_pending_delete_safe(self, safe: str) -> bool:
         """按已经安全化的 key 摘除（scan 只知道 safe，不知道原始 session_key）。"""
         async with self._pending_delete_lock:
-            self._pending_delete_mirror.pop(safe, None)
-            await self._persist_pending_delete_index_locked()
+            if self._pending_delete_index_mutation_blocked:
+                return False
+            if not self._kv_operation_ready("put", "delete"):
+                if self._kv_absence_is_safe_noop():
+                    self._pending_delete_mirror.pop(safe, None)
+                    return True
+                logger.warning(
+                    "Sylanne memory pending-delete clear refused: KV authority lacks "
+                    "put/delete callback"
+                )
+                return False
+            previous = self._pending_delete_mirror.pop(safe, None)
+            if await self._persist_pending_delete_index_locked():
+                return True
+            if previous is not None:
+                self._pending_delete_mirror[safe] = previous
+            return False
 
-    async def _register_pending_delete(self, session_key: str, epoch: int) -> None:
+    async def _register_pending_delete(self, session_key: str, epoch: int) -> bool:
         """delete-class op 的【首步】——登记本 session 的跨重启 pending-delete
         entry（进程内镜像 + 持久化索引 KV 双写，全局锁串行）。必须在任何记忆键
         删除动作之前调用，见各 op（`_delete_sylanne_memory_state_op` /
         `_purge_session_after_meltdown_impl` / `_session_deleted_delete_op`）
         开头的调用点。
         """
-        await self._register_pending_delete_safe(self._safe_session_key(session_key), epoch)
+        return await self._register_pending_delete_safe(
+            self._safe_session_key(session_key), epoch
+        )
 
-    async def _clear_pending_delete(self, session_key: str) -> None:
+    async def _clear_pending_delete(self, session_key: str) -> bool:
         """delete-class op 的【末步】——仅在该 op 的全部记忆键删除 + kernel 文件
         scrub（以及 purge/session-delete 各自的非记忆键清理）都跑完之后才调用。
         【绝不】在 save 路径调用——见本节顶部"证据销毁"红线。
         """
-        await self._clear_pending_delete_safe(self._safe_session_key(session_key))
+        return await self._clear_pending_delete_safe(self._safe_session_key(session_key))
 
     def _has_unresolved_pending_delete(self, session_key: str) -> bool:
         """PR-4 红队 must-fix 核心闸门：判定某 session 是否存在【任一来源】的
@@ -1682,14 +1747,24 @@ class StatePersistence:
         整体载入再逐条 finish，保证任何一次 clear 触发的整体快照落盘都已经
         包含了全部尚未处理的 entry。
         """
+        self._pending_delete_scan_done = False
         get_fn = self._kv_get()
         if not callable(get_fn):
-            # 无 KV API = 无持久索引可扫、无跨重启残留可能——放行 load-admit（无风险）。
-            self._pending_delete_scan_done = True
+            if self._kv_absence_is_safe_noop():
+                # 只有默认构造且三个 callback 全缺，才能证明宿主根本没有 KV 后端。
+                self._pending_delete_index_mutation_blocked = False
+                self._pending_delete_scan_done = True
+            else:
+                self._pending_delete_index_mutation_blocked = True
+                logger.error(
+                    "Sylanne memory pending-delete scan: KV authority lacks get "
+                    "callback; retaining unresolved fail-closed state"
+                )
             return
         try:
             blob = await get_fn(PENDING_DELETE_INDEX_KV_KEY, None)
         except Exception as e:
+            self._pending_delete_index_mutation_blocked = True
             logger.error(
                 "Sylanne memory pending-delete scan: index read failed, aborting "
                 f"scan (will retry next restart): {e}"
@@ -1697,30 +1772,62 @@ class StatePersistence:
             # 索引读失败：scan_done 保持 False → load-admit 继续 fail-closed（WebUI 只读
             # 渲染仍可用），绝不因读不到索引就 fail-open 准入。
             return
-        if not isinstance(blob, dict):
-            self._pending_delete_scan_done = True  # 索引不存在/损坏=无未决残留，放行 load-admit
+        if blob is None:
+            self._pending_delete_index_mutation_blocked = False
+            self._pending_delete_scan_done = True
+            return
+        if (
+            not isinstance(blob, dict)
+            or type(blob.get("version")) is not int
+            or blob.get("version") != 1
+        ):
+            self._pending_delete_index_mutation_blocked = True
+            logger.error(
+                "Sylanne memory pending-delete scan: malformed index envelope; "
+                "retaining it unchanged and blocking mutation"
+            )
             return
         raw_entries = blob.get("entries")
-        if not isinstance(raw_entries, dict) or not raw_entries:
-            self._pending_delete_scan_done = True  # 空索引=无未决残留，放行
+        if not isinstance(raw_entries, dict):
+            self._pending_delete_index_mutation_blocked = True
+            logger.error(
+                "Sylanne memory pending-delete scan: malformed entries schema; "
+                "retaining index unchanged and blocking mutation"
+            )
+            return
+        if not raw_entries:
+            self._pending_delete_index_mutation_blocked = False
+            self._pending_delete_scan_done = True
             return
 
         valid_entries: dict[str, dict] = {}
         for safe, meta in raw_entries.items():
-            if not isinstance(safe, str) or not isinstance(meta, dict):
-                continue
-            try:
-                epoch = int(meta.get("epoch", 0))
-            except (TypeError, ValueError):
-                epoch = 0
-            try:
-                ts = float(meta.get("ts", 0.0))
-            except (TypeError, ValueError):
-                ts = 0.0
+            if not isinstance(safe, str) or not safe or not isinstance(meta, dict):
+                self._pending_delete_index_mutation_blocked = True
+                logger.error(
+                    "Sylanne memory pending-delete scan: malformed entry; retaining "
+                    "entire index unchanged and blocking mutation"
+                )
+                return
+            epoch = meta.get("epoch")
+            ts = meta.get("ts")
+            if (
+                isinstance(epoch, bool)
+                or not isinstance(epoch, int)
+                or epoch < 0
+                or isinstance(ts, bool)
+                or not isinstance(ts, (int, float))
+                or not math.isfinite(float(ts))
+                or float(ts) < 0.0
+            ):
+                self._pending_delete_index_mutation_blocked = True
+                logger.error(
+                    "Sylanne memory pending-delete scan: malformed entry metadata; "
+                    "retaining entire index unchanged and blocking mutation"
+                )
+                return
             valid_entries[safe] = {"epoch": epoch, "ts": ts}
-        if not valid_entries:
-            self._pending_delete_scan_done = True  # 无有效 entry，放行
-            return
+        self._pending_delete_index_mutation_blocked = False
 
         # 先整体载入镜像（不落盘——KV 里已经是这份内容，原样镜像不算改动），
         # 再逐条决断，避免上面文档段落说明的排序坑。
@@ -2097,6 +2204,12 @@ class StatePersistence:
             get_fn = self._kv_get()
             if callable(get_fn):
                 data = await get_fn(kv_key, None)
+            elif not self._kv_absence_is_safe_noop():
+                logger.warning(
+                    "Sylanne memory hydrate: KV authority lacks get callback; "
+                    f"leaving {session_key!r} un-hydrated (fail-closed)"
+                )
+                read_ok = False
         except Exception as e:
             # FIX A：读失败 ≠ 归档不存在。把异常吞成 data=None 再走"空归档→翻
             # _hydrated"的老路，会让一次瞬时 DB 抖动就解除守卫、复活重启清零。
@@ -2202,12 +2315,18 @@ class StatePersistence:
         PR-4 gate CRITICAL 修复：返回【是否删除成功】。以前无返回值 + fail-safe 不抛，
         调用方（op 壳 / scan）据此【无条件】摘除 pending-delete 索引 entry——一次瞬时
         KV 删除故障就会让 entry 被摘、非空归档幸存 = hydrate/load 复活。现在把成败上抛，
-        调用方只在【真删掉了】才 clear entry。True=已删（或无 KV API 无键可删）；
-        False=重试耗尽仍失败。
+        调用方只在【真删掉了】才 clear entry。True=已删，或默认构造已确认宿主完全
+        没有 KV 后端；False=重试耗尽，或显式/部分 authority 缺 delete callback。
         """
         delete_fn = self._kv_delete()
         if not callable(delete_fn):
-            return True  # 无 KV API：无键可删，视为成功（不阻塞 entry 摘除）
+            if self._kv_absence_is_safe_noop():
+                return True
+            logger.warning(
+                f"Sylanne memory delete: refusing {key!r}; KV authority lacks "
+                "delete callback"
+            )
+            return False
         last_exc: Exception | None = None
         for attempt in range(attempts):
             try:
@@ -2287,7 +2406,7 @@ class StatePersistence:
         if fut is not None:
             await fut
 
-    async def _delete_sylanne_memory_state_op(self, session_key: str) -> None:
+    async def _delete_sylanne_memory_state_op(self, session_key: str) -> bool:
         """standalone 删除 op（PR-4）——`delete_sylanne_memory_state` 壳提交的
         factory 本体。首尾包裹跨重启 pending-delete 索引记账：register（首步）→
         `_delete_sylanne_memory_state_impl`（三键删除 + kernel 文件 scrub）→
@@ -2298,16 +2417,18 @@ class StatePersistence:
         只准经咽喉 op 调用（勿直接 await `_delete_sylanne_memory_state_impl` 再
         自行 register/clear——那会绕开这里统一的记账时机）。
         """
-        await self._register_pending_delete(
+        if not await self._register_pending_delete(
             session_key, epoch=self._throat.current_epoch(session_key)
-        )
+        ):
+            return False
         deleted_ok = await self._delete_sylanne_memory_state_impl(session_key)
         # PR-4 gate CRITICAL：只有记忆三键 + scrub 全删成功才摘除 entry。impl fail-safe
         # 不抛（一次瞬时 KV 删除故障不异常），故不能无条件 clear——否则 entry 被摘、
         # 非空归档幸存 = hydrate/load 复活。失败则保留 entry，交下次启动
         # _scan_pending_deletes / 管理员 purge 重试。
         if deleted_ok:
-            await self._clear_pending_delete(session_key)
+            return await self._clear_pending_delete(session_key)
+        return False
 
     async def _delete_sylanne_memory_state_impl(self, session_key: str) -> bool:
         """delete 真逻辑——只准经咽喉 op 调用（勿直接 await，会绕过串行化 + 栅栏
@@ -2331,6 +2452,12 @@ class StatePersistence:
         """
         from .memory_legacy_formats import quarantine_kv_key
 
+        if not self._kv_operation_ready("delete") and not self._kv_absence_is_safe_noop():
+            logger.warning(
+                "Sylanne memory delete refused: KV authority lacks delete callback "
+                f"({session_key!r})"
+            )
+            return False
         self._p._store.sylanne_memory_cache.pop(session_key, None)
         safe = self._safe_session_key(session_key)
         all_deleted = True
@@ -2444,7 +2571,7 @@ class StatePersistence:
         if fut is not None:
             await fut
 
-    async def _purge_session_after_meltdown_impl(self, session_key: str) -> None:
+    async def _purge_session_after_meltdown_impl(self, session_key: str) -> bool:
         """purge 真逻辑——只准经咽喉 op 调用。
 
         内部调用 `_delete_sylanne_memory_state_impl`（【绝不】调用公开壳
@@ -2464,9 +2591,10 @@ class StatePersistence:
         无异常跑完后才会被执行到——中途抛异常则 entry 按设计意图原样保留，交
         `_scan_pending_deletes` 或管理员 purge 决断。
         """
-        await self._register_pending_delete(
+        if not await self._register_pending_delete(
             session_key, epoch=self._throat.current_epoch(session_key)
-        )
+        ):
+            return False
         deleted_ok = await self._delete_sylanne_memory_state_impl(session_key)
         delete_fn = self._kv_delete()
         if delete_fn and callable(delete_fn) and self.has_kv_api():
@@ -2484,7 +2612,8 @@ class StatePersistence:
         # PR-4 gate CRITICAL：仅当记忆三键 + scrub 全删成功才摘 entry（非记忆键 best-effort、
         # scan 只重试记忆键，故只 gate 记忆 impl）；失败保留 entry 交下次启动/admin。
         if deleted_ok:
-            await self._clear_pending_delete(session_key)
+            return await self._clear_pending_delete(session_key)
+        return False
 
     # ------------------------------------------------------------------
     # AstrBot ConversationManager 集成
@@ -2599,7 +2728,7 @@ class StatePersistence:
             fut.add_done_callback(lambda f: f.cancelled() or f.exception())
         logger.debug(f"Sylanne: session resources released for {session_key}")
 
-    async def _session_deleted_delete_op(self, session_key: str) -> None:
+    async def _session_deleted_delete_op(self, session_key: str) -> bool:
         """`_on_session_deleted` 的复合删除 op——只准经咽喉调用（跑在本 session 的
         drainer 任务内）。折合原 `_cleanup_kv_for_session` 的非记忆键清理 + 记忆三键
         删除（经 `_delete_sylanne_memory_state_impl`，非公开壳，也非
@@ -2612,9 +2741,10 @@ class StatePersistence:
         只在全部步骤无异常跑完后才会被执行到；中途抛异常则 entry 原样保留，交
         `_scan_pending_deletes`（下次重启）或管理员 purge 决断。
         """
-        await self._register_pending_delete(
+        if not await self._register_pending_delete(
             session_key, epoch=self._throat.current_epoch(session_key)
-        )
+        ):
+            return False
         deleted_ok = await self._delete_sylanne_memory_state_impl(session_key)
         if self.has_kv_api():
             safe = self._safe_session_key(session_key)
@@ -2631,7 +2761,8 @@ class StatePersistence:
         # .alpha.json 清扫已在上面的 _delete_sylanne_memory_state_impl 里做过（规范原语），此处不再重复。
         # PR-4 gate CRITICAL：仅当记忆三键 + scrub 全删成功才摘 entry；失败保留交下次启动/admin。
         if deleted_ok:
-            await self._clear_pending_delete(session_key)
+            return await self._clear_pending_delete(session_key)
+        return False
 
     def has_conversation_manager(self) -> bool:
         """检查 AstrBot ConversationManager 是否可用。"""
@@ -3162,24 +3293,31 @@ class StatePersistence:
         safe_key = session_key.replace(":", "_").replace("/", "_")[:50]
         return f"sylanne_shard_{safe_key}_{subsystem}"
 
-    def persist_memory_shard(self, session_key: str, memory_data: dict) -> None:
-        """按 session_key 分片存储记忆数据。"""
+    async def persist_memory_shard(self, session_key: str, memory_data: dict) -> bool:
+        """按 session_key 分片存储记忆数据，仅使用绑定的服务权限。"""
         key = self._shard_key(session_key, "memory")
-        # 通过 plugin 的 KV 接口存储
-        kv = getattr(self._p, 'kv', None) or getattr(self._p, '_kv', None)
-        if kv and hasattr(kv, 'set'):
-            import json
-            kv.set(key, json.dumps(memory_data))
+        put_fn = self._kv_put()
+        if not callable(put_fn):
+            return False
+        try:
+            await put_fn(key, json.dumps(memory_data))
+            return True
+        except Exception as exc:
+            logger.warning(f"Sylanne memory shard persist failed for {key!r}: {exc}")
+            return False
 
-    def load_memory_shard(self, session_key: str) -> dict | None:
-        """加载指定 session 的记忆分片。"""
+    async def load_memory_shard(self, session_key: str) -> dict | None:
+        """加载指定 session 的记忆分片，仅使用绑定的服务权限。"""
         key = self._shard_key(session_key, "memory")
-        kv = getattr(self._p, 'kv', None) or getattr(self._p, '_kv', None)
-        if kv and hasattr(kv, 'get'):
-            import json
-            raw = kv.get(key)
+        get_fn = self._kv_get()
+        if not callable(get_fn):
+            return None
+        try:
+            raw = await get_fn(key, None)
             if raw:
                 return json.loads(raw)
+        except Exception as exc:
+            logger.warning(f"Sylanne memory shard load failed for {key!r}: {exc}")
         return None
 
     # ------------------------------------------------------------------
