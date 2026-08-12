@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from sylanne_alpha.plugin_services import PluginServices
 from sylanne_alpha.state_persistence import StatePersistence
 
 
@@ -53,8 +54,10 @@ async def test_registered_callback_is_awaitable_and_raw_umo_releases_no_scope() 
     registry = _RecordingRegistry()
     persistence = object.__new__(StatePersistence)
     persistence._p = SimpleNamespace(
-        context=SimpleNamespace(conversation_manager=manager),
         _scope_runtime_registry=registry,
+    )
+    persistence._services = PluginServices(
+        context=SimpleNamespace(conversation_manager=manager)
     )
 
     assert persistence.init_conversation_manager() is manager
@@ -100,8 +103,10 @@ async def test_registered_callback_preserves_legacy_sync_cleanup() -> None:
     cleaned_timers: list[str] = []
     persistence = object.__new__(StatePersistence)
     persistence._p = SimpleNamespace(
-        context=SimpleNamespace(conversation_manager=manager),
         _store=store,
+    )
+    persistence._services = PluginServices(
+        context=SimpleNamespace(conversation_manager=manager)
     )
     persistence._throat = throat
     persistence._current_memory_occupant = lambda _session_key: None

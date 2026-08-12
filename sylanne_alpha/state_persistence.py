@@ -15,7 +15,9 @@ import asyncio
 import json
 import logging
 import math
+import threading
 import time
+import weakref
 import zlib
 from typing import TYPE_CHECKING, Any
 
@@ -86,17 +88,28 @@ class _DirtyTracker:
             return bool(self._subsystems)
 
 
-# 模块级实例——StatePersistence.__init__ 中会替换为自己的实例
-_dirty = _DirtyTracker()
+_persistence_owners: weakref.WeakSet[StatePersistence] = weakref.WeakSet()
+_persistence_owners_lock = threading.Lock()
 
-# 模块级活跃持久化实例引用——StatePersistence.__init__ 中绑定。
-# 让向后兼容的模块级 mark_dirty() 能触达实例级的合并落盘调度（debounce），
-# 无需调用方持有 StatePersistence 句柄。多实例/热重载时指向最后一次构造的实例。
-_active_persistence: StatePersistence | None = None
+
+def _register_persistence_owner(owner: StatePersistence) -> None:
+    with _persistence_owners_lock:
+        _persistence_owners.add(owner)
+
+
+def _sole_persistence_owner() -> StatePersistence | None:
+    """Return the only live compatibility owner; ambiguity fails closed."""
+    with _persistence_owners_lock:
+        owners = list(_persistence_owners)
+    return owners[0] if len(owners) == 1 else None
 
 
 def mark_dirty(subsystem: str, session_key: str | None = None) -> None:
     """标记某子系统为脏（需要持久化）。向后兼容的模块级 API。
+
+    仅当进程中恰有一个存活的 ``StatePersistence`` owner 时转发。多 Bot
+    owner 或无 owner 均属歧义，fail-closed no-op；生产多 Bot 调用方应持有并
+    调用对应实例的 ``mark_dirty``，不得用裸 session 字符串猜 owner。
 
     Args:
         subsystem: 子系统名称（personality/memory/spine/session）。
@@ -105,19 +118,21 @@ def mark_dirty(subsystem: str, session_key: str | None = None) -> None:
             缓解多会话并发直写 KV/文件造成的 IO 突发。不提供时仅标记脏集合
             （完全向后兼容旧调用）。
     """
-    _dirty.mark(subsystem)
-    if session_key is not None and _active_persistence is not None:
-        _active_persistence.schedule_kernel_persist(session_key)
+    owner = _sole_persistence_owner()
+    if owner is not None:
+        owner.mark_dirty(subsystem, session_key)
 
 
 def is_dirty() -> bool:
     """是否有任何子系统需要持久化。"""
-    return _dirty.is_dirty()
+    owner = _sole_persistence_owner()
+    return owner.is_dirty() if owner is not None else False
 
 
 def swap_dirty() -> set[str]:
     """原子地取出当前脏集合并清空。"""
-    return _dirty.swap()
+    owner = _sole_persistence_owner()
+    return owner.swap_dirty() if owner is not None else set()
 
 
 def _kv_archive_has_content(data: Any) -> bool:
@@ -208,6 +223,7 @@ class StatePersistence:
         # class keeps ``_p`` as its canonical delegate.
         self._plugin = plugin
         self._session_state = session_state
+        self._services_explicit = services is not None
         if services is not None:
             self._services = services
         else:
@@ -224,10 +240,7 @@ class StatePersistence:
         # 多会话并发标记脏时，窗口内合并为单次 persist_kernel，缓解 2 核 2G VPS
         # 上的 IO 突发。键为 session_key，值为待触发的 TimerHandle。
         self._kernel_persist_timers: dict[str, asyncio.TimerHandle] = {}
-        # 绑定模块级活跃实例引用，让 mark_dirty(subsystem, session_key) 能触达
-        # 本实例的合并落盘调度，无需调用方持有 StatePersistence 句柄。
-        global _active_persistence
-        _active_persistence = self
+        self._dirty = _DirtyTracker()
         # MEM-02③：_store.memory_systems 是 BoundedDict(maxsize=100)，超容量时
         # LRU 驱逐——驱逐前若无回调，被逐出的会话记忆直接从内存态消失（未落盘的
         # 最长 9 个 tick 静默丢失），且下次访问该 session 会重建全新空 MemorySystem，
@@ -260,6 +273,19 @@ class StatePersistence:
         # session 锁语义。惰性建，无容量上限清理（人数量级远小于 session 数，
         # 且锁本身极轻量；若未来证明有界需要，仿 session_locks 加淘汰）。
         self._person_profile_locks: dict[str, asyncio.Lock] = {}
+        _register_persistence_owner(self)
+
+    def mark_dirty(self, subsystem: str, session_key: str | None = None) -> None:
+        """Mark only this persistence owner and optionally schedule its flush."""
+        self._dirty.mark(subsystem)
+        if session_key is not None:
+            self.schedule_kernel_persist(session_key)
+
+    def is_dirty(self) -> bool:
+        return self._dirty.is_dirty()
+
+    def swap_dirty(self) -> set[str]:
+        return self._dirty.swap()
 
     def _get_person_profile_lock(self, platform: str, sender_id: str) -> asyncio.Lock:
         key = f"{platform}:{sender_id}"
@@ -377,7 +403,7 @@ class StatePersistence:
         if not await self._refuse_unhydrated_overwrite(session_key, state):
             return
         kv_key = self.sylanne_memory_kv_key(session_key)
-        put_fn = getattr(self._p, "put_kv_data", None)
+        put_fn = self._kv_put()
         if put_fn and callable(put_fn):
             data = state.to_dict() if hasattr(state, "to_dict") else state
             # MEM-01：与 save_sylanne_memory_state 同一条闸门——驱逐/释放场景也是
@@ -407,7 +433,7 @@ class StatePersistence:
 
     def has_kv_api(self) -> bool:
         """检查 AstrBot KV 存储 API 是否可用。"""
-        return self._services.put_kv_data is not None
+        return callable(self._kv_put())
 
     def _legacy_memory_fallback_forbidden(self) -> bool:
         """Return whether this compatibility object has lost raw-session authority.
@@ -518,15 +544,28 @@ class StatePersistence:
 
     def _kv_put(self):
         """获取 KV 写入回调。"""
+        if not self._services_explicit:
+            self._services.put_kv_data = getattr(self._p, "put_kv_data", None)
         return self._services.put_kv_data
 
     def _kv_get(self):
         """获取 KV 读取回调。"""
+        if not self._services_explicit:
+            self._services.get_kv_data = getattr(self._p, "get_kv_data", None)
         return self._services.get_kv_data
 
     def _kv_delete(self):
         """获取 KV 删除回调。"""
+        if not self._services_explicit:
+            self._services.delete_kv_data = getattr(self._p, "delete_kv_data", None)
         return self._services.delete_kv_data
+
+    def _kv_services(self) -> PluginServices:
+        """Return one callback-only KV authority for delegated helpers."""
+        self._kv_get()
+        self._kv_put()
+        self._kv_delete()
+        return self._services
 
     # ------------------------------------------------------------------
     # Kernel 持久化
@@ -554,7 +593,7 @@ class StatePersistence:
 
         import json as _json
 
-        dirty_set = swap_dirty() if is_dirty() else set()
+        dirty_set = self.swap_dirty() if self.is_dirty() else set()
         snapshot = host.kernel.snapshot()
 
         if dirty_set and self.has_kv_api():
@@ -582,7 +621,7 @@ class StatePersistence:
 
                 await _put_fn(kv_key, partial_snapshot)
             except Exception as e:
-                _dirty.restore(dirty_set)
+                self._dirty.restore(dirty_set)
                 logger.warning(f"Sylanne kernel KV persist: {e}", exc_info=True)
         # 始终写文件（向后兼容/回退），offload 到线程避免阻塞事件循环
         try:
@@ -637,14 +676,19 @@ class StatePersistence:
 
         lock = self._get_person_profile_lock(platform, sender_id)
         async with lock:
+            kv_services = self._kv_services()
             safe = self._safe_session_key(session_key)
             registered = await register_person_shelf_origin(
-                self._p, safe, platform, sender_id, str(identity.get("origin_id", "") or "")
+                kv_services,
+                safe,
+                platform,
+                sender_id,
+                str(identity.get("origin_id", "") or ""),
             )
             if not registered:
                 return  # B5：登记失败即跳过本轮 profile 落盘，绝不产生孤儿
 
-            profile = await load_person_profile(self._p, platform, sender_id)
+            profile = await load_person_profile(kv_services, platform, sender_id)
 
             body_snapshot = snapshot.get("body") if isinstance(snapshot, dict) else None
             body_snapshot = body_snapshot if isinstance(body_snapshot, dict) else {}
@@ -697,7 +741,7 @@ class StatePersistence:
                 tension=tension,
                 update_relationship_affect=settings.cross_relationship,
             )
-            await save_person_profile(self._p, platform, sender_id, new_profile)
+            await save_person_profile(kv_services, platform, sender_id, new_profile)
 
     def _extract_dirty_snapshot(
         self, snapshot: dict[str, Any], dirty_set: set[str]
@@ -1191,7 +1235,7 @@ class StatePersistence:
             return True
         if getattr(state, "_hydrated", True):
             return True
-        get_fn = getattr(self._p, "get_kv_data", None)
+        get_fn = self._kv_get()
         if not callable(get_fn):
             return True  # 无 KV 读 API——本守卫不适用
         kv_key = self.sylanne_memory_kv_key(session_key)
@@ -1238,7 +1282,7 @@ class StatePersistence:
 
     async def _delete_kv_best_effort(self, key: str) -> None:
         """尽力删除一个 KV 键（无删除 API 或删除失败都只 debug 记录，不抛）。"""
-        delete_fn = getattr(self._p, "delete_kv_data", None)
+        delete_fn = self._kv_delete()
         if callable(delete_fn):
             try:
                 await delete_fn(key)
@@ -1342,8 +1386,8 @@ class StatePersistence:
         """
         import json as _json
 
-        get_fn = getattr(self._p, "get_kv_data", None)
-        put_fn = getattr(self._p, "put_kv_data", None)
+        get_fn = self._kv_get()
+        put_fn = self._kv_put()
         if not callable(get_fn) or not callable(put_fn):
             return True  # 无 KV API（如纯文件回退环境）——本闸门不适用，不阻塞写入
 
@@ -1454,8 +1498,8 @@ class StatePersistence:
 
         safe = self._safe_session_key(session_key)
         key = quarantine_kv_key(safe)
-        get_fn = getattr(self._p, "get_kv_data", None)
-        put_fn = getattr(self._p, "put_kv_data", None)
+        get_fn = self._kv_get()
+        put_fn = self._kv_put()
         if not callable(get_fn) or not callable(put_fn):
             return
         try:
@@ -1517,7 +1561,7 @@ class StatePersistence:
         索引里不可见）——这与本索引本身"尽力而为的跨重启防护"定位一致，
         不是本次改动新增的数据丢失风险。
         """
-        put_fn = getattr(self._p, "put_kv_data", None)
+        put_fn = self._kv_put()
         if not callable(put_fn):
             return
         blob = {"version": 1, "entries": dict(self._pending_delete_mirror)}
@@ -1638,7 +1682,7 @@ class StatePersistence:
         整体载入再逐条 finish，保证任何一次 clear 触发的整体快照落盘都已经
         包含了全部尚未处理的 entry。
         """
-        get_fn = getattr(self._p, "get_kv_data", None)
+        get_fn = self._kv_get()
         if not callable(get_fn):
             # 无 KV API = 无持久索引可扫、无跨重启残留可能——放行 load-admit（无风险）。
             self._pending_delete_scan_done = True
@@ -1895,7 +1939,7 @@ class StatePersistence:
             return live_state
         # 从 KV 存储加载
         kv_key = self.sylanne_memory_kv_key(session_key)
-        get_fn = getattr(self._p, "get_kv_data", None)
+        get_fn = self._kv_get()
         if get_fn and callable(get_fn):
             data = await get_fn(kv_key, None)
             if data is not None:
@@ -2050,7 +2094,7 @@ class StatePersistence:
         data: Any = None
         try:
             kv_key = self.sylanne_memory_kv_key(session_key)
-            get_fn = getattr(self._p, "get_kv_data", None)
+            get_fn = self._kv_get()
             if callable(get_fn):
                 data = await get_fn(kv_key, None)
         except Exception as e:
@@ -2161,7 +2205,7 @@ class StatePersistence:
         调用方只在【真删掉了】才 clear entry。True=已删（或无 KV API 无键可删）；
         False=重试耗尽仍失败。
         """
-        delete_fn = getattr(self._p, "delete_kv_data", None)
+        delete_fn = self._kv_delete()
         if not callable(delete_fn):
             return True  # 无 KV API：无键可删，视为成功（不阻塞 entry 摘除）
         last_exc: Exception | None = None
@@ -2317,11 +2361,12 @@ class StatePersistence:
                 purge_person_shelf_by_origin,
             )
 
-            shelf_origins = await load_person_shelf_origin_index(self._p, safe)
+            kv_services = self._kv_services()
+            shelf_origins = await load_person_shelf_origin_index(kv_services, safe)
             for entry in shelf_origins:
                 try:
                     await purge_person_shelf_by_origin(
-                        self._p,
+                        kv_services,
                         entry["platform"],
                         entry["sender_id"],
                         entry["origin_id"],
@@ -2354,7 +2399,7 @@ class StatePersistence:
                     seen_people.add(person_key)
                     try:
                         await reset_person_profile_transient(
-                            self._p, entry["platform"], entry["sender_id"]
+                            kv_services, entry["platform"], entry["sender_id"]
                         )
                     except Exception as exc:
                         logger.debug(
@@ -2368,7 +2413,7 @@ class StatePersistence:
                 )
 
             if shelf_origins:
-                await clear_person_shelf_origin_index(self._p, safe)
+                await clear_person_shelf_origin_index(kv_services, safe)
         except Exception as exc:
             logger.debug(
                 f"Sylanne person_shelf purge cascade failed for {session_key!r}: {exc}"
@@ -2423,7 +2468,7 @@ class StatePersistence:
             session_key, epoch=self._throat.current_epoch(session_key)
         )
         deleted_ok = await self._delete_sylanne_memory_state_impl(session_key)
-        delete_fn = getattr(self._p, "delete_kv_data", None)
+        delete_fn = self._kv_delete()
         if delete_fn and callable(delete_fn) and self.has_kv_api():
             safe = self._safe_session_key(session_key)
             for key in (
@@ -2454,8 +2499,7 @@ class StatePersistence:
         Returns:
             ConversationManager 实例，不可用时返回 None。
         """
-        p = self._p
-        context = getattr(p, "context", None)
+        context = self._services.context
         if context is None:
             return None
         conv_mgr = getattr(context, "conversation_manager", None)

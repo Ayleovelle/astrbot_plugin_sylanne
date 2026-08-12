@@ -10,7 +10,7 @@ from sylanne_alpha._engine.sylanne_core.compute.host import SylanneAlphaHost
 from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline
 from sylanne_alpha.memory_system import ConversationBuffer
 from sylanne_alpha.session_state_store import SessionStateStore
-from sylanne_alpha.state_persistence import StatePersistence, mark_dirty, swap_dirty
+from sylanne_alpha.state_persistence import StatePersistence
 from sylanne_alpha.v2core import integration as ig
 
 
@@ -103,8 +103,8 @@ def test_mark_dirty_triggers_kv_partial_write() -> None:
     sp = StatePersistence(p)  # type: ignore[arg-type]
     host = SylanneAlphaHost(root=root, session_key="sess:dirty")
     host.kernel.body.memory["_memory_system"] = {"tick": 1, "items": []}
-    swap_dirty()
-    mark_dirty("memory")
+    sp.swap_dirty()
+    sp.mark_dirty("memory")
 
     async def go() -> None:
         await sp.persist_kernel("sess:dirty", host)
