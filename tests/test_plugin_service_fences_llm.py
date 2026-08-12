@@ -442,6 +442,45 @@ def test_default_mode_retains_plugin_clock_cache_and_amnesia_compatibility() -> 
     assert plugin._amnesia_sessions == set()
 
 
+def test_default_observe_request_accepts_a_synchronous_compat_callback(
+    monkeypatch: Any,
+) -> None:
+    plugin = _PoisonPlugin()
+    calls: list[tuple[str, dict[str, Any]]] = []
+    debug_calls: list[tuple[Any, ...]] = []
+    plugin._observed_now = lambda: 303.0
+    plugin.observe_request = (
+        lambda session_key, **kwargs: calls.append((session_key, kwargs))
+    )
+    pipe = LLMRequestPipeline(plugin)  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        "sylanne_alpha.llm_request_pipeline.logger",
+        SimpleNamespace(debug=lambda *args: debug_calls.append(args)),
+    )
+
+    asyncio.run(
+        pipe._observe_request_compat(
+            "same",
+            text="hello",
+            confidence=0.75,
+            flags=["sync"],
+        )
+    )
+
+    assert calls == [
+        (
+            "same",
+            {
+                "text": "hello",
+                "confidence": 0.75,
+                "flags": ["sync"],
+                "now": 303.0,
+            },
+        )
+    ]
+    assert debug_calls == []
+
+
 class _ExplodingCaptureHost:
     def __init__(self) -> None:
         self.events: list[Any] = []

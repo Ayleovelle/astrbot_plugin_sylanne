@@ -26,7 +26,7 @@ import collections
 import contextvars
 import hashlib
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, Generic, Iterator, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Iterator, TypeVar, cast
 
 from sylanne_alpha.infra import BoundedDict
 
@@ -89,10 +89,10 @@ class SessionMap(Generic[V]):
     def get_or_create(self, key: str, factory: Any) -> V:
         """等价 setdefault，但用 factory 惰性构造，避免每次都建临时对象。"""
         if not self._allows_mutation(key):
-            return factory() if callable(factory) else factory
+            return cast(V, factory() if callable(factory) else factory)
         if key in self._d:
             return self._d[key]
-        value = factory() if callable(factory) else factory
+        value = cast(V, factory() if callable(factory) else factory)
         self._d[key] = value
         return value
 

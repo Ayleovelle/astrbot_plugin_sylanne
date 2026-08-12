@@ -4,12 +4,13 @@ import ast
 import logging
 import random
 import re
+from collections.abc import Mapping
 from typing import Any
 
 REALTIME_PLAN_SCHEMA_VERSION = "sylanne.alpha.realtime_plan.v1"
 
 
-def realtime_flags(cfg: dict[str, Any] | None) -> tuple[bool, bool]:
+def realtime_flags(cfg: Mapping[str, Any] | None) -> tuple[bool, bool]:
     """即时聊天两开关的单一读取入口：(realtime_enabled, intercept)。
 
     次要修复②（realtime 完整重做设计）：此前请求侧（llm_request_pipeline）只认

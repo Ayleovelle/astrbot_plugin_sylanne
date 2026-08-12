@@ -21,7 +21,7 @@ import random
 import time
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from sylanne_alpha.content_sanitizer import (
     sanitize_for_summary,
@@ -135,7 +135,7 @@ def _comp_timing_ns(comp: Any) -> dict[str, int]:
         return {}
 
 
-def _compute_injection_budget(gap_seconds: float, cfg: dict) -> int:
+def _compute_injection_budget(gap_seconds: float, cfg: Mapping[str, Any]) -> int:
     """根据对话间隔计算本轮总注入预算（字符数）。"""
     override = cfg.get("state_injection_max_added_chars")
     if override is not None:
@@ -146,7 +146,7 @@ def _compute_injection_budget(gap_seconds: float, cfg: dict) -> int:
     return 2400
 
 
-def _compute_absolute_ceiling(gap_seconds: float, cfg: dict) -> int:
+def _compute_absolute_ceiling(gap_seconds: float, cfg: Mapping[str, Any]) -> int:
     """leg-2(c) 动态注入绝对上限（gap 感知）。config 可 override 便于压测/调参。"""
     override = cfg.get("state_injection_absolute_ceiling_chars")
     if override is not None:
@@ -946,7 +946,7 @@ class LLMRequestPipeline:
         if getattr(self, "_services_explicit", False):
             await self._runtime_owner().aclose()
             return
-        tasks = tuple(getattr(self, "_owned_runtime_tasks", ()))
+        tasks = tuple(self._owned_runtime_tasks)
         for task in tasks:
             if not bool(getattr(task, "done", lambda: True)()):
                 task.cancel()
@@ -1001,7 +1001,7 @@ class LLMRequestPipeline:
                 raw = now_fn()
                 if type(raw) is bool:
                     raise ValueError("boolean is not an observed timestamp")
-                observed = float(raw)
+                observed = float(cast(Any, raw))
                 if math.isfinite(observed):
                     return observed
             except Exception:
@@ -1038,13 +1038,15 @@ class LLMRequestPipeline:
         if not callable(observe) or now is None:
             return
         try:
-            await observe(
+            result = observe(
                 session_key,
                 text=text,
                 confidence=confidence,
                 flags=flags,
                 now=now,
             )
+            if inspect.isawaitable(result):
+                await result
         except Exception as exc:
             logger.debug("Sylanne skip: %s", exc)
 
@@ -2420,7 +2422,7 @@ class LLMRequestPipeline:
                 # Without an authoritative clock an explicit pipeline may not
                 # consume or expire a pending outreach item.
                 runtime.pending_outreach_context.set(session_key, outreach_ctx)
-            elif expires_at and observed_now > expires_at:
+            elif expires_at and observed_now is not None and observed_now > expires_at:
                 self._mark_life_outcome(
                     outreach_ctx.get("event_id", ""), "dropped", session_key
                 )
