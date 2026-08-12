@@ -1305,10 +1305,14 @@ class ScopeRuntimeRegistry:
             raise ScopeMismatch("session scope generation is stale")
         if key in self._released_sessions:
             raise ScopeMismatch("session runtime has been released")
+        persona_runtime = self.for_scope(scope)
+        persona_runtime.store.claim_session(
+            scope.storage_token,
+            scope.scope_generation,
+        )
         runtime = self._sessions.get(key)
         if runtime is None:
             persistence = None if self._repository is None else ScopedPersistenceGateway(self._repository, scope)
-            persona_runtime = self.for_scope(scope)
             runtime = self._session_runtime_factory(
                 scope,
                 persona_runtime,
@@ -1789,6 +1793,10 @@ class ScopeRuntimeRegistry:
         self._drop_unused_transport_generation_fence(transport_identity)
         latest_key = (persona_key, scope.storage_token)
         current_key = self._latest_sessions.get(latest_key)
+        runtime.store.release_session(
+            scope.storage_token,
+            expected_generation=scope.scope_generation,
+        )
         if current_key is not None and current_key != session_key:
             return
         for owner in (runtime.self_core, runtime.autonomy_scheduler):
@@ -1798,7 +1806,6 @@ class ScopeRuntimeRegistry:
                     forget(scope.storage_token)
                 except Exception:
                     pass
-        runtime.store.release_session(scope.storage_token)
         runtime.memory_systems.pop(scope.storage_token, None)
         for cache_key, value in list(runtime.v2core_runtimes.items()):
             if isinstance(value, dict) and value.get("scope") == scope:

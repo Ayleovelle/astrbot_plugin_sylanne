@@ -560,6 +560,100 @@ def test_late_old_generation_cannot_replace_or_release_new_session(scopes) -> No
     assert registry.exact_session(new_scope).storage_token == new_scope.storage_token
 
 
+@pytest.mark.asyncio
+async def test_old_generation_release_drain_cannot_reclear_new_generation_state(
+    scopes,
+) -> None:
+    registry = ScopeRuntimeRegistry.for_test()
+    old_scope = scopes.bot_a_persona_a
+    new_scope = replace(old_scope, scope_generation=1)
+    registry.exact_session(old_scope)
+    store = registry.for_scope(old_scope).store
+    finish = asyncio.Event()
+
+    async def _old_task() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await finish.wait()
+
+    task = asyncio.create_task(_old_task())
+    store.segmented_tasks.set(old_scope.storage_token, task)
+    await asyncio.sleep(0)
+
+    registry.release_session(old_scope)
+    assert store._task_cleanup_waiters
+    new_runtime = registry.exact_session(new_scope)
+    store.last_user_texts.set(new_scope.storage_token, "new generation")
+    finish.set()
+    await asyncio.gather(*tuple(store._task_cleanup_waiters), return_exceptions=True)
+
+    assert task.cancelled()
+    assert new_runtime is registry.exact_session(new_scope)
+    assert store.last_user_texts.get(new_scope.storage_token) == "new generation"
+
+
+@pytest.mark.asyncio
+async def test_live_new_generation_fences_old_task_release_and_late_overwrite(
+    scopes,
+) -> None:
+    registry = ScopeRuntimeRegistry.for_test()
+    old_scope = scopes.bot_a_persona_a
+    new_scope = replace(old_scope, scope_generation=1)
+    registry.exact_session(old_scope)
+    store = registry.for_scope(old_scope).store
+    finish = asyncio.Event()
+
+    async def _old_task() -> None:
+        try:
+            await finish.wait()
+        finally:
+            store.last_user_texts.set(old_scope.storage_token, "old late write")
+
+    task = asyncio.create_task(_old_task())
+    store.segmented_tasks.set(old_scope.storage_token, task)
+    await asyncio.sleep(0)
+
+    registry.exact_session(new_scope)
+    store.last_user_texts.set(new_scope.storage_token, "new generation")
+    new_fragment: dict[str, object] = {"cancelled": False}
+    store.fragment_buffers.set(new_scope.storage_token, new_fragment)
+    registry.release_session(old_scope)
+    finish.set()
+    waiters = tuple(store._task_cleanup_waiters)
+    if waiters:
+        await asyncio.gather(*waiters, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    assert task.cancelled()
+    assert store.last_user_texts.get(new_scope.storage_token) == "new generation"
+    assert new_fragment["cancelled"] is False
+
+
+@pytest.mark.asyncio
+async def test_claimed_session_child_inherits_generation_but_unbound_task_cannot_write(
+    scopes,
+) -> None:
+    registry = ScopeRuntimeRegistry.for_test()
+    scope = scopes.bot_a_persona_a
+    registry.exact_session(scope)
+    store = registry.for_scope(scope).store
+    store.last_user_texts.set(scope.storage_token, "current")
+
+    async def _write(value: str) -> None:
+        store.last_user_texts.set(scope.storage_token, value)
+
+    await asyncio.create_task(_write("inherited child"))
+    assert store.last_user_texts.get(scope.storage_token) == "inherited child"
+
+    await asyncio.create_task(
+        _write("unbound child"),
+        context=contextvars.Context(),
+    )
+
+    assert store.last_user_texts.get(scope.storage_token) == "inherited child"
+
+
 def test_exact_session_queue_gateway_cannot_cross_persona_scope(
     scopes,
     tmp_path,

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextvars
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, Generic, Iterator, TypeVar
 
@@ -42,27 +43,47 @@ class SessionMap(Generic[V]):
     不直接触碰内部字典。经 store.register 登记后纳入 release_session 统一清理。
     """
 
-    __slots__ = ("_d", "_name")
+    __slots__ = ("_d", "_mutation_guard", "_name", "_on_set")
 
-    def __init__(self, name: str, backing: Any) -> None:
+    def __init__(
+        self,
+        name: str,
+        backing: Any,
+        *,
+        mutation_guard: Any = None,
+        on_set: Any = None,
+    ) -> None:
         self._name = name
         self._d = backing  # BoundedDict | dict
+        self._mutation_guard = mutation_guard
+        self._on_set = on_set
+
+    def _allows_mutation(self, key: str) -> bool:
+        return not callable(self._mutation_guard) or bool(self._mutation_guard(key))
 
     # ---- 基本语义存取 ----
     def get(self, key: str, default: V | None = None) -> V | None:
         return self._d.get(key, default)
 
     def set(self, key: str, value: V) -> None:
+        if not self._allows_mutation(key):
+            return
         self._d[key] = value
+        if callable(self._on_set):
+            self._on_set(self._name, key, value)
 
     def has(self, key: str) -> bool:
         return key in self._d
 
     def pop(self, key: str, default: V | None = None) -> V | None:
+        if not self._allows_mutation(key):
+            return default
         return self._d.pop(key, default)
 
     def get_or_create(self, key: str, factory: Any) -> V:
         """等价 setdefault，但用 factory 惰性构造，避免每次都建临时对象。"""
+        if not self._allows_mutation(key):
+            return factory() if callable(factory) else factory
         if key in self._d:
             return self._d[key]
         value = factory() if callable(factory) else factory
@@ -75,6 +96,8 @@ class SessionMap(Generic[V]):
         调用方须保证 key 已存在（先 get_or_create）。返回的是内部引用，
         对其 append/pop/字段赋值会就地反映到容器内。
         """
+        if not self._allows_mutation(key):
+            raise RuntimeError("stale session task cannot mutate current owner state")
         return self._d[key]
 
     # ---- 迭代/统计（清理、持久化、扫描用）----
@@ -127,6 +150,15 @@ class SessionStateStore:
         # 登记表：所有需按 session_key 清理的 SessionMap（register 自动追加）
         self._maps: list[SessionMap] = []
         self._task_cleanup_waiters: set[asyncio.Task[Any]] = set()
+        self._scope_aware_tokens: set[str] = set()
+        self._scope_generations: dict[str, int] = {}
+        self._session_generation_binding: contextvars.ContextVar[dict[str, int]] = (
+            contextvars.ContextVar(
+                f"sylanne-session-store-generation:{id(self)}",
+                default={},
+            )
+        )
+        self._generation_tasks: dict[tuple[str, int], set[Any]] = {}
 
         # ---- 业务核心（真语义）----
         self.hosts: SessionMap = self._reg("hosts", BoundedDict(maxsize=200))
@@ -267,9 +299,92 @@ class SessionStateStore:
         self._conv_sync_lock_leases: dict[str, int] = {}
 
     def _reg(self, name: str, backing: Any) -> SessionMap:
-        m: SessionMap = SessionMap(name, backing)
+        m: SessionMap = SessionMap(
+            name,
+            backing,
+            mutation_guard=self._allows_session_mutation,
+            on_set=self._register_task_value,
+        )
         self._maps.append(m)
         return m
+
+    def claim_session(self, session_key: str, generation: int) -> None:
+        """Claim an exact validated scope generation and fence its predecessor."""
+
+        self._scope_aware_tokens.add(session_key)
+        current = self._scope_generations.get(session_key)
+        if current is not None and generation < current:
+            raise RuntimeError("session generation cannot move backwards")
+        if current != generation:
+            self._scope_generations[session_key] = generation
+            self._cancel_fragment_buffer(
+                session_key,
+                self.fragment_buffers.get(session_key),
+            )
+            self._clear_session_state(session_key)
+            if current is not None:
+                self._cancel_generation_tasks(session_key, current)
+        self._authorize_current_task(session_key, generation)
+
+    def _authorize_current_task(self, session_key: str, generation: int) -> None:
+        bindings = dict(self._session_generation_binding.get())
+        bindings[session_key] = generation
+        self._session_generation_binding.set(bindings)
+
+    def _allows_session_mutation(self, session_key: str) -> bool:
+        if session_key not in self._scope_aware_tokens:
+            return True
+        bindings = self._session_generation_binding.get()
+        return bindings.get(session_key) == self._scope_generations.get(session_key)
+
+    def _register_task_value(self, map_name: str, session_key: str, value: Any) -> None:
+        if map_name not in {
+            "background_tasks",
+            "segmented_tasks",
+            "background_post_checkpoint_tasks",
+        }:
+            return
+        generation = self._scope_generations.get(session_key)
+        if generation is None:
+            return
+        collection = value if isinstance(value, (set, list, tuple)) else (value,)
+        for task in collection:
+            if task is None:
+                continue
+            generation_tasks = self._generation_tasks.setdefault(
+                (session_key, generation), set()
+            )
+            if task in generation_tasks:
+                continue
+            generation_tasks.add(task)
+            callback = getattr(task, "add_done_callback", None)
+            if callable(callback):
+                callback(
+                    lambda done, token=session_key, owner_generation=generation: (
+                        self._owned_task_done(token, owner_generation, done)
+                    )
+                )
+
+    def _owned_task_done(self, session_key: str, generation: int, task: Any) -> None:
+        self._consume_task_result(task)
+        tasks = self._generation_tasks.get((session_key, generation))
+        if tasks is not None:
+            tasks.discard(task)
+            if not tasks:
+                self._generation_tasks.pop((session_key, generation), None)
+
+    def _cancel_generation_tasks(self, session_key: str, generation: int) -> None:
+        tasks = tuple(self._generation_tasks.get((session_key, generation), ()))
+        self._cancel_and_drain_tasks(
+            f"{session_key}:{generation}",
+            tasks,
+            after_drain=lambda: self._clear_if_generation(session_key, generation),
+        )
+
+    def _clear_if_generation(self, session_key: str, generation: int) -> None:
+        current = self._scope_generations.get(session_key)
+        if current == generation or current is None:
+            self._clear_session_state(session_key)
 
     @staticmethod
     def _cancel_fragment_buffer(_key: str, value: Any) -> None:
@@ -358,33 +473,66 @@ class SessionStateStore:
     # ------------------------------------------------------------------
     # 统一清理收口（替代 state_persistence._SESSION_KEYED_CONTAINERS 反射遍历）
     # ------------------------------------------------------------------
-    def release_session(self, session_key: str) -> None:
+    def release_session(
+        self,
+        session_key: str,
+        *,
+        expected_generation: int | None = None,
+    ) -> None:
         """释放某会话在所有已登记 SessionMap 中的态。漏登记 = 容器不在 = 立即暴露。"""
-        fragment = self.fragment_buffers.get(session_key)
-        self._cancel_fragment_buffer(session_key, fragment)
-        owned_tasks = self._task_values(
-            self.background_tasks.get(session_key, set()),
-            self.segmented_tasks.get(session_key),
-            self.background_post_checkpoint_tasks.get(session_key),
-        )
+        if expected_generation is None:
+            owned_tasks = self._task_values(
+                self.background_tasks.get(session_key, set()),
+                self.segmented_tasks.get(session_key),
+                self.background_post_checkpoint_tasks.get(session_key),
+            )
+            should_clear = True
+        else:
+            owned_tasks = list(
+                self._generation_tasks.get((session_key, expected_generation), ())
+            )
+            should_clear = (
+                self._scope_generations.get(session_key) == expected_generation
+            )
         self._cancel_and_drain_tasks(
             session_key,
             owned_tasks,
-            after_drain=lambda: self._clear_session_state(session_key),
+            after_drain=lambda: (
+                self._clear_session_state(session_key)
+                if expected_generation is None
+                else self._clear_if_generation(session_key, expected_generation)
+            ),
         )
-        conv_sync_umo = self._conv_sync_session_umos.pop(session_key, None)
-        self._clear_session_state(session_key)
-        if conv_sync_umo is not None:
-            self._release_unused_conv_sync_lock(conv_sync_umo)
+        if should_clear and expected_generation is not None:
+            self._scope_generations.pop(session_key, None)
+        if should_clear:
+            self._cancel_fragment_buffer(
+                session_key,
+                self.fragment_buffers.get(session_key),
+            )
+            conv_sync_umo = self._conv_sync_session_umos.pop(session_key, None)
+            self._clear_session_state(session_key)
+            if conv_sync_umo is not None:
+                self._release_unused_conv_sync_lock(conv_sync_umo)
 
     def track_background_task(self, session_key: str, task: Any) -> Any:
         """登记 pipeline 短任务，并在完成后自动解除 owner 引用。"""
 
+        if not self._allows_session_mutation(session_key):
+            cancel = getattr(task, "cancel", None)
+            if callable(cancel):
+                cancel()
+            callback = getattr(task, "add_done_callback", None)
+            if callable(callback):
+                callback(self._consume_task_result)
+            return task
         tasks = self.background_tasks.get_or_create(session_key, set)
         tasks.add(task)
+        self._register_task_value("background_tasks", session_key, task)
 
         def _discard(done: Any) -> None:
-            self._consume_task_result(done)
+            if session_key not in self._scope_aware_tokens:
+                self._consume_task_result(done)
             current = self.background_tasks.get(session_key)
             if isinstance(current, set):
                 current.discard(done)
@@ -439,7 +587,7 @@ class SessionStateStore:
 
     def _clear_session_state(self, session_key: str) -> None:
         for m in self._maps:
-            m.pop(session_key, None)
+            m._d.pop(session_key, None)
 
     def _clear_all_state(self) -> None:
         for m in self._maps:
