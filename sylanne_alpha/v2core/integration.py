@@ -44,6 +44,7 @@ import logging
 import math
 import random
 import time
+from collections.abc import Iterable
 from typing import Any, Coroutine
 
 from sylanne_alpha.scoped_engine_persistence import ScopedEnginePersistence
@@ -554,10 +555,13 @@ def _existing_runtime_from_scope_or_legacy(
         try:
             if not is_live(scope_or_session):
                 return None
+            persona_runtimes = live_personas()
+            if not isinstance(persona_runtimes, Iterable):
+                return None
             persona_runtime = next(
                 (
                     runtime
-                    for runtime in live_personas()
+                    for runtime in persona_runtimes
                     if getattr(runtime, "persona_ref", None)
                     == scope_or_session.persona_ref
                 ),

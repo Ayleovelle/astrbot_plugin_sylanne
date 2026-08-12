@@ -1624,14 +1624,21 @@ class PublicAPI:
             event_time=self._event_time(effective_now),
         )
         # Feedback loop: trigger based on time since last bot expression
+        raw_last_expr_time: object
         if self._services_explicit:
-            last_expr_time = self._explicit_last_bot_expression_time.get(
+            raw_last_expr_time = self._explicit_last_bot_expression_time.get(
                 session_key, 0.0
             )
         else:
-            last_expr_time = self._plugin._store.last_bot_expression_time.get(
+            raw_last_expr_time = self._plugin._store.last_bot_expression_time.get(
                 session_key, 0.0
             )
+        last_expr_time = (
+            float(raw_last_expr_time)
+            if isinstance(raw_last_expr_time, (int, float))
+            and not isinstance(raw_last_expr_time, bool)
+            else 0.0
+        )
         if last_expr_time > 0:
             gap = effective_now - last_expr_time
             if gap < 30.0:

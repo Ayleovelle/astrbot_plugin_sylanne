@@ -899,6 +899,27 @@ class WebUIRoutes:
             return False
 
     @staticmethod
+    def _scope_api_path_from_params(params: object) -> ScopeApiPathEcho:
+        """Validate one request path before constructing its typed scope echo."""
+
+        if not isinstance(params, Mapping):
+            raise ValueError("scoped request path components must be strings")
+        bot_ref = params.get("bot_ref")
+        persona_ref = params.get("persona_ref")
+        session_ref = params.get("session_ref")
+        if not (
+            isinstance(bot_ref, str)
+            and isinstance(persona_ref, str)
+            and isinstance(session_ref, str)
+        ):
+            raise ValueError("scoped request path components must be strings")
+        return ScopeApiPathEcho(
+            bot_ref=bot_ref,
+            persona_ref=persona_ref,
+            session_ref=session_ref,
+        )
+
+    @staticmethod
     def _bootstrap_route_spec(query: object) -> ScopeRouteSpec:
         """Validate an explicit nonce target through the core route table."""
 
@@ -983,11 +1004,7 @@ class WebUIRoutes:
             route = scoped_api_route_spec(endpoint)
             if getattr(request, "method", None) != route.method:
                 raise ValueError("scoped request method does not match route")
-            path = ScopeApiPathEcho(
-                bot_ref=params.get("bot_ref"),
-                persona_ref=params.get("persona_ref"),
-                session_ref=params.get("session_ref"),
-            )
+            path = self._scope_api_path_from_params(params)
         except (AttributeError, TypeError, ValueError):
             return self._scoped_native_error(ScopedApiError(400, "invalid_scoped_request"))
         principal = self._scoped_principal_from_pages_request(request)
@@ -1156,11 +1173,7 @@ class WebUIRoutes:
             route = scoped_api_route_spec(endpoint)
             if getattr(request, "method", None) != route.method:
                 raise ValueError("Pages scoped request method does not match route")
-            path = ScopeApiPathEcho(
-                bot_ref=params.get("bot_ref"),
-                persona_ref=params.get("persona_ref"),
-                session_ref=params.get("session_ref"),
-            )
+            path = self._scope_api_path_from_params(params)
         except (AttributeError, TypeError, ValueError):
             return self._scoped_native_error(ScopedApiError(400, "invalid_scoped_request"))
         if route.endpoint in {"stream", "ws"}:
@@ -1360,11 +1373,7 @@ class WebUIRoutes:
                 ScopedApiError(400, "invalid_scoped_request")
             )
         try:
-            path = ScopeApiPathEcho(
-                bot_ref=params.get("bot_ref"),
-                persona_ref=params.get("persona_ref"),
-                session_ref=params.get("session_ref"),
-            )
+            path = self._scope_api_path_from_params(params)
         except (AttributeError, TypeError, ValueError):
             return self._scoped_native_error(ScopedApiError(400, "invalid_scoped_request"))
         principal = self._scoped_principal_from_pages_request(request)
