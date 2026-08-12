@@ -81,6 +81,20 @@ class _KVPlugin:
     async def put_kv_data(self, key: str, value) -> None:  # noqa: ANN001
         self._kv[key] = value
 
+    async def delete_kv_data(self, key: str) -> None:
+        self._kv.pop(key, None)
+
+
+def test_default_persistence_binds_all_plugin_kv_callbacks() -> None:
+    """Default construction retains the host's complete KV callback contract."""
+    plugin = _KVPlugin()
+    persistence = StatePersistence(plugin)  # type: ignore[arg-type]
+
+    assert persistence.has_kv_api()
+    assert persistence._services.put_kv_data == plugin.put_kv_data
+    assert persistence._services.get_kv_data == plugin.get_kv_data
+    assert persistence._services.delete_kv_data == plugin.delete_kv_data
+
 
 def test_mark_dirty_triggers_kv_partial_write() -> None:
     """T0-2：mark_dirty('memory') 后 persist_kernel 写 KV 增量快照。"""

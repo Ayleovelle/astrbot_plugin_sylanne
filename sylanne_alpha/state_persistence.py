@@ -186,7 +186,7 @@ class StatePersistence:
 
     采用双写策略：KV 存储为主路径（支持分布式/快速查询），
     文件 IO 为回退路径（向后兼容/离线可用）。
-    通过 self._plugin 委托访问插件实例。
+    通过 self._p 委托访问插件实例。
     """
 
     def __init__(
@@ -203,10 +203,10 @@ class StatePersistence:
             services: 只读服务容器（可选，为 None 时从 plugin 构建）。
             session_state: 集中式会话状态容器（可选）。
         """
-        self._plugin = plugin
-        # Keep the legacy delegate alias while remaining persistence paths are
-        # incrementally migrated to ``_plugin``.
         self._p = plugin
+        # Preserve the newer private spelling for external callers while this
+        # class keeps ``_p`` as its canonical delegate.
+        self._plugin = plugin
         self._session_state = session_state
         if services is not None:
             self._services = services
@@ -215,6 +215,9 @@ class StatePersistence:
                 config=getattr(plugin, "config", None) or getattr(plugin, "_config", {}),
                 logger=getattr(plugin, "logger", None),
                 context=getattr(plugin, "context", None),
+                put_kv_data=getattr(plugin, "put_kv_data", None),
+                get_kv_data=getattr(plugin, "get_kv_data", None),
+                delete_kv_data=getattr(plugin, "delete_kv_data", None),
             )
         self._buffer_persist_timers: dict[str, asyncio.TimerHandle] = {}
         # 防抖 kernel 落盘的 per-session 定时器表（合并 kernel 持久化）。
@@ -2451,7 +2454,7 @@ class StatePersistence:
         Returns:
             ConversationManager 实例，不可用时返回 None。
         """
-        p = self._plugin
+        p = self._p
         context = getattr(p, "context", None)
         if context is None:
             return None
@@ -2588,7 +2591,7 @@ class StatePersistence:
 
     def has_conversation_manager(self) -> bool:
         """检查 AstrBot ConversationManager 是否可用。"""
-        return getattr(self._plugin, "_conv_mgr", None) is not None
+        return getattr(self._p, "_conv_mgr", None) is not None
 
     async def sync_message_to_conv_mgr(
         self, session_key: str, role: str, text: str
@@ -2926,7 +2929,7 @@ class StatePersistence:
         Returns:
             PersonaManager 实例，不可用时返回 None。
         """
-        p = self._plugin
+        p = self._p
         context = getattr(p, "context", None)
         if context is None:
             return None
@@ -2939,7 +2942,7 @@ class StatePersistence:
 
     def has_persona_manager(self) -> bool:
         """检查 AstrBot PersonaManager 是否可用。"""
-        return getattr(self._plugin, "_persona_mgr", None) is not None
+        return getattr(self._p, "_persona_mgr", None) is not None
 
 
     # ------------------------------------------------------------------
@@ -2960,7 +2963,7 @@ class StatePersistence:
         """
         import time
 
-        p = self._plugin
+        p = self._p
         cache = getattr(p, "_provider_id_cache", None)
         if cache is None:
             p._provider_id_cache = {}
@@ -2995,7 +2998,7 @@ class StatePersistence:
         避免运行时因缺失配置而出错。覆盖 WebUI、评估器、实时聊天、
         后台队列、安全边界、记忆系统等全部子系统的配置。
         """
-        p = self._plugin
+        p = self._p
         p._cfg_bool("sylanne_webui_enabled", False)
         p._cfg("sylanne_webui_host", "127.0.0.1")
         p._cfg_int("sylanne_webui_port", 2718)
@@ -3119,7 +3122,7 @@ class StatePersistence:
         """按 session_key 分片存储记忆数据。"""
         key = self._shard_key(session_key, "memory")
         # 通过 plugin 的 KV 接口存储
-        kv = getattr(self._plugin, 'kv', None) or getattr(self._plugin, '_kv', None)
+        kv = getattr(self._p, 'kv', None) or getattr(self._p, '_kv', None)
         if kv and hasattr(kv, 'set'):
             import json
             kv.set(key, json.dumps(memory_data))
@@ -3127,7 +3130,7 @@ class StatePersistence:
     def load_memory_shard(self, session_key: str) -> dict | None:
         """加载指定 session 的记忆分片。"""
         key = self._shard_key(session_key, "memory")
-        kv = getattr(self._plugin, 'kv', None) or getattr(self._plugin, '_kv', None)
+        kv = getattr(self._p, 'kv', None) or getattr(self._p, '_kv', None)
         if kv and hasattr(kv, 'get'):
             import json
             raw = kv.get(key)
@@ -3150,7 +3153,7 @@ class StatePersistence:
         Returns:
             True 表示 AstrBot 已启用群聊上下文感知。
         """
-        p = self._plugin
+        p = self._p
         if not p._cfg_bool("sylanne_alpha_auto_detect_group_context", True):
             return False
         try:

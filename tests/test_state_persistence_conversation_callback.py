@@ -33,6 +33,20 @@ class _RecordingRegistry:
         self.releases.append(scope)
 
 
+def test_constructed_persistence_registers_conversation_manager_callback() -> None:
+    """A normally constructed persistence instance discovers the host callback."""
+    manager = _FakeConversationManager()
+    plugin = SimpleNamespace(
+        _config={},
+        context=SimpleNamespace(conversation_manager=manager),
+    )
+
+    persistence = StatePersistence(plugin)
+
+    assert persistence.init_conversation_manager() is manager
+    assert manager.session_deleted_callback is not None
+
+
 @pytest.mark.asyncio
 async def test_registered_callback_is_awaitable_and_raw_umo_releases_no_scope() -> None:
     manager = _FakeConversationManager()
