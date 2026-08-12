@@ -7,7 +7,7 @@ import { useI18n } from '../../composables/useI18n'
 import { useScopeStore } from '../../stores/scope'
 import Modal from '../ui/Modal.vue'
 import ObservationTrendChart from './ObservationTrendChart.vue'
-import { buildCurrentReadings, createObservationRequestGuard, formatObservationBytes, formatObservationOldest, normalizeHistoryBuckets, normalizedMeterPercent, type ObservationGroup } from '../../views/monitorObservation'
+import { adaptObservationStorage, buildCurrentReadings, createObservationRequestGuard, formatObservationBytes, formatObservationOldest, normalizeHistoryBuckets, normalizedMeterPercent, type ObservationGroup } from '../../views/monitorObservation'
 
 const props = defineProps<{ open: boolean; group: ObservationGroup | null; state: StateResponse | null; originRect: DOMRect | null }>()
 const emit = defineEmits<{ 'update:open': [value: boolean] }>()
@@ -65,13 +65,7 @@ async function load(): Promise<void> {
         sample_count: source?.sample_count || 0,
         downsampled: false,
         partial: false,
-        storage: {
-          used_bytes: source?.storage?.used_bytes || 0,
-          limit_bytes: source?.storage?.limit_bytes ?? null,
-          oldest_ms: source?.storage?.oldest_ms ?? null,
-          segment_count: source?.storage?.segment_count || 0,
-          cleanup_active: false,
-        },
+        storage: adaptObservationStorage(source?.storage),
       }
       historyKey.value = `${key}:${group}`
       error.value = ''
@@ -115,7 +109,8 @@ const meterPercent = normalizedMeterPercent
     <section id="observation-chamber" class="chamber" aria-live="polite">
       <div class="primary-grid"><section class="current-panel"><h3>{{ t('observation.current') }}</h3><div class="readings"><div v-for="reading in readings" :key="reading.key" class="reading-row" :class="{ 'has-meter': meterPercent(reading) !== undefined }"><b>{{ readingLabel(reading.key) }}</b><span v-if="meterPercent(reading) !== undefined" class="reading-meter"><i :style="{ width: `${meterPercent(reading)}%` }" /></span><span class="mono">{{ reading.value }}</span></div></div></section><section class="trend-panel"><h3>{{ t('observation.trend') }}</h3><p v-if="trendState === 'loading'">{{ t('common.loading') }}</p><p v-else-if="trendState === 'error'">{{ error }} <button type="button" @click="load">{{ t('common.retry') }}</button></p><template v-else-if="trendState === 'chart'"><ObservationTrendChart :buckets="buckets" :label="title" /><p v-if="loading">{{ t('common.loading') }}</p><p v-if="error" class="warning">{{ t('observation.refresh_failed') }} <button type="button" @click="load">{{ t('common.retry') }}</button></p></template><template v-else><p>{{ t('observation.empty') }}</p><p v-if="trendState === 'empty' && loading">{{ t('common.loading') }}</p><p v-if="trendState === 'empty' && error" class="warning">{{ t('observation.refresh_failed') }} <button type="button" @click="load">{{ t('common.retry') }}</button></p></template></section></div>
       <p v-if="visibleHistory?.partial" class="warning">{{ t('observation.partial_warning') }}</p>
-      <div class="detail-grid"><section class="lower-panel"><h3>{{ t('observation.explanation') }}</h3><p class="description">{{ description }}</p></section><section class="lower-panel"><h3>{{ t('observation.related') }}</h3><p>{{ related.join(' · ') }}</p></section><section v-if="visibleHistory" class="lower-panel metadata-list"><h3>{{ t('observation.latest') }}</h3><span>{{ latestTime }}</span><span>{{ latestValues.length ? latestValues.map(item => `${readingLabel(item.key)}: ${item.value}`).join(' · ') : t('common.empty') }}</span><span>{{ t('observation.samples') }}: {{ visibleHistory.sample_count }}</span><span>{{ t('observation.storage') }}: {{ formatObservationBytes(storage?.used_bytes) }} / {{ storageLimit }}</span><span>{{ t('observation.oldest') }}: {{ oldestLabel }}</span></section></div>
+      <p v-if="storage?.budget_unsatisfiable" class="warning">{{ t('observation.budget_unsatisfiable') }}</p>
+      <div class="detail-grid"><section class="lower-panel"><h3>{{ t('observation.explanation') }}</h3><p class="description">{{ description }}</p></section><section class="lower-panel"><h3>{{ t('observation.related') }}</h3><p>{{ related.join(' · ') }}</p></section><section v-if="visibleHistory" class="lower-panel metadata-list"><h3>{{ t('observation.latest') }}</h3><span>{{ latestTime }}</span><span>{{ latestValues.length ? latestValues.map(item => `${readingLabel(item.key)}: ${item.value}`).join(' · ') : t('common.empty') }}</span><span>{{ t('observation.samples') }}: {{ visibleHistory.sample_count }}</span><span>{{ t('observation.storage') }}: {{ formatObservationBytes(storage?.used_bytes) }} / {{ storageLimit }}</span><span>{{ t('observation.oldest') }}: {{ oldestLabel }}</span><span>{{ t('observation.cleanup') }}: {{ storage?.cleanup_active ? t('observation.cleanup_active') : t('observation.cleanup_idle') }}</span></section></div>
     </section>
   </Modal>
 </template>

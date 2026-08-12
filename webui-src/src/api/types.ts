@@ -188,6 +188,15 @@ export interface ObservationHistoryStorage {
   oldest_ms: number | null
   segment_count: number
   cleanup_active: boolean
+  budget_unsatisfiable: boolean
+}
+
+export interface DeliveryDiagnostics {
+  pending: number
+  failed_retryable: number
+  outcome_unknown: number
+  suppressed: number
+  last_reason?: 'account_route_unavailable' | 'delivery_outcome_unknown'
 }
 
 export interface ObservationHistoryResponse {
@@ -264,11 +273,13 @@ export interface StateResponse extends ScopedApiResponse {
   sessions?: SessionInfo[]
   theme?: string
   life_simulation?: Record<string, unknown>
+  delivery?: DeliveryDiagnostics
   [k: string]: unknown
 }
 
 export interface ScopedStateResponse extends ScopedApiResponse {
   state?: StateResponse
+  delivery?: DeliveryDiagnostics
 }
 
 export interface ScopedDiagnosticsResponse extends ScopedApiResponse {
@@ -293,6 +304,17 @@ export interface ScopedObservationHistoryResponse extends ScopedApiResponse {
     points?: ObservationHistoryPoint[]
     storage?: Partial<ObservationHistoryStorage>
   }
+}
+
+export interface LegacyInventoryRecord {
+  record_id: string
+  checksum: string
+  byte_size: number
+}
+
+export interface LegacyInventoryResponse {
+  ok?: boolean
+  records?: LegacyInventoryRecord[]
 }
 
 // --- v2core cognition (Wave: cognitive-cycle page) ---

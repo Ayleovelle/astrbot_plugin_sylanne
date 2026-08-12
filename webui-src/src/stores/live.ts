@@ -31,6 +31,7 @@ function sameScope(
 function projectState(response: ScopedStateResponse): StateResponse {
   return {
     ...(response.state || {}),
+    delivery: response.delivery,
     scope: response.scope,
     scope_generation: response.scope_generation,
     generations: response.generations,
@@ -38,8 +39,7 @@ function projectState(response: ScopedStateResponse): StateResponse {
 }
 
 // Pages requests cannot be aborted, so polling remains serialized while one is
-// in flight. scopedApiFetch carries its nonce through the bridge query/body
-// transport instead of bypassing the host with direct HTTP.
+// in flight. scopedApiFetch uses the host-authenticated Pages broker.
 export const useLiveStore = defineStore('live', () => {
   const state = ref<StateResponse | null>(null)
   const loading = ref(false)

@@ -209,25 +209,16 @@ function sameScope(left: ScopePath, right: ScopePath): boolean {
   )
 }
 
-function pathWithScopeNonce(path: string, scopeNonce: string): string {
-  const url = new URL(path, 'https://sylanne.invalid')
-  url.searchParams.set('scope_nonce', scopeNonce)
-  return `${url.pathname}${url.search}`
-}
-
-function bodyWithScopeNonce(body: unknown, scopeNonce: string): Record<string, unknown> {
-  if (body !== undefined && (body === null || Array.isArray(body) || typeof body !== 'object')) {
-    throw new ApiError(400, 'scoped Pages POST body must be an object')
-  }
-  return { ...(body as Record<string, unknown> | undefined), scope_nonce: scopeNonce }
-}
-
 export function scopedApiPath(snapshot: ScopeRequestSnapshot, endpoint = ''): string {
   const scope = snapshotScope(snapshot)
   const root = `/api/v1/bots/${encodeURIComponent(scope.bot_ref)}/personas/${encodeURIComponent(
     scope.persona_ref,
   )}/sessions/${encodeURIComponent(scope.session_ref)}`
   return endpoint ? `${root}/${endpoint.replace(/^\/+|\/+$/g, '')}` : root
+}
+
+function pagesScopedApiPath(snapshot: ScopeRequestSnapshot, endpoint = ''): string {
+  return `/pages${scopedApiPath(snapshot, endpoint)}`
 }
 
 export function personaApiPath(snapshot: PersonaRequestSnapshot): string {
@@ -250,6 +241,14 @@ export async function scopedApiFetch<T extends ScopedApiResponse>(
   options: ApiOptions = {},
 ): Promise<T> {
   const scope = snapshotScope(snapshot)
+  const bridge = getAstrBotBridge()
+  if (bridge) {
+    if (options.signal?.aborted) {
+      throw new ApiError(0, 'scoped Pages request aborted')
+    }
+    const { headers: _headers, signal: _signal, ...bridgeOptions } = options
+    return apiFetch<T>(pagesScopedApiPath(snapshot, endpoint), bridgeOptions)
+  }
   const bootstrap = await apiFetch<ScopeBootstrapResponse>(scopeBootstrapPath(snapshot), {
     method: 'POST',
   })
@@ -257,21 +256,6 @@ export async function scopedApiFetch<T extends ScopedApiResponse>(
     throw new ApiError(409, 'scoped bootstrap mismatch', bootstrap)
   }
   const path = scopedApiPath(snapshot, endpoint)
-  const bridge = getAstrBotBridge()
-  if (bridge) {
-    const { headers: _headers, ...bridgeOptions } = options
-    const method = (options.method || 'GET').toUpperCase()
-    if (method === 'GET') {
-      return apiFetch<T>(pathWithScopeNonce(path, bootstrap.scope_nonce), bridgeOptions)
-    }
-    if (method === 'POST') {
-      return apiFetch<T>(path, {
-        ...bridgeOptions,
-        body: bodyWithScopeNonce(options.body, bootstrap.scope_nonce),
-      })
-    }
-    return apiFetch<T>(path, bridgeOptions)
-  }
   return apiFetch<T>(path, {
     ...options,
     headers: {

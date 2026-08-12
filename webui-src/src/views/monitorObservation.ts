@@ -1,4 +1,4 @@
-import type { ObservationHistoryPoint, StateResponse } from '../api/types'
+import type { ObservationHistoryPoint, ObservationHistoryStorage, StateResponse } from '../api/types'
 import { buildTimingRows } from './monitorTiming'
 
 export const OBSERVATION_GROUPS = ['emotion', 'boundary', 'timing', 'routing', 'gate', 'expression', 'feedback'] as const
@@ -6,6 +6,19 @@ export type ObservationGroup = (typeof OBSERVATION_GROUPS)[number]
 
 export interface Reading { key: string; value: number | string; discrete?: boolean }
 export interface NormalizedBucket { fromMs: number; toMs: number; metrics: Record<string, { first?: number; last?: number; min?: number; max?: number }> }
+
+export function adaptObservationStorage(
+  storage: Partial<ObservationHistoryStorage> | null | undefined,
+): ObservationHistoryStorage {
+  return {
+    used_bytes: storage?.used_bytes ?? 0,
+    limit_bytes: storage?.limit_bytes ?? null,
+    oldest_ms: storage?.oldest_ms ?? null,
+    segment_count: storage?.segment_count ?? 0,
+    cleanup_active: storage?.cleanup_active === true,
+    budget_unsatisfiable: storage?.budget_unsatisfiable === true,
+  }
+}
 
 export function normalizedMeterPercent(reading: Reading): number | undefined {
   if (reading.discrete || typeof reading.value !== 'number' || reading.value < 0 || reading.value > 1) return undefined

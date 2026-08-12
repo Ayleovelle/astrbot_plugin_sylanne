@@ -131,6 +131,31 @@ describe('live scoped polling', () => {
     expect(live.state).toMatchObject({ tick_count: 8 })
   })
 
+  it('projects safe delivery diagnostics from the scoped envelope into live state', async () => {
+    const scope = useScopeStore()
+    scope.setCatalog(catalog([{ bot: 'bot_v1_A', persona: 'persona_v1_P', session: 'session_v1_S', generation: 1 }]))
+    scopedApiFetchMock.mockResolvedValue({
+      ...scopedState('bot_v1_A', 'persona_v1_P', 'session_v1_S', 1, 8),
+      delivery: {
+        pending: 2,
+        failed_retryable: 1,
+        outcome_unknown: 3,
+        suppressed: 4,
+        last_reason: 'delivery_outcome_unknown',
+      },
+    })
+
+    const live = useLiveStore()
+    expect(await live.fetchOnce()).toBe(true)
+    expect(live.state?.delivery).toEqual({
+      pending: 2,
+      failed_retryable: 1,
+      outcome_unknown: 3,
+      suppressed: 4,
+      last_reason: 'delivery_outcome_unknown',
+    })
+  })
+
   it('clears stale state and errors when the selected scope is incomplete', async () => {
     const scope = useScopeStore()
     scope.setCatalog(

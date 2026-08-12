@@ -4,6 +4,7 @@ import type {
   StateResponse,
 } from '../api/types'
 import {
+  adaptObservationStorage,
   OBSERVATION_GROUPS,
   buildCurrentReadings,
   buildTrendSeries,
@@ -173,5 +174,23 @@ describe('monitor observation adapters', () => {
     expect(formatObservationBytes(2 * 1024 * 1024)).toBe('2.0 MiB')
     expect(formatObservationOldest(null, 'No record')).toBe('No record')
     expect(formatObservationOldest(0, 'No record')).not.toBe('No record')
+  })
+
+  it('preserves cleanup and protected-budget status from scoped history storage', () => {
+    expect(adaptObservationStorage({
+      used_bytes: 4096,
+      limit_bytes: 2048,
+      oldest_ms: 123,
+      segment_count: 2,
+      cleanup_active: true,
+      budget_unsatisfiable: true,
+    })).toEqual({
+      used_bytes: 4096,
+      limit_bytes: 2048,
+      oldest_ms: 123,
+      segment_count: 2,
+      cleanup_active: true,
+      budget_unsatisfiable: true,
+    })
   })
 })

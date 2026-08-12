@@ -149,16 +149,8 @@ describe('apiBase', () => {
     expect(apiPost).toHaveBeenCalledWith('api/settings', { enabled: true })
   })
 
-  it('routes a scoped GET through AstrBot Pages with its nonce in bridge params', async () => {
-    const apiPost = vi.fn().mockResolvedValue({
-      ok: true,
-      scope: {
-        bot_ref: 'bot_v1_A',
-        persona_ref: 'persona_v1_P',
-        session_ref: 'session_v1_S',
-      },
-      scope_nonce: 'scope_nonce_v1_test',
-    })
+  it('routes a scoped GET through the AstrBot Pages broker without bootstrapping or leaking a nonce', async () => {
+    const apiPost = vi.fn()
     const payload: ScopedApiResponse = {
       ok: true,
       scope: {
@@ -181,14 +173,12 @@ describe('apiBase', () => {
       payload,
     )
 
-    expect(apiPost).toHaveBeenCalledWith(
-      'api/scopes/bot_v1_A/personas/persona_v1_P/sessions/session_v1_S/nonce',
-      undefined,
-    )
+    expect(apiPost).not.toHaveBeenCalled()
     expect(apiGet).toHaveBeenCalledWith(
-      'api/v1/bots/bot_v1_A/personas/persona_v1_P/sessions/session_v1_S/state',
-      { scope_nonce: 'scope_nonce_v1_test' },
+      'pages/api/v1/bots/bot_v1_A/personas/persona_v1_P/sessions/session_v1_S/state',
+      {},
     )
+    expect(JSON.stringify(apiGet.mock.calls)).not.toContain('scope_nonce')
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
@@ -233,23 +223,18 @@ describe('apiBase', () => {
     expect(apiGet).not.toHaveBeenCalled()
   })
 
-  it('routes a scoped POST through AstrBot Pages with its nonce in the request body', async () => {
-    const bootstrap = {
+  it('routes a scoped POST through the AstrBot Pages broker once with the exact body', async () => {
+    const payload: ScopedApiResponse = {
       ok: true,
       scope: {
         bot_ref: 'bot_v1_A',
         persona_ref: 'persona_v1_P',
         session_ref: 'session_v1_S',
       },
-      scope_nonce: 'scope_nonce_v1_test',
-    }
-    const payload: ScopedApiResponse = {
-      ok: true,
-      scope: bootstrap.scope,
       scope_generation: 7,
     }
     const apiGet = vi.fn()
-    const apiPost = vi.fn().mockResolvedValueOnce(bootstrap).mockResolvedValueOnce(payload)
+    const apiPost = vi.fn().mockResolvedValue(payload)
     const fetchMock = vi.fn()
     vi.stubGlobal('window', { AstrBotPluginPage: { apiGet, apiPost } })
     vi.stubGlobal('location', {
@@ -264,16 +249,12 @@ describe('apiBase', () => {
       }),
     ).resolves.toEqual(payload)
 
-    expect(apiPost).toHaveBeenNthCalledWith(
-      1,
-      'api/scopes/bot_v1_A/personas/persona_v1_P/sessions/session_v1_S/nonce',
-      undefined,
+    expect(apiPost).toHaveBeenCalledOnce()
+    expect(apiPost).toHaveBeenCalledWith(
+      'pages/api/v1/bots/bot_v1_A/personas/persona_v1_P/sessions/session_v1_S/memory/meltdown',
+      { meltdown_nonce: 'arm_v1' },
     )
-    expect(apiPost).toHaveBeenNthCalledWith(
-      2,
-      'api/v1/bots/bot_v1_A/personas/persona_v1_P/sessions/session_v1_S/memory/meltdown',
-      { meltdown_nonce: 'arm_v1', scope_nonce: 'scope_nonce_v1_test' },
-    )
+    expect(JSON.stringify(apiPost.mock.calls)).not.toContain('scope_nonce')
     expect(apiGet).not.toHaveBeenCalled()
     expect(fetchMock).not.toHaveBeenCalled()
   })
