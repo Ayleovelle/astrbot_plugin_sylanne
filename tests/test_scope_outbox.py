@@ -276,6 +276,71 @@ def _outbox(context: SimpleNamespace) -> DeliveryOutbox:
     )
 
 
+def test_delivery_diagnostics_are_exact_scope_generation_bound_and_redacted(
+    outbox_context,
+) -> None:
+    outbox = _outbox(outbox_context)
+    pending = outbox.enqueue(_issued_draft(outbox_context, text="pending-secret"))
+    failed = outbox.enqueue(_issued_draft(outbox_context, text="failed-secret"))
+    unknown = outbox.enqueue(_issued_draft(outbox_context, text="unknown-secret"))
+    suppressed = outbox.enqueue(_issued_draft(outbox_context, text="suppressed-secret"))
+
+    failed_claim = outbox.claim(failed.delivery_ref, worker_id="worker-failed")
+    assert failed_claim is not None
+    failed_dispatch = outbox.mark_dispatching(failed_claim, worker_id="worker-failed")
+    assert failed_dispatch is not None
+    assert outbox.settle(
+        failed_dispatch,
+        worker_id="worker-failed",
+        status=DeliveryStatus.FAILED_RETRYABLE,
+        reason="adapter_rejected_before_send",
+    ) is not None
+
+    unknown_claim = outbox.claim(unknown.delivery_ref, worker_id="worker-unknown")
+    assert unknown_claim is not None
+    unknown_dispatch = outbox.mark_dispatching(unknown_claim, worker_id="worker-unknown")
+    assert unknown_dispatch is not None
+    assert outbox.settle(
+        unknown_dispatch,
+        worker_id="worker-unknown",
+        status=DeliveryStatus.OUTCOME_UNKNOWN,
+    ) is not None
+    assert outbox.suppress(suppressed, reason="account_unavailable") is not None
+
+    _other_bot, other_scope = _second_bot_scope(outbox_context)
+    outbox.enqueue(_issued_draft(outbox_context, text="other-bot-secret", scope=other_scope))
+
+    diagnostics = outbox.diagnostics(outbox_context.scope)
+    assert diagnostics == {
+        "pending": 1,
+        "failed_retryable": 1,
+        "outcome_unknown": 1,
+        "suppressed": 1,
+    }
+    assert set(diagnostics) <= {
+        "pending",
+        "failed_retryable",
+        "outcome_unknown",
+        "suppressed",
+        "last_reason",
+    }
+    assert "secret" not in repr(diagnostics)
+    assert pending.delivery_ref.token not in repr(diagnostics)
+
+    replacement = outbox_context.repository.create_scope(
+        _scope(outbox_context.bot, "persona_v1_outbox_b"),
+        expected_absent=True,
+    )
+    _freeze_scope(outbox_context.catalog, replacement)
+    assert outbox.diagnostics(outbox_context.scope) is None
+    assert outbox.diagnostics(replacement) == {
+        "pending": 0,
+        "failed_retryable": 0,
+        "outcome_unknown": 0,
+        "suppressed": 0,
+    }
+
+
 def _claim_in_subprocess(
     root: str,
     delivery_ref,

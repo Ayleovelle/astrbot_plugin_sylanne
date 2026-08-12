@@ -28,6 +28,7 @@ from .scope_contracts import (
 from .scope_repository import (
     RepositoryCorruptionError,
     ScopeRepository,
+    StaleScopeWrite,
     _canonical_json_bytes,
 )
 from .scope_identity import CurrentAdapterAccountProof, resolve_proven_single_account
@@ -1328,6 +1329,75 @@ class DeliveryOutbox:
                     reason=reason,
                 )
         except (RepositoryCorruptionError, ValueError):
+            return None
+
+    def diagnostics(self, scope: object) -> dict[str, int | str] | None:
+        """Return a redacted status summary for one exact active SessionScope.
+
+        The persona outbox is a shared durable document, so the public view must
+        filter by every Session/generation lease component while holding the same
+        repository lock that validates the active scope and frozen catalog turn.
+        """
+
+        if type(scope) is not SessionScope:
+            return None
+        try:
+            with self.repository.transaction():
+                if self.repository._require_active_scope_locked(scope) != scope:
+                    return None
+                turn = self.catalog.current_exact_locked(
+                    scope.bot_ref.token,
+                    scope.session_ref.token,
+                )
+                if not self.catalog._scope_matches_frozen_turn_locked(turn, scope):
+                    return None
+                _generation, items = self._load_document_locked(scope)
+                counts = {
+                    "pending": 0,
+                    "failed_retryable": 0,
+                    "outcome_unknown": 0,
+                    "suppressed": 0,
+                }
+                public_reasons: set[str] = set()
+                for item in items.values():
+                    ref = item.delivery_ref
+                    lease = item._draft.lease
+                    if (
+                        ref.bot_ref != scope.bot_ref
+                        or ref.persona_ref != scope.persona_ref
+                        or ref.session_ref != scope.session_ref
+                        or lease.transport_session_token != scope.session_ref.token
+                        or lease.resolved_scope_token != scope.storage_token
+                        or lease.expected_persona_token != scope.persona_ref.token
+                        or lease.persona_lifecycle_generation
+                        != scope.persona_ref.lifecycle_generation
+                        or lease.session_generation != scope.session_ref.generation
+                        or lease.scope_generation != scope.scope_generation
+                        or lease.expected_turn_generation != turn.turn_generation
+                    ):
+                        continue
+                    key = item.status.value
+                    if key in counts:
+                        counts[key] += 1
+                    if item.status is DeliveryStatus.OUTCOME_UNKNOWN:
+                        public_reasons.add("delivery_outcome_unknown")
+                    elif (
+                        item.status is DeliveryStatus.SUPPRESSED
+                        and item.reason == "account_unavailable"
+                    ):
+                        public_reasons.add("account_route_unavailable")
+                result: dict[str, int | str] = dict(counts)
+                if len(public_reasons) == 1:
+                    result["last_reason"] = next(iter(public_reasons))
+                return result
+        except (
+            KeyError,
+            OSError,
+            RepositoryCorruptionError,
+            StaleScopeWrite,
+            TypeError,
+            ValueError,
+        ):
             return None
 
     def _all_items_locked(self) -> list[DeliveryItem]:

@@ -264,6 +264,7 @@ class _ObservationStore:
                 "oldest_ms": None,
                 "segment_count": 0,
                 "cleanup_active": False,
+                "budget_unsatisfiable": True,
             },
         }
 
@@ -274,6 +275,73 @@ def _observation_plugin(store: _ObservationStore | None = None) -> SimpleNamespa
             observation_history_store=store or _ObservationStore()
         )
     )
+
+
+def test_scoped_observation_history_projects_capacity_flags_without_private_fields() -> None:
+    from sylanne_alpha.webui_routes import _scoped_history_payload
+
+    store = _ObservationStore()
+    payload = _scoped_history_payload(
+        _observation_plugin(store),
+        SimpleNamespace(scope=SimpleNamespace(storage_token="scope_v1_public")),
+    )
+
+    assert payload["storage"] == {
+        "used_bytes": 17,
+        "limit_bytes": 0,
+        "segment_count": 0,
+        "cleanup_active": False,
+        "budget_unsatisfiable": True,
+    }
+
+
+def test_scoped_state_embeds_only_the_delivery_diagnostics_dto() -> None:
+    from sylanne_alpha.webui_routes import scoped_api_payload
+
+    scope = SimpleNamespace(storage_token="scope_v1_delivery")
+
+    class Authorization:
+        def __init__(self) -> None:
+            self.scope = scope
+
+        @staticmethod
+        def public_payload() -> dict[str, object]:
+            return {"ok": True}
+
+    class Outbox:
+        @staticmethod
+        def diagnostics(candidate: object) -> dict[str, object]:
+            assert candidate is scope
+            return {
+                "pending": 2,
+                "failed_retryable": 1,
+                "outcome_unknown": 0,
+                "suppressed": 3,
+                "last_reason": "account_route_unavailable",
+                "target_address": "must-not-cross",
+            }
+
+    payload = asyncio.run(
+        scoped_api_payload(
+            SimpleNamespace(_scope_delivery_outbox=Outbox()),
+            Authorization(),
+            "state",
+        )
+    )
+    assert payload["delivery"] == {
+        "pending": 2,
+        "failed_retryable": 1,
+        "outcome_unknown": 0,
+        "suppressed": 3,
+        "last_reason": "account_route_unavailable",
+    }
+    assert set(payload["delivery"]) <= {
+        "pending",
+        "failed_retryable",
+        "outcome_unknown",
+        "suppressed",
+        "last_reason",
+    }
 
 
 def test_observation_history_query_parser_validates_and_clamps() -> None:

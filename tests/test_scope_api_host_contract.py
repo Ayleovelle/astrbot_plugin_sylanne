@@ -191,6 +191,8 @@ def test_pages_registers_immutable_http_routes_but_never_the_scoped_websocket() 
     assert "legacy_scope_gone_handler" in source
     assert "/api/v1/legacy/inventory" in source
     assert "legacy_inventory_handler" in source
+    assert 'f"/{P}/pages/api/v1/bots/<bot_ref>/personas/<persona_ref>/sessions/<session_ref>"' in source
+    assert "pages_scoped_api_handler" in source
 
 
 def test_host_claim_adapters_preflight_before_nonce_authorization_and_keep_inventory_explicit() -> None:
@@ -435,6 +437,258 @@ async def test_pages_accepts_scope_nonce_only_from_the_header(
 
     assert result == {"error": "scope_nonce_required", "status": 400}
     assert nonce in service._pending_nonces
+
+
+@pytest.mark.asyncio
+async def test_pages_broker_uses_verified_username_without_exposing_a_nonce(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_scoped_api import _principal, _service
+    from sylanne_alpha.webui_routes import WebUIRoutes
+
+    service, _repository, registry, scope, relation = _service(tmp_path)
+    principal = _principal("principal_v1_pages_broker")
+
+    class Plugin:
+        _scoped_api_service = service
+        _scope_runtime_registry = registry
+
+        @staticmethod
+        def _scoped_api_principal_from_authenticated_host(
+            host: object,
+            identity: object,
+        ) -> ScopedPrincipal | None:
+            return principal if (host, identity) == ("pages", "dashboard-user") else None
+
+        @staticmethod
+        def _scoped_api_principal_scope_grant(
+            candidate_principal: object,
+            candidate_scope: object,
+            action: str,
+        ) -> object | None:
+            if (
+                candidate_principal == principal
+                and candidate_scope == scope
+                and action == "GET:state"
+            ):
+                return relation
+            return None
+
+        _scoped_api_principal_persona_grant = staticmethod(lambda *_args: None)
+
+    plugin = Plugin()
+    service._principal_scope_grant = plugin._scoped_api_principal_scope_grant
+    service._principal_persona_grant = plugin._scoped_api_principal_persona_grant
+    web = ModuleType("astrbot.api.web")
+    web.request = SimpleNamespace(
+        username="dashboard-user",
+        headers={"X-Sylanne-Principal": "principal_v1_forged"},
+        path_params={
+            "bot_ref": scope.bot_ref.token,
+            "persona_ref": scope.persona_ref.token,
+            "session_ref": scope.session_ref.token,
+        },
+        query={
+            "principal": "principal_v1_forged",
+            "scope_nonce": "scope_nonce_v1_forged",
+        },
+        method="GET",
+    )
+    monkeypatch.setitem(sys.modules, "astrbot.api.web", web)
+
+    result = await WebUIRoutes(plugin).pages_scoped_api_handler("state")
+
+    assert result["ok"] is True
+    assert "state" in result
+    assert "scope_nonce" not in json.dumps(result)
+    assert service._pending_nonces == {}
+
+
+@pytest.mark.asyncio
+async def test_pages_broker_legacy_claim_keeps_preflight_and_locked_fences(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_scoped_api import _principal, _service
+    from sylanne_alpha.webui_routes import WebUIRoutes
+
+    service, repository, registry, scope, relation = _service(tmp_path)
+    principal = _principal("principal_v1_pages_broker_claim")
+    legacy_api, claims = _legacy_claim_probe_api(
+        repository,
+        principal,
+        scope,
+        relation,
+        allow_claim=True,
+        allow_inventory=False,
+    )
+
+    class Plugin:
+        _scoped_api_service = service
+        _scope_runtime_registry = registry
+        _scope_resolver_v1 = SimpleNamespace(_repository=repository)
+        _legacy_claim_api = legacy_api
+
+        @staticmethod
+        def _scoped_api_principal_from_authenticated_host(
+            host: object,
+            identity: object,
+        ) -> ScopedPrincipal | None:
+            return principal if (host, identity) == ("pages", "dashboard-user") else None
+
+        @staticmethod
+        def _scoped_api_principal_scope_grant(
+            candidate_principal: object,
+            candidate_scope: object,
+            action: str,
+        ) -> object | None:
+            if (
+                candidate_principal == principal
+                and candidate_scope == scope
+                and action == "POST:legacy-claim"
+            ):
+                return relation
+            return None
+
+        _scoped_api_principal_persona_grant = staticmethod(lambda *_args: None)
+
+    plugin = Plugin()
+    service._principal_scope_grant = plugin._scoped_api_principal_scope_grant
+    service._principal_persona_grant = plugin._scoped_api_principal_persona_grant
+
+    async def body() -> object:
+        return {"record_id": "c" * 64}
+
+    web = ModuleType("astrbot.api.web")
+    web.request = SimpleNamespace(
+        username="dashboard-user",
+        headers={},
+        path_params={
+            "bot_ref": scope.bot_ref.token,
+            "persona_ref": scope.persona_ref.token,
+            "session_ref": scope.session_ref.token,
+        },
+        query={"scope_nonce": "scope_nonce_v1_forged"},
+        method="POST",
+        json=body,
+    )
+    monkeypatch.setitem(sys.modules, "astrbot.api.web", web)
+
+    result = await WebUIRoutes(plugin).pages_scoped_api_handler("legacy-claim")
+
+    assert result["ok"] is True
+    assert result["claim"] == {"record_id": "c" * 64, "status": "copied"}
+    assert "scope_nonce" not in json.dumps(result)
+    assert (claims.lookup_calls, claims.issue_calls, claims.claim_calls) == (1, 1, 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrong_callback", [False, True])
+async def test_pages_broker_rejects_forged_carriers_before_scope_access(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    wrong_callback: bool,
+) -> None:
+    from tests.test_scoped_api import _principal, _service
+    from sylanne_alpha.webui_routes import WebUIRoutes
+
+    service, _repository, registry, scope, relation = _service(tmp_path)
+    principal = _principal("principal_v1_pages_broker_denied")
+
+    class Plugin:
+        _scoped_api_service = service
+        _scope_runtime_registry = registry
+
+        @staticmethod
+        def _scoped_api_principal_from_authenticated_host(
+            host: object,
+            identity: object,
+        ) -> ScopedPrincipal | None:
+            return principal if (host, identity) == ("pages", "dashboard-user") else None
+
+        @staticmethod
+        def _scoped_api_principal_scope_grant(*_args: object) -> object | None:
+            return relation
+
+        _scoped_api_principal_persona_grant = staticmethod(lambda *_args: None)
+
+    plugin = Plugin()
+    if not wrong_callback:
+        service._principal_scope_grant = plugin._scoped_api_principal_scope_grant
+    service._principal_persona_grant = plugin._scoped_api_principal_persona_grant
+
+    def scope_must_not_be_resolved(*_args: object) -> object:
+        raise AssertionError("forged Pages carriers must fail before repository access")
+
+    monkeypatch.setattr(service, "resolve", scope_must_not_be_resolved)
+
+    async def forged_body() -> object:
+        return {
+            "principal": "principal_v1_forged",
+            "scope_nonce": "scope_nonce_v1_forged",
+        }
+
+    web = ModuleType("astrbot.api.web")
+    web.request = SimpleNamespace(
+        username="dashboard-user" if wrong_callback else None,
+        headers={"X-Sylanne-Principal": "principal_v1_forged"},
+        path_params={
+            "bot_ref": scope.bot_ref.token,
+            "persona_ref": scope.persona_ref.token,
+            "session_ref": scope.session_ref.token,
+        },
+        query={
+            "principal": "principal_v1_forged",
+            "scope_nonce": "scope_nonce_v1_forged",
+        },
+        method="GET",
+        json=forged_body,
+    )
+    monkeypatch.setitem(sys.modules, "astrbot.api.web", web)
+
+    result = await WebUIRoutes(plugin).pages_scoped_api_handler("state")
+
+    expected = "scope_principal_forbidden" if wrong_callback else "scope_principal_required"
+    assert result == {"error": expected, "status": 403}
+    assert service._pending_nonces == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["stream", "ws"])
+async def test_pages_broker_retires_streaming_endpoints(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+) -> None:
+    from tests.test_scoped_api import _service
+    from sylanne_alpha.webui_routes import WebUIRoutes
+
+    service, _repository, registry, scope, _relation = _service(tmp_path)
+
+    class Plugin:
+        _scoped_api_service = service
+        _scope_runtime_registry = registry
+        _scoped_api_principal_scope_grant = staticmethod(lambda *_args: None)
+        _scoped_api_principal_persona_grant = staticmethod(lambda *_args: None)
+
+    web = ModuleType("astrbot.api.web")
+    web.request = SimpleNamespace(
+        username=None,
+        path_params={
+            "bot_ref": scope.bot_ref.token,
+            "persona_ref": scope.persona_ref.token,
+            "session_ref": scope.session_ref.token,
+        },
+        query={},
+        method="GET",
+    )
+    monkeypatch.setitem(sys.modules, "astrbot.api.web", web)
+
+    result = await WebUIRoutes(Plugin()).pages_scoped_api_handler(endpoint)
+
+    assert result == {"error": "stream_unavailable", "status": 410}
+    assert service._pending_nonces == {}
 
 
 @pytest.mark.asyncio

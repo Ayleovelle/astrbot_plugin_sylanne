@@ -522,6 +522,25 @@ def _scoped_route_counts(value: object) -> dict[str, int | float]:
     return projected
 
 
+def _scoped_delivery_diagnostics(value: object) -> dict[str, int | str]:
+    projected: dict[str, int | str] = {
+        "pending": 0,
+        "failed_retryable": 0,
+        "outcome_unknown": 0,
+        "suppressed": 0,
+    }
+    if not isinstance(value, Mapping):
+        return projected
+    for key in tuple(projected):
+        count = value.get(key)
+        if type(count) is int and count >= 0:
+            projected[key] = count
+    reason = value.get("last_reason")
+    if reason in {"account_route_unavailable", "delivery_outcome_unknown"}:
+        projected["last_reason"] = reason
+    return projected
+
+
 def _scoped_history_payload(plugin: object, authorization: ScopedApiAuthorization) -> dict[str, object]:
     store = getattr(getattr(plugin, "_session_ctx", None), "observation_history_store", None)
     query = getattr(store, "query", None)
@@ -553,12 +572,16 @@ def _scoped_history_payload(plugin: object, authorization: ScopedApiAuthorizatio
             if public_point:
                 points.append(public_point)
     storage_source = source.get("storage")
-    storage: dict[str, int | float] = {}
+    storage: dict[str, int | float | bool] = {}
     if isinstance(storage_source, Mapping):
         for key in ("used_bytes", "limit_bytes", "oldest_ms", "segment_count"):
             number = _scoped_number(storage_source.get(key))
             if number is not None:
                 storage[key] = number
+        for key in ("cleanup_active", "budget_unsatisfiable"):
+            value = storage_source.get(key)
+            if type(value) is bool:
+                storage[key] = value
     sample_count = _scoped_number(source.get("sample_count"))
     return {
         "sample_count": 0 if sample_count is None else sample_count,
@@ -615,6 +638,10 @@ async def scoped_api_payload(
             "gate": _scoped_metric_map(_comp_gate_dict(computation)),
             "boundary": _scoped_metric_map(_comp_boundary_dict(computation)),
         }
+        outbox = getattr(plugin, "_scope_delivery_outbox", None)
+        diagnostics = getattr(outbox, "diagnostics", None)
+        delivery = diagnostics(scope) if callable(diagnostics) else None
+        payload["delivery"] = _scoped_delivery_diagnostics(delivery)
     elif endpoint == "observation-history":
         payload["observation_history"] = _scoped_history_payload(plugin, authorization)
     elif endpoint == "diagnostics":
@@ -965,7 +992,30 @@ class WebUIRoutes:
             return self._scoped_native_error(authorization)
         if not isinstance(authorization, ScopedApiAuthorization):
             return self._scoped_native_error(ScopedApiError(503, "scope_repository_unavailable"))
-        if route.endpoint == "legacy-claim":
+        return await self._scoped_authorized_response(
+            service,
+            authorization,
+            scoped_request,
+            request,
+            body=body,
+            intent=intent,
+            legacy_api=legacy_api,
+        )
+
+    async def _scoped_authorized_response(
+        self,
+        service: Any,
+        authorization: ScopedApiAuthorization,
+        scoped_request: ScopedApiRequest,
+        request: Any,
+        *,
+        body: object = None,
+        intent: Any = None,
+        legacy_api: Any = None,
+    ) -> Any:
+        """Complete one already-authorized request with endpoint-specific fences."""
+
+        if scoped_request.endpoint == "legacy-claim":
             assert legacy_api is not None and intent is not None and type(body) is dict
             checked = service.revalidate(authorization)
             if isinstance(checked, ScopedApiError):
@@ -1006,10 +1056,11 @@ class WebUIRoutes:
             payload["meltdown_nonce"] = meltdown_nonce
             return payload
         if scoped_request.endpoint == "memory/meltdown":
-            try:
-                body = await request.json()
-            except Exception:  # noqa: BLE001 - malformed input is a client error
-                body = None
+            if body is None:
+                try:
+                    body = await request.json()
+                except Exception:  # noqa: BLE001 - malformed input is a client error
+                    body = None
             if type(body) is not dict or set(body) != {"meltdown_nonce"}:
                 return self._scoped_native_error(ScopedApiError(400, "invalid_meltdown_request"))
             checked = service.revalidate(authorization)
@@ -1023,7 +1074,124 @@ class WebUIRoutes:
             if nonce_error is not None:
                 return self._scoped_native_error(nonce_error)
             return await purge_scoped_memory(self._p, checked)
-        return await scoped_api_payload(self._p, authorization, scoped_request.endpoint)
+        checked = service.revalidate(authorization)
+        if isinstance(checked, ScopedApiError):
+            return self._scoped_native_error(checked)
+        payload = await scoped_api_payload(self._p, checked, scoped_request.endpoint)
+        final = service.revalidate(checked)
+        if isinstance(final, ScopedApiError):
+            return self._scoped_native_error(final)
+        return payload
+
+    async def pages_scoped_api_handler(self, endpoint: str = "scope") -> Any:
+        """Broker one Pages request without exporting a scope capability.
+
+        AstrBot's iframe bridge carries only host-verified ``request.username``
+        plus query/body data; it cannot attach the canonical nonce header.  This
+        separate route therefore mints and immediately consumes an action-bound
+        nonce on the server.  The canonical handler remains header-only.
+        """
+
+        from astrbot.api.web import request
+
+        service = self._scoped_api_service()
+        if service is None:
+            return self._scoped_native_error(ScopedApiError(410, "scope_required"))
+        query = getattr(request, "query", {})
+        if isinstance(query, Mapping) and "session" in query:
+            return self._scoped_native_error(
+                ScopedApiError(400, "legacy_session_selector_forbidden")
+            )
+        params = getattr(request, "path_params", {})
+        try:
+            route = scoped_api_route_spec(endpoint)
+            if getattr(request, "method", None) != route.method:
+                raise ValueError("Pages scoped request method does not match route")
+            path = ScopeApiPathEcho(
+                bot_ref=params.get("bot_ref"),
+                persona_ref=params.get("persona_ref"),
+                session_ref=params.get("session_ref"),
+            )
+        except (AttributeError, TypeError, ValueError):
+            return self._scoped_native_error(ScopedApiError(400, "invalid_scoped_request"))
+        if route.endpoint in {"stream", "ws"}:
+            return self._scoped_native_error(ScopedApiError(410, "stream_unavailable"))
+        principal = self._scoped_principal_from_pages_request(request)
+        if principal is None:
+            return self._scoped_native_error(ScopedApiError(403, "scope_principal_required"))
+        if not self._service_uses_plugin_scope_grant(service):
+            return self._scoped_native_error(
+                ScopedApiError(403, "scope_principal_forbidden")
+            )
+
+        body = None
+        intent = None
+        legacy_api = None
+        if route.endpoint in {"legacy-claim", "memory/meltdown"}:
+            try:
+                body = await request.json()
+            except Exception:  # noqa: BLE001 - malformed input is rejected before bootstrap
+                body = None
+        if route.endpoint == "legacy-claim":
+            if (
+                type(body) is not dict
+                or set(body) != {"record_id"}
+                or type(body.get("record_id")) is not str
+            ):
+                return self._scoped_native_error(
+                    ScopedApiError(400, "invalid_legacy_claim_request")
+                )
+            legacy_api = legacy_claim_api_for_plugin(self._p)
+            if legacy_api is None:
+                return self._scoped_native_error(
+                    ScopedApiError(403, "scope_principal_forbidden")
+                )
+            intent = legacy_api.preflight(principal, body["record_id"], path)
+            if isinstance(intent, LegacyClaimApiError):
+                return self._scoped_native_error(
+                    ScopedApiError(intent.status, intent.code)
+                )
+        elif route.endpoint == "memory/meltdown" and (
+            type(body) is not dict or set(body) != {"meltdown_nonce"}
+        ):
+            return self._scoped_native_error(
+                ScopedApiError(400, "invalid_meltdown_request")
+            )
+
+        nonce = service.bootstrap_nonce(
+            path,
+            principal=principal,
+            endpoint=route.endpoint,
+            method=route.method,
+        )
+        if isinstance(nonce, ScopedApiError):
+            return self._scoped_native_error(nonce)
+        try:
+            scoped_request = ScopedApiRequest(
+                path=path,
+                nonce=nonce,
+                endpoint=route.endpoint,
+                method=route.method,
+                principal=principal,
+            )
+        except (TypeError, ValueError):
+            return self._scoped_native_error(ScopedApiError(400, "invalid_scoped_request"))
+        authorization = service.authorize(scoped_request)
+        if isinstance(authorization, ScopedApiError):
+            return self._scoped_native_error(authorization)
+        if not isinstance(authorization, ScopedApiAuthorization):
+            return self._scoped_native_error(
+                ScopedApiError(503, "scope_repository_unavailable")
+            )
+        return await self._scoped_authorized_response(
+            service,
+            authorization,
+            scoped_request,
+            request,
+            body=body,
+            intent=intent,
+            legacy_api=legacy_api,
+        )
 
     @staticmethod
     async def _scoped_sse_frames(service: object, authorization: object):
