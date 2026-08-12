@@ -879,6 +879,26 @@ class WebUIRoutes:
         )
 
     @staticmethod
+    def _registered_path_matches_request(
+        request_params: object,
+        registered_path_params: Mapping[str, object] | None,
+        expected_keys: frozenset[str],
+    ) -> bool:
+        """Fence AstrBot's handler kwargs to the bound request path echo."""
+
+        if registered_path_params is None:
+            return True
+        if not isinstance(request_params, Mapping):
+            return False
+        try:
+            return set(registered_path_params) == expected_keys and all(
+                request_params.get(key) == value
+                for key, value in registered_path_params.items()
+            )
+        except (AttributeError, TypeError, ValueError):
+            return False
+
+    @staticmethod
     def _bootstrap_route_spec(query: object) -> ScopeRouteSpec:
         """Validate an explicit nonce target through the core route table."""
 
@@ -931,7 +951,12 @@ class WebUIRoutes:
             return self._scoped_native_error(ScopedApiError(result.status, result.code))
         return result
 
-    async def scoped_api_handler(self, endpoint: str = "scope") -> Any:
+    async def scoped_api_handler(
+        self,
+        endpoint: str = "scope",
+        *,
+        registered_path_params: Mapping[str, object] | None = None,
+    ) -> Any:
         """Adapt an AstrBot request into the shared exact scoped API service."""
 
         from astrbot.api.web import request
@@ -946,6 +971,14 @@ class WebUIRoutes:
             )
         params = getattr(request, "path_params", {})
         headers = getattr(request, "headers", {})
+        if not self._registered_path_matches_request(
+            params,
+            registered_path_params,
+            frozenset({"bot_ref", "persona_ref", "session_ref"}),
+        ):
+            return self._scoped_native_error(
+                ScopedApiError(400, "invalid_scoped_request")
+            )
         try:
             route = scoped_api_route_spec(endpoint)
             if getattr(request, "method", None) != route.method:
@@ -1111,14 +1144,10 @@ class WebUIRoutes:
                 ScopedApiError(400, "legacy_session_selector_forbidden")
             )
         params = getattr(request, "path_params", {})
-        if registered_path_params is not None and (
-            not isinstance(params, Mapping)
-            or set(registered_path_params)
-            != {"bot_ref", "persona_ref", "session_ref"}
-            or any(
-                params.get(key) != value
-                for key, value in registered_path_params.items()
-            )
+        if not self._registered_path_matches_request(
+            params,
+            registered_path_params,
+            frozenset({"bot_ref", "persona_ref", "session_ref"}),
         ):
             return self._scoped_native_error(
                 ScopedApiError(400, "invalid_scoped_request")
@@ -1257,7 +1286,11 @@ class WebUIRoutes:
             return self._scoped_native_error(result)
         return result
 
-    async def persona_dossier_handler(self) -> Any:
+    async def persona_dossier_handler(
+        self,
+        *,
+        registered_path_params: Mapping[str, object] | None = None,
+    ) -> Any:
         """Read one durable Persona projection without accepting a Session selector."""
 
         from astrbot.api.web import request
@@ -1270,6 +1303,15 @@ class WebUIRoutes:
             return self._scoped_native_error(
                 ScopedApiError(400, "legacy_session_selector_forbidden")
             )
+        params = getattr(request, "path_params", {})
+        if not self._registered_path_matches_request(
+            params,
+            registered_path_params,
+            frozenset({"bot_ref", "persona_ref"}),
+        ):
+            return self._scoped_native_error(
+                ScopedApiError(400, "invalid_persona_request")
+            )
         principal = self._scoped_principal_from_pages_request(request)
         if principal is None:
             return self._scoped_native_error(ScopedApiError(403, "scope_principal_required"))
@@ -1278,7 +1320,6 @@ class WebUIRoutes:
                 ScopedApiError(403, "scope_principal_forbidden")
             )
         try:
-            params = getattr(request, "path_params", {})
             result = service.persona_dossier_payload(
                 params.get("bot_ref"),
                 params.get("persona_ref"),
@@ -1292,7 +1333,11 @@ class WebUIRoutes:
             return self._scoped_native_error(result)
         return result
 
-    async def scope_bootstrap_handler(self) -> Any:
+    async def scope_bootstrap_handler(
+        self,
+        *,
+        registered_path_params: Mapping[str, object] | None = None,
+    ) -> Any:
         """Mint a fresh one-use nonce for one live exact catalog entry."""
 
         from astrbot.api.web import request
@@ -1306,6 +1351,14 @@ class WebUIRoutes:
                 ScopedApiError(400, "legacy_session_selector_forbidden")
             )
         params = getattr(request, "path_params", {})
+        if not self._registered_path_matches_request(
+            params,
+            registered_path_params,
+            frozenset({"bot_ref", "persona_ref", "session_ref"}),
+        ):
+            return self._scoped_native_error(
+                ScopedApiError(400, "invalid_scoped_request")
+            )
         try:
             path = ScopeApiPathEcho(
                 bot_ref=params.get("bot_ref"),

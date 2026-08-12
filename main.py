@@ -1575,15 +1575,46 @@ class EmotionalStatePlugin(Star):
             ["GET"],
             "Sylanne legacy inventory projection",
         )
+        def persona_dossier_handler_for():
+            async def persona_dossier_handler(
+                bot_ref: object,
+                persona_ref: object,
+            ) -> Any:
+                return await wr.persona_dossier_handler(
+                    registered_path_params={
+                        "bot_ref": bot_ref,
+                        "persona_ref": persona_ref,
+                    }
+                )
+
+            return persona_dossier_handler
+
         context.register_web_api(
             f"/{P}/api/v1/bots/<bot_ref>/personas/<persona_ref>/dossier",
-            wr.persona_dossier_handler,
+            persona_dossier_handler_for(),
             ["GET"],
             "Sylanne Persona dossier",
         )
+
+        def scope_bootstrap_handler_for():
+            async def scope_bootstrap_handler(
+                bot_ref: object,
+                persona_ref: object,
+                session_ref: object,
+            ) -> Any:
+                return await wr.scope_bootstrap_handler(
+                    registered_path_params={
+                        "bot_ref": bot_ref,
+                        "persona_ref": persona_ref,
+                        "session_ref": session_ref,
+                    }
+                )
+
+            return scope_bootstrap_handler
+
         context.register_web_api(
             f"/{P}/api/scopes/<bot_ref>/personas/<persona_ref>/sessions/<session_ref>/nonce",
-            wr.scope_bootstrap_handler,
+            scope_bootstrap_handler_for(),
             ["POST"],
             "Sylanne scoped API nonce bootstrap",
         )
@@ -1600,17 +1631,31 @@ class EmotionalStatePlugin(Star):
             ["GET"],
             "Sylanne legacy scoped WebSocket retired",
         )
+        def scoped_handler_for(frozen_endpoint: str):
+            async def scoped_handler(
+                bot_ref: object,
+                persona_ref: object,
+                session_ref: object,
+            ) -> Any:
+                return await wr.scoped_api_handler(
+                    frozen_endpoint,
+                    registered_path_params={
+                        "bot_ref": bot_ref,
+                        "persona_ref": persona_ref,
+                        "session_ref": session_ref,
+                    },
+                )
+
+            return scoped_handler
+
         for endpoint, route in SCOPED_API_ROUTE_SPECS.items():
             if endpoint == "ws":
                 continue
             path = scoped_root if endpoint == "scope" else f"{scoped_root}/{endpoint}"
 
-            async def scoped_handler(_endpoint: str = route.endpoint) -> Any:
-                return await wr.scoped_api_handler(_endpoint)
-
             context.register_web_api(
                 path,
-                scoped_handler,
+                scoped_handler_for(route.endpoint),
                 [route.method],
                 f"Sylanne scoped API {endpoint}",
             )

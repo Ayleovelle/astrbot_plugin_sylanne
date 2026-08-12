@@ -261,6 +261,122 @@ async def test_registered_pages_handlers_accept_real_astrbot_path_kwargs() -> No
     ]
 
 
+@pytest.mark.asyncio
+async def test_registered_native_handlers_accept_real_astrbot_path_kwargs_without_late_binding() -> None:
+    import main
+
+    calls: list[tuple[str, str | None, dict[str, object]]] = []
+
+    class Routes:
+        async def persona_dossier_handler(
+            self,
+            *,
+            registered_path_params: dict[str, object],
+        ) -> dict[str, object]:
+            calls.append(("dossier", None, registered_path_params))
+            return {"handler": "dossier"}
+
+        async def scope_bootstrap_handler(
+            self,
+            *,
+            registered_path_params: dict[str, object],
+        ) -> dict[str, object]:
+            calls.append(("bootstrap", None, registered_path_params))
+            return {"handler": "bootstrap"}
+
+        async def scoped_api_handler(
+            self,
+            endpoint: str,
+            *,
+            registered_path_params: dict[str, object],
+        ) -> dict[str, object]:
+            calls.append(("scoped", endpoint, registered_path_params))
+            return {"endpoint": endpoint}
+
+        async def pages_scoped_api_handler(
+            self,
+            endpoint: str,
+            *,
+            registered_path_params: dict[str, object],
+        ) -> dict[str, object]:
+            return {"endpoint": endpoint, "path": registered_path_params}
+
+        def __getattr__(self, _name: str):
+            async def unused(*_args: object, **_kwargs: object) -> dict[str, bool]:
+                return {"ok": True}
+
+            return unused
+
+    class Context:
+        def __init__(self) -> None:
+            self.routes: dict[tuple[str, tuple[str, ...]], object] = {}
+
+        def register_web_api(
+            self,
+            path: str,
+            handler: object,
+            methods: list[str],
+            _description: str,
+        ) -> None:
+            self.routes[(path, tuple(methods))] = handler
+
+    async def unused(*_args: object, **_kwargs: object) -> dict[str, bool]:
+        return {"ok": True}
+
+    plugin = SimpleNamespace(
+        _webui_routes=Routes(),
+        _observatory_route_handler=unused,
+        _memory_settings_get_handler=unused,
+        _memory_settings_post_handler=unused,
+        _lineage_observatory_handler=unused,
+    )
+    context = Context()
+    main.EmotionalStatePlugin._register_web_apis(plugin, context)
+    root = (
+        "/astrbot_plugin_sylanne/api/v1/bots/<bot_ref>/personas/"
+        "<persona_ref>/sessions/<session_ref>"
+    )
+    session_kwargs = {
+        "bot_ref": "bot_v1_native",
+        "persona_ref": "persona_v1_native",
+        "session_ref": "session_v1_native",
+    }
+    persona_kwargs = {
+        "bot_ref": session_kwargs["bot_ref"],
+        "persona_ref": session_kwargs["persona_ref"],
+    }
+
+    dossier = await context.routes[
+        (
+            "/astrbot_plugin_sylanne/api/v1/bots/<bot_ref>/personas/"
+            "<persona_ref>/dossier",
+            ("GET",),
+        )
+    ](**persona_kwargs)
+    bootstrap = await context.routes[
+        (
+            "/astrbot_plugin_sylanne/api/scopes/<bot_ref>/personas/<persona_ref>/"
+            "sessions/<session_ref>/nonce",
+            ("POST",),
+        )
+    ](**session_kwargs)
+    state = await context.routes[(f"{root}/state", ("GET",))](**session_kwargs)
+    meltdown = await context.routes[(f"{root}/memory/meltdown", ("POST",))](
+        **session_kwargs
+    )
+
+    assert dossier == {"handler": "dossier"}
+    assert bootstrap == {"handler": "bootstrap"}
+    assert state == {"endpoint": "state"}
+    assert meltdown == {"endpoint": "memory/meltdown"}
+    assert calls == [
+        ("dossier", None, persona_kwargs),
+        ("bootstrap", None, session_kwargs),
+        ("scoped", "state", session_kwargs),
+        ("scoped", "memory/meltdown", session_kwargs),
+    ]
+
+
 def test_host_claim_adapters_preflight_before_nonce_authorization_and_keep_inventory_explicit() -> None:
     import inspect
     from sylanne_alpha.webui_routes import WebUIRoutes
@@ -617,6 +733,96 @@ async def test_pages_broker_rejects_registered_path_mismatch_before_scope_access
 
     assert result == {"error": "invalid_scoped_request", "status": 400}
     assert service._pending_nonces == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handler_kind", "expected_error"),
+    [
+        ("dossier", "invalid_persona_request"),
+        ("bootstrap", "invalid_scoped_request"),
+        ("canonical", "invalid_scoped_request"),
+    ],
+)
+async def test_native_dynamic_path_mismatch_fails_before_scope_or_nonce_access(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    handler_kind: str,
+    expected_error: str,
+) -> None:
+    from tests.test_scoped_api import _principal, _service
+    from sylanne_alpha.webui_routes import WebUIRoutes
+
+    service, _repository, registry, scope, relation = _service(tmp_path)
+    principal = _principal(f"principal_v1_native_mismatch_{handler_kind}")
+    pending = service.bootstrap_nonce(
+        ScopeApiPathEcho(
+            bot_ref=scope.bot_ref.token,
+            persona_ref=scope.persona_ref.token,
+            session_ref=scope.session_ref.token,
+        ),
+        principal=principal,
+        endpoint="state",
+        method="GET",
+    )
+    assert isinstance(pending, str)
+    pending_before = dict(service._pending_nonces)
+
+    def must_not_run(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("path mismatch must fail before scope or nonce access")
+
+    monkeypatch.setattr(service, "resolve", must_not_run)
+    monkeypatch.setattr(service, "bootstrap_nonce", must_not_run)
+    monkeypatch.setattr(service, "persona_dossier_payload", must_not_run)
+
+    class Plugin:
+        _scoped_api_service = service
+        _scope_runtime_registry = registry
+        _scoped_api_principal_scope_grant = staticmethod(lambda *_args: relation)
+        _scoped_api_principal_persona_grant = staticmethod(lambda *_args: None)
+        _scoped_api_principal_from_authenticated_host = staticmethod(must_not_run)
+
+    path_params = {
+        "bot_ref": scope.bot_ref.token,
+        "persona_ref": scope.persona_ref.token,
+        "session_ref": scope.session_ref.token,
+    }
+    web = ModuleType("astrbot.api.web")
+    web.request = SimpleNamespace(
+        username="dashboard-user",
+        headers={SCOPE_NONCE_HEADER: pending},
+        path_params=path_params,
+        query={},
+        method="POST" if handler_kind == "bootstrap" else "GET",
+    )
+    monkeypatch.setitem(sys.modules, "astrbot.api.web", web)
+    routes = WebUIRoutes(Plugin())
+
+    if handler_kind == "dossier":
+        result = await routes.persona_dossier_handler(
+            registered_path_params={
+                "bot_ref": path_params["bot_ref"],
+                "persona_ref": "persona_v1_mismatched",
+            }
+        )
+    elif handler_kind == "bootstrap":
+        result = await routes.scope_bootstrap_handler(
+            registered_path_params={
+                **path_params,
+                "session_ref": "session_v1_mismatched",
+            }
+        )
+    else:
+        result = await routes.scoped_api_handler(
+            "state",
+            registered_path_params={
+                **path_params,
+                "session_ref": "session_v1_mismatched",
+            },
+        )
+
+    assert result == {"error": expected_error, "status": 400}
+    assert service._pending_nonces == pending_before
 
 
 @pytest.mark.asyncio
