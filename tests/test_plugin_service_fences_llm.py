@@ -119,7 +119,6 @@ class _PoisonPlugin:
         self._amnesia_sessions: set[str] = set()
         self._scope_runtime_registry = None
         self._store = SimpleNamespace(hosts={})
-        self._life_simulator_started = True
 
     def __getattr__(self, name: str) -> Any:
         if name in {
@@ -129,6 +128,15 @@ class _PoisonPlugin:
             "_rhythm_learner",
             "_social_field",
             "_host",
+            "_life_simulator_started",
+            "_start_life_simulator",
+            "_start_webui_if_enabled",
+            "_autonomy_scheduler",
+            "_computation_logs",
+            "_detect_astrbot_group_context",
+            "_life_simulator",
+            "_proactive_scheduler",
+            "_proactive_dispatch_audit",
         }:
             self.accesses.append(name)
             raise AssertionError(f"plugin fallback forbidden: {name}")
@@ -520,9 +528,14 @@ class _ShelfHost:
             return {"warmth": 0.5}
 
     def __init__(self) -> None:
+        self.events: list[Any] = []
         self.kernel = SimpleNamespace(
-            computation=SimpleNamespace(engine=self._Engine())
+            computation=SimpleNamespace(engine=self._Engine()),
+            _last_computation_result={},
         )
+
+    def on_request(self, event: Any, *, assessment: Any = None) -> None:
+        self.events.append((event, assessment))
 
 
 class _ShelfRuntimePlugin:
@@ -737,8 +750,8 @@ def test_explicit_same_plugin_shelf_recall_uses_each_service_config_only() -> No
     assert plugin.plugin_config_calls == []
 
 
-def _seed_shelf_buffer(plugin: _ShelfRuntimePlugin) -> None:
-    buf = plugin._store.conversation_buffers.get_or_create(
+def _seed_shelf_buffer(pipe: LLMRequestPipeline) -> None:
+    buf = pipe._conversation_buffer_for_session(
         "same", lambda: ConversationBuffer(session_key="same")
     )
     buf.append("user", "hello")
@@ -766,10 +779,10 @@ def test_explicit_same_plugin_shelf_writes_use_service_backend_and_clock() -> No
 
     pipe_a._summarizer_llm_call = _summary
     pipe_b._summarizer_llm_call = _summary
-    _seed_shelf_buffer(plugin)
+    _seed_shelf_buffer(pipe_a)
     asyncio.run(pipe_a._flush_conversation_to_l1("same"))
     snapshot_a = deepcopy(backend_a)
-    _seed_shelf_buffer(plugin)
+    _seed_shelf_buffer(pipe_b)
     asyncio.run(pipe_b._flush_conversation_to_l1("same"))
 
     shelf_key = person_shelf_kv_key("unit", "person")
@@ -805,9 +818,9 @@ def test_explicit_same_plugin_shelf_write_uses_each_service_config_only() -> Non
 
     pipe_a._summarizer_llm_call = _summary
     pipe_b._summarizer_llm_call = _summary
-    _seed_shelf_buffer(plugin)
+    _seed_shelf_buffer(pipe_a)
     asyncio.run(pipe_a._flush_conversation_to_l1("same"))
-    _seed_shelf_buffer(plugin)
+    _seed_shelf_buffer(pipe_b)
     asyncio.run(pipe_b._flush_conversation_to_l1("same"))
 
     shelf_key = person_shelf_kv_key("unit", "person")
@@ -843,10 +856,260 @@ def test_explicit_persistence_uses_service_callback_and_missing_is_safe_noop() -
 
     pipe_with_callback._summarizer_llm_call = _summary
     pipe_without_callback._summarizer_llm_call = _summary
-    _seed_shelf_buffer(plugin)
+    _seed_shelf_buffer(pipe_with_callback)
     asyncio.run(pipe_with_callback._flush_conversation_to_l1("same"))
-    _seed_shelf_buffer(plugin)
+    _seed_shelf_buffer(pipe_without_callback)
     asyncio.run(pipe_without_callback._flush_conversation_to_l1("same"))
 
     assert callback_calls == ["same"]
     assert plugin.plugin_persist_calls == []
+
+
+class _FullAuthorityPoisonPlugin:
+    """Explicit-mode host whose ambient lifecycle integrations are all traps."""
+
+    _BANNED = {
+        "_life_simulator_started",
+        "_start_life_simulator",
+        "_start_webui_if_enabled",
+        "_autonomy_scheduler",
+        "_computation_logs",
+        "_detect_astrbot_group_context",
+        "_life_simulator",
+        "_proactive_scheduler",
+        "_proactive_dispatch_audit",
+        "_memory_system_for_session",
+    }
+
+    def __init__(self) -> None:
+        self.accesses: list[str] = []
+        self._scope_runtime_registry = None
+        self._store = SessionStateStore()
+
+    def __getattr__(self, name: str) -> Any:
+        if name in self._BANNED:
+            self.accesses.append(name)
+            raise AssertionError(f"explicit ambient capability forbidden: {name}")
+        raise AttributeError(name)
+
+
+class _GroupSocial(_PrivateSocial):
+    def is_group_context_by_key(self, _session_key: str) -> bool:
+        return True
+
+    def extract_group_id_from_key(self, _session_key: str) -> str:
+        return "group"
+
+    def drain_shadow_buffer(self, _group_id: str) -> list[dict[str, Any]]:
+        return []
+
+
+class _ObservationEngine:
+    def __init__(self, warmth: float = 0.4) -> None:
+        self._warmth = warmth
+        self.scar_state = SimpleNamespace(scars=[])
+        self.void_space = SimpleNamespace(voids=[])
+        self._coherence = 1.0
+
+    def observe(self) -> dict[str, float]:
+        return {"warmth": self._warmth}
+
+    def expression_drive(self) -> float:
+        return 0.0
+
+
+class _ObservationHost:
+    def __init__(self, warmth: float = 0.4) -> None:
+        self.events: list[Any] = []
+        self.kernel = SimpleNamespace(
+            computation=SimpleNamespace(engine=_ObservationEngine(warmth)),
+            _last_computation_result={},
+        )
+
+    def on_request(self, event: Any, *, assessment: Any = None) -> None:
+        self.events.append((event, assessment))
+
+
+def test_explicit_lifecycle_and_optional_integrations_never_probe_plugin(
+    monkeypatch: Any,
+) -> None:
+    plugin = _FullAuthorityPoisonPlugin()
+    host = _ObservationHost()
+    services = PluginServices(
+        config={},
+        social_field=_GroupSocial(),
+        session_key_fn=lambda _event: "",
+        host_fn=lambda _session_key: host,
+        observed_now_fn=lambda: 101.0,
+    )
+    pipe = LLMRequestPipeline(plugin, services=services)  # type: ignore[arg-type]
+    request = SimpleNamespace(extra_user_content_parts=[])
+
+    asyncio.run(pipe._on_llm_request_inner(SimpleNamespace(), request))
+    pipe._assemble_final_prompt(
+        request=request,
+        session_key="same",
+        budget=None,
+        gap_seconds=0.0,
+        current_prompt="hello",
+        time_fragment="",
+        message_text="hello",
+        state_fragment="",
+        unfinished_fragment="",
+        outreach_fragment="",
+        memory_fragment="",
+    )
+    asyncio.run(pipe._background_observe_request("same", "hello"))
+
+    qzone_calls: list[Any] = []
+
+    async def _qzone_trap(plugin_arg: Any, *_args: Any) -> None:
+        qzone_calls.append(plugin_arg)
+
+    from sylanne_alpha import qzone_share
+
+    monkeypatch.setattr(qzone_share, "handle_share_intent_candidate", _qzone_trap)
+    asyncio.run(pipe._qzone_candidate_handler(SimpleNamespace(), SimpleNamespace()))
+    pipe._mark_life_outcome("event", "consumed", "same")
+    pipe._record_dispatch_feedback("same", "answered", "event")
+
+    assert host.events
+    assert qzone_calls == []
+    assert plugin.accesses == []
+    assert "_background_tasks" not in plugin.__dict__
+    assert plugin._store.conversation_buffers.snapshot_items() == []
+
+
+class _AssessmentHost:
+    def __init__(self, warmth: float) -> None:
+        self.kernel = SimpleNamespace(
+            computation=SimpleNamespace(
+                engine=SimpleNamespace(
+                    observe=lambda: {
+                        "warmth": warmth,
+                        "tension": 0.0,
+                        "coherence": 1.0,
+                        "void_pressure": 0.0,
+                    }
+                ),
+                sheaf=SimpleNamespace(
+                    observe=lambda: {"dissociation_pressure": 0.0}
+                ),
+                expression=SimpleNamespace(state=lambda: {"intensity": 0.0}),
+                _last_assessment={},
+            )
+        )
+
+
+def test_explicit_same_plugin_same_session_assessment_state_is_pipeline_owned() -> None:
+    plugin = _ShelfRuntimePlugin()
+    host = _AssessmentHost(0.4)
+    services_a = PluginServices(config={}, host_fn=lambda _sk: host)
+    services_b = PluginServices(config={}, host_fn=lambda _sk: host)
+    pipe_a = LLMRequestPipeline(plugin, services=services_a)  # type: ignore[arg-type]
+    pipe_b = LLMRequestPipeline(plugin, services=services_b)  # type: ignore[arg-type]
+
+    async def _first_pair() -> tuple[str, str]:
+        first = await asyncio.gather(
+            pipe_a._dispatch_assessment("same", 1.0),
+            pipe_b._dispatch_assessment("same", 1.0),
+        )
+        return first[0], first[1]
+
+    first_a, first_b = asyncio.run(_first_pair())
+    second_a = asyncio.run(pipe_a._dispatch_assessment("same", 1.0))
+
+    assert first_a == "[当前状态：亲近感中]"
+    assert first_b == "[当前状态：亲近感中]"
+    assert second_a == ""
+    assert plugin._store.last_injected_states.snapshot_items() == []
+
+
+def test_explicit_same_plugin_same_session_buffers_and_memory_are_pipeline_owned() -> None:
+    plugin = _ShelfRuntimePlugin()
+    services_a = _explicit_shelf_services(plugin, {}, 101.0, config={})
+    services_b = _explicit_shelf_services(plugin, {}, 202.0, config={})
+    pipe_a = LLMRequestPipeline(plugin, services=services_a)  # type: ignore[arg-type]
+    pipe_b = LLMRequestPipeline(plugin, services=services_b)  # type: ignore[arg-type]
+    prompts_a: list[str] = []
+    prompts_b: list[str] = []
+
+    async def _summary_a(prompt: str) -> str:
+        prompts_a.append(prompt)
+        return "summary-a"
+
+    async def _summary_b(prompt: str) -> str:
+        prompts_b.append(prompt)
+        return "summary-b"
+
+    pipe_a._summarizer_llm_call = _summary_a
+    pipe_b._summarizer_llm_call = _summary_b
+
+    async def _exercise() -> None:
+        await asyncio.gather(
+            pipe_a._background_observe_request("same", "a-one"),
+            pipe_b._background_observe_request("same", "b-one"),
+        )
+        await asyncio.gather(
+            pipe_a._flush_conversation_to_l1("same"),
+            pipe_b._flush_conversation_to_l1("same"),
+        )
+        await pipe_a._background_observe_request("same", "a-two")
+        await pipe_a._flush_conversation_to_l1("same")
+
+    asyncio.run(_exercise())
+
+    assert len(prompts_a) == 2
+    assert len(prompts_b) == 1
+    assert "a-one" in prompts_a[0] and "b-one" not in prompts_a[0]
+    assert "b-one" in prompts_b[0] and "a-one" not in prompts_b[0]
+    assert "a-two" in prompts_a[1] and "b-one" not in prompts_a[1]
+    assert pipe_a._memory_system_for_session("same") is not pipe_b._memory_system_for_session(
+        "same"
+    )
+    assert plugin._store.conversation_buffers.snapshot_items() == []
+    assert plugin._memory_systems == {}
+
+
+def test_legacy_new_only_shelf_recall_lazily_builds_compat_services() -> None:
+    plugin = _ShelfRuntimePlugin()
+    plugin.config = {}
+    plugin._social_field = _PrivateSocial()
+    plugin.plugin_kv[person_shelf_kv_key("unit", "person")] = PersonShelfBucket(
+        items=[ShelfItem("legacy-positive", "private", "same", 101.0, 1.0)]
+    ).to_dict()
+    pipe = LLMRequestPipeline.__new__(LLMRequestPipeline)
+    pipe._p = plugin
+    pipe._plugin = plugin
+
+    fragment = asyncio.run(
+        pipe._recall_person_shelf_fragment(
+            _PrivateShelfEvent(),
+            "same",
+            SimpleNamespace(scope="all", visibility_tier="same_group"),
+        )
+    )
+
+    assert "legacy-positive" in fragment
+    assert plugin.plugin_kv_calls == [
+        ("get", person_shelf_kv_key("unit", "person"))
+    ]
+
+
+def test_explicit_new_only_missing_services_fails_closed_without_plugin_fallback() -> None:
+    plugin = _FullAuthorityPoisonPlugin()
+    pipe = LLMRequestPipeline.__new__(LLMRequestPipeline)
+    pipe._p = plugin
+    pipe._plugin = plugin
+    pipe._services_explicit = True
+
+    fragment = asyncio.run(
+        pipe._recall_person_shelf_fragment(
+            _PrivateShelfEvent(),
+            "same",
+            SimpleNamespace(scope="all", visibility_tier="same_group"),
+        )
+    )
+
+    assert fragment == ""
+    assert plugin.accesses == []

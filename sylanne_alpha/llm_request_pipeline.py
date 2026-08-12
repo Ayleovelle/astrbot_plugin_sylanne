@@ -764,48 +764,151 @@ class LLMRequestPipeline:
         if services is not None:
             self._services = services
         else:
-            def _compat_capability(name: str) -> Any | None:
-                try:
-                    return getattr(plugin, name, None)
-                except Exception:
-                    return None
-
-            config = _compat_capability("config")
-            if config is None:
-                config = _compat_capability("_config")
-            self._services = PluginServices(
-                config=config if config is not None else {},
-                logger=_compat_capability("logger"),
-                context=_compat_capability("context"),
-                rhythm_learner=_compat_capability("_rhythm_learner"),
-                social_field=_compat_capability("_social_field"),
-                put_kv_data=_compat_capability("put_kv_data"),
-                get_kv_data=_compat_capability("get_kv_data"),
-                delete_kv_data=_compat_capability("delete_kv_data"),
-                session_key_fn=_compat_capability("_session_key"),
-                host_fn=_compat_capability("_host"),
-                schedule_buffer_persist_fn=_compat_capability(
-                    "_schedule_buffer_persist"
-                ),
-                has_conversation_manager_fn=_compat_capability(
-                    "_has_conversation_manager"
-                ),
-                sync_message_to_conv_mgr_fn=_compat_capability(
-                    "_sync_message_to_conv_mgr"
-                ),
-                observe_response_fn=_compat_capability("observe_response"),
-                astrbot_message_fn=_compat_capability("_astrbot_message"),
-                observed_now_fn=_compat_capability("_observed_now"),
-                assess_emotion_fn=_compat_capability("_assess_emotion"),
-                save_state_fn=_compat_capability("_save_state"),
-                state_persistence=_compat_capability("_state_persistence"),
-            )
+            self._services = self._build_compat_services(plugin)
         if self._services_explicit:
             self._cached_system_prompts: dict[str, str] = {}
+            self._pipeline_conversation_buffers: dict[str, Any] = {}
+            self._pipeline_memory_systems: dict[str, Any] = {}
+            self._pipeline_last_injected_states: dict[str, dict[str, float]] = {}
         else:
             if not hasattr(self._p, "_cached_system_prompts"):
                 self._p._cached_system_prompts = {}
             self._cached_system_prompts = self._p._cached_system_prompts
+
+    @staticmethod
+    def _build_compat_services(plugin: Any) -> PluginServices:
+        """Build the historical plugin adapter without crossing an explicit fence."""
+
+        def _compat_capability(name: str) -> Any | None:
+            try:
+                return getattr(plugin, name, None)
+            except Exception:
+                return None
+
+        config = _compat_capability("config")
+        if config is None:
+            config = _compat_capability("_config")
+        return PluginServices(
+            config=config if config is not None else {},
+            logger=_compat_capability("logger"),
+            context=_compat_capability("context"),
+            rhythm_learner=_compat_capability("_rhythm_learner"),
+            social_field=_compat_capability("_social_field"),
+            put_kv_data=_compat_capability("put_kv_data"),
+            get_kv_data=_compat_capability("get_kv_data"),
+            delete_kv_data=_compat_capability("delete_kv_data"),
+            session_key_fn=_compat_capability("_session_key"),
+            host_fn=_compat_capability("_host"),
+            schedule_buffer_persist_fn=_compat_capability(
+                "_schedule_buffer_persist"
+            ),
+            has_conversation_manager_fn=_compat_capability(
+                "_has_conversation_manager"
+            ),
+            sync_message_to_conv_mgr_fn=_compat_capability(
+                "_sync_message_to_conv_mgr"
+            ),
+            observe_response_fn=_compat_capability("observe_response"),
+            astrbot_message_fn=_compat_capability("_astrbot_message"),
+            observed_now_fn=_compat_capability("_observed_now"),
+            assess_emotion_fn=_compat_capability("_assess_emotion"),
+            save_state_fn=_compat_capability("_save_state"),
+            state_persistence=_compat_capability("_state_persistence"),
+        )
+
+    def _service_bundle(self) -> PluginServices | None:
+        """Return services, lazily adapting only a legacy non-explicit fixture."""
+
+        services = getattr(self, "_services", None)
+        if services is not None:
+            return services
+        if getattr(self, "_services_explicit", False):
+            return None
+        plugin = getattr(self, "_p", None)
+        if plugin is None:
+            return None
+        services = self._build_compat_services(plugin)
+        self._services = services
+        return services
+
+    def _conversation_buffer_for_session(
+        self,
+        session_key: str,
+        factory: Any | None = None,
+    ) -> Any | None:
+        """Resolve the buffer from the selected per-instance state owner."""
+
+        if getattr(self, "_services_explicit", False):
+            buffers = getattr(self, "_pipeline_conversation_buffers", None)
+            if buffers is None:
+                buffers = {}
+                self._pipeline_conversation_buffers = buffers
+            if session_key not in buffers and callable(factory):
+                buffers[session_key] = factory()
+            return buffers.get(session_key)
+        buffers = self._p._store.conversation_buffers
+        if callable(factory):
+            return buffers.get_or_create(session_key, factory)
+        return buffers.get(session_key)
+
+    def _conversation_buffer_items(self) -> list[tuple[str, Any]]:
+        if getattr(self, "_services_explicit", False):
+            buffers = getattr(self, "_pipeline_conversation_buffers", {})
+            return list(buffers.items())
+        return self._p._store.conversation_buffers.snapshot_items()
+
+    def _memory_system_for_session(
+        self,
+        session_key: str,
+        *,
+        create: bool = True,
+    ) -> Any | None:
+        """Resolve memory from the pipeline owner in explicit-services mode."""
+
+        if getattr(self, "_services_explicit", False):
+            systems = getattr(self, "_pipeline_memory_systems", None)
+            if systems is None:
+                systems = {}
+                self._pipeline_memory_systems = systems
+            if session_key not in systems and create:
+                from sylanne_alpha.memory_system import MemorySystem
+
+                systems[session_key] = MemorySystem()
+            return systems.get(session_key)
+        if not create:
+            memory_map = getattr(getattr(self._p, "_store", None), "memory_systems", None)
+            if memory_map is None or not memory_map.has(session_key):
+                return None
+        return self._p._memory_system_for_session(session_key)
+
+    def _memory_system_items(self) -> list[tuple[str, Any]]:
+        if getattr(self, "_services_explicit", False):
+            systems = getattr(self, "_pipeline_memory_systems", {})
+            return list(systems.items())
+        return self._p._store.memory_systems.snapshot_items()
+
+    def _last_injected_state(self, session_key: str) -> dict[str, float]:
+        if getattr(self, "_services_explicit", False):
+            states = getattr(self, "_pipeline_last_injected_states", None)
+            if states is None:
+                states = {}
+                self._pipeline_last_injected_states = states
+            return dict(states.get(session_key) or {})
+        return dict(self._p._store.last_injected_states.get(session_key) or {})
+
+    def _set_last_injected_state(
+        self,
+        session_key: str,
+        state: dict[str, float],
+    ) -> None:
+        if getattr(self, "_services_explicit", False):
+            states = getattr(self, "_pipeline_last_injected_states", None)
+            if states is None:
+                states = {}
+                self._pipeline_last_injected_states = states
+            states[session_key] = dict(state)
+            return
+        self._p._store.last_injected_states.set(session_key, state)
 
     def _now(self) -> float | None:
         """Return the authoritative observed time for this services instance.
@@ -872,13 +975,8 @@ class LLMRequestPipeline:
     def _service_host(self, session_key: str) -> Any | None:
         """Resolve a host only through the injected callback capability."""
 
-        services = getattr(self, "_services", None)
+        services = self._service_bundle()
         host_fn = getattr(services, "host_fn", None)
-        if (
-            services is None
-            and not getattr(self, "_services_explicit", False)
-        ):
-            host_fn = getattr(self._p, "_host", None)
         if not callable(host_fn):
             return None
         try:
@@ -889,7 +987,7 @@ class LLMRequestPipeline:
     def _service_social_field(self) -> Any | None:
         """Return injected social authority, with legacy-fixture compatibility."""
 
-        services = getattr(self, "_services", None)
+        services = self._service_bundle()
         if services is not None:
             return services.social_field
         if getattr(self, "_services_explicit", False):
@@ -899,7 +997,7 @@ class LLMRequestPipeline:
     def _service_config(self) -> Mapping[str, Any]:
         """Return config from the same authority as the selected service mode."""
 
-        services = getattr(self, "_services", None)
+        services = self._service_bundle()
         if services is not None:
             config = services.config
             return config if isinstance(config, Mapping) else {}
@@ -963,7 +1061,8 @@ class LLMRequestPipeline:
         """Persist through the selected authority; missing explicit caps are a no-op."""
 
         if getattr(self, "_services_explicit", False):
-            save_state = self._services.save_state_fn
+            services = self._service_bundle()
+            save_state = getattr(services, "save_state_fn", None)
             if not callable(save_state):
                 return
             result = save_state(session_key)
@@ -979,7 +1078,8 @@ class LLMRequestPipeline:
     def _service_session_key(self, event: Any) -> str:
         """Resolve an event key only through the injected callback capability."""
 
-        session_key_fn = self._services.session_key_fn
+        services = self._service_bundle()
+        session_key_fn = getattr(services, "session_key_fn", None)
         if not callable(session_key_fn):
             return ""
         try:
@@ -991,7 +1091,8 @@ class LLMRequestPipeline:
     def _schedule_buffer_persist(self, session_key: str) -> None:
         """Invoke the injected persistence scheduler when that capability exists."""
 
-        schedule = self._services.schedule_buffer_persist_fn
+        services = self._service_bundle()
+        schedule = getattr(services, "schedule_buffer_persist_fn", None)
         if not callable(schedule):
             return
         try:
@@ -1461,23 +1562,27 @@ class LLMRequestPipeline:
         """
         p = self._p
         # 流式/分段/预算等运行态已迁入 p._store（CP8-P2），无需懒初始化。
-        if not hasattr(p, "_background_tasks") or not isinstance(p._background_tasks, list):
-            if hasattr(p, "_background_tasks"):
-                logger.warning(
-                    "Sylanne: _background_tasks type mismatch (expected list, got %s), rebuilding",
-                    type(p._background_tasks).__name__,
-                )
-            p._background_tasks = []
-        # 碎片防抖缓冲已迁入 p._store.fragment_buffers（CP8 inline-await 方案B），
-        # 旧 p._fragment_buffers / p._fragment_timers 懒初始化整体废弃。
-        p._start_webui_if_enabled()
-        # 首次请求时启动记忆 v2 后台定时器（会话空闲检查 + 整理循环）
-        if not hasattr(p, "_memory_timers_started"):
-            p._memory_timers_started = True
-            loop = asyncio.get_running_loop()
-            t1 = loop.create_task(self._session_idle_check_loop())
-            t2 = loop.create_task(self._consolidation_loop())
-            p._background_tasks.extend([t1, t2])
+        if not getattr(self, "_services_explicit", False):
+            if not hasattr(p, "_background_tasks") or not isinstance(
+                p._background_tasks, list
+            ):
+                if hasattr(p, "_background_tasks"):
+                    logger.warning(
+                        "Sylanne: _background_tasks type mismatch "
+                        "(expected list, got %s), rebuilding",
+                        type(p._background_tasks).__name__,
+                    )
+                p._background_tasks = []
+            # 碎片防抖缓冲已迁入 p._store.fragment_buffers（CP8 inline-await 方案B），
+            # 旧 p._fragment_buffers / p._fragment_timers 懒初始化整体废弃。
+            p._start_webui_if_enabled()
+            # 首次请求时启动记忆 v2 后台定时器（会话空闲检查 + 整理循环）
+            if not hasattr(p, "_memory_timers_started"):
+                p._memory_timers_started = True
+                loop = asyncio.get_running_loop()
+                t1 = loop.create_task(self._session_idle_check_loop())
+                t2 = loop.create_task(self._consolidation_loop())
+                p._background_tasks.extend([t1, t2])
         session_key = self._service_session_key(event)
         if not session_key:
             return
@@ -1497,7 +1602,7 @@ class LLMRequestPipeline:
         realtime_enabled, intercept = realtime_flags(self._service_config())
         # ---- 群聊 SFPD（社交场域感知调度）----
         # 收集社交信号 → 传入计算栈 → L7 表达层决定是否响应
-        social = self._services.social_field
+        social = self._service_social_field()
         if social is None:
             return
         _is_group = social.is_group_context(event)
@@ -1589,7 +1694,8 @@ class LLMRequestPipeline:
             # 回退到上面算出的配置/默认值，零行为变化。
             median_gap = None
             try:
-                rhythm = self._services.rhythm_learner
+                services = self._service_bundle()
+                rhythm = getattr(services, "rhythm_learner", None)
                 if rhythm is not None:
                     median_gap = rhythm.get_intra_burst_median_gap(session_key)
             except Exception:
@@ -1719,16 +1825,17 @@ class LLMRequestPipeline:
 
         # Step 0: v2core PERCEPT（碎片合并/SFPD 之后，文本与是否应答已确定）
         v2_overlay_fragments: list[tuple[str, str, str, int]] = []
-        try:
-            from sylanne_alpha.v2core.integration import apply_v2core_request
+        if not getattr(self, "_services_explicit", False):
+            try:
+                from sylanne_alpha.v2core.integration import apply_v2core_request
 
-            v2_overlay_fragments = await apply_v2core_request(
-                p, event, request, defer_overlay=True
-            )
-        except Exception as exc:
-            logger.error(
-                "Sylanne v2core request stage error: %s", exc, exc_info=True
-            )
+                v2_overlay_fragments = await apply_v2core_request(
+                    p, event, request, defer_overlay=True
+                )
+            except Exception as exc:
+                logger.error(
+                    "Sylanne v2core request stage error: %s", exc, exc_info=True
+                )
 
         # Step 0.5: 交付模式门控（2026-06-15 事故 P0-3）。两档独立粒度：
         #   宽——本轮无附件即摘代码执行逃生舱工具（防 thrash，纯聊天用不到）；
@@ -1739,7 +1846,7 @@ class LLMRequestPipeline:
         try:
             from sylanne_alpha import deliverable_mode
 
-            buf = p._store.conversation_buffers.get(session_key)
+            buf = self._conversation_buffer_for_session(session_key)
             outcome = deliverable_mode.apply(event, request, buf)
             deliverable_contract_pending = bool(outcome.get("should_contract"))
             if outcome.get("gated_tools") or deliverable_contract_pending:
@@ -1814,7 +1921,11 @@ class LLMRequestPipeline:
         # 显式传入——facade 只读这些入参，绝不回头去摸 v2 运行态。
         # 默认关时 capture_request 首行即 return；开着也只冻结事实、不推进 v3 状态、不阻塞。
         # 全部异常封在 facade 内部，这里没有 try 是刻意的：它保证不抛。
-        _v3 = getattr(p, "_v3_shadow", None)
+        _v3 = (
+            None
+            if getattr(self, "_services_explicit", False)
+            else getattr(p, "_v3_shadow", None)
+        )
         if _v3 is not None and _v3.accepting:
             try:
                 from sylanne_alpha.v2core.lexicon import read_signals
@@ -1836,7 +1947,7 @@ class LLMRequestPipeline:
                     text_length=len(message_text or ""),
                     history_present=history_depth > 0,
                     gap_seconds=gap_seconds,
-                    body=p._store.last_injected_states.get(session_key),
+                    body=self._last_injected_state(session_key),
                     addressed=_v3_addressed_of(event),
                     proactive=_v3_proactive_of(p, session_key),
                     text_warm=float(_v3_signals.warm),
@@ -2179,12 +2290,11 @@ class LLMRequestPipeline:
         # memory_system 时才查，避免为全新会话提前创建实例（无实例=无待办）。
         if message_text:
             try:
-                _mem_map = getattr(p, "_store", None)
-                _mem_map = getattr(_mem_map, "memory_systems", None) if _mem_map else None
-                if _mem_map is not None and _mem_map.has(session_key):
-                    _existing_mem = _mem_map.get(session_key)
-                    if _existing_mem is not None:
-                        _existing_mem.consume_pending_followups_by_text(message_text)
+                _existing_mem = self._memory_system_for_session(
+                    session_key, create=False
+                )
+                if _existing_mem is not None:
+                    _existing_mem.consume_pending_followups_by_text(message_text)
             except Exception as e:
                 logger.debug(f"Sylanne pending followup consume-on-mention skipped: {e}")
 
@@ -2271,7 +2381,7 @@ class LLMRequestPipeline:
         recall_allowed = message_text and gap_seconds >= _MEMORY_GAP_SKIP
         host = self._service_host(session_key) if recall_allowed else None
         if recall_allowed and host is not None:
-            memory_system = p._memory_system_for_session(session_key)
+            memory_system = self._memory_system_for_session(session_key)
             current_warmth = host.kernel.computation.engine.observe().get("warmth", 0.0)
             query_embedding = None
             enabled = bool(
@@ -2325,10 +2435,11 @@ class LLMRequestPipeline:
                         peek_percept_recalled_texts,
                     )
 
-                    _percept_texts = peek_percept_recalled_texts(
-                        p,
-                        self._active_scope() or session_key,
-                    )
+                    if not getattr(self, "_services_explicit", False):
+                        _percept_texts = peek_percept_recalled_texts(
+                            p,
+                            self._active_scope() or session_key,
+                        )
                 except Exception:
                     _percept_texts = set()
                 if _percept_texts:
@@ -2408,7 +2519,7 @@ class LLMRequestPipeline:
         if _deferred_life_sim_write is not None:
             _clean_reason, _life_event_id = _deferred_life_sim_write
             try:
-                mem_sys = p._memory_system_for_session(session_key)
+                mem_sys = self._memory_system_for_session(session_key)
                 # PR-D/F：life_sim 固定 shareable（可召回，非 internal）、confidence=0.5
                 # （中性，不回灌 ShareIntent.final_score）、life_event_id 作结构化去重键。
                 mem_sys.write_summary(
@@ -2447,7 +2558,9 @@ class LLMRequestPipeline:
         try/except——任一层出异常都返回空串，不会把部分过滤/未过滤的内容
         泄漏出去。
         """
-        p = self._p
+        services = self._service_bundle()
+        if services is None:
+            return ""
         from sylanne_alpha.person_shelf import (
             format_shelf_injection,
             group_id_from_origin,
@@ -2496,7 +2609,7 @@ class LLMRequestPipeline:
         # 无关。改用 event 真源：`get_message_type()` + `get_group_id()`，
         # 与写侧 `resolve_authenticated_identity` 的 group 判据同一口径，
         # 写读两侧的 origin group_id 由此真正对齐（R3 同群放行才真的成立）。
-        social = self._services.social_field
+        social = services.social_field
         if social is None:
             return ""
         try:
@@ -2570,7 +2683,7 @@ class LLMRequestPipeline:
 
         # ---- 查询阶段（R5 第一次闸）----
         try:
-            bucket = await load_person_shelf(self._services, platform, sender_id)
+            bucket = await load_person_shelf(services, platform, sender_id)
             if not bucket.items:
                 return ""
             candidates = [it for it in bucket.items if _visible(it)]
@@ -2607,7 +2720,6 @@ class LLMRequestPipeline:
         Returns:
             state_fragment 字符串，无信号时为空。
         """
-        p = self._p
         host = self._service_host(session_key)
         if host is None:
             return ""
@@ -2638,7 +2750,7 @@ class LLMRequestPipeline:
 
         # 上一轮注入状态（短 gap 慢变信号比较）：2.1.0 从 kernel._last_injected_state slot
         # 挪到 agent 层 _store（SDK 整树同步会冲掉该 slot，存 agent 层解耦 SDK 依赖）。
-        _prev_state = p._store.last_injected_states.get(session_key) or {}
+        _prev_state = self._last_injected_state(session_key)
         signals: list[str] = []
 
         if valence > 0.5:
@@ -2692,7 +2804,9 @@ class LLMRequestPipeline:
             state_fragment = f"[当前状态：{'，'.join(signals)}]"
 
         # 保存当前状态快照供下一轮短 gap 比较（2.1.0 存 agent 层 _store，不再依赖 kernel slot）
-        p._store.last_injected_states.set(session_key, {"warmth": warmth, "tension": tension})
+        self._set_last_injected_state(
+            session_key, {"warmth": warmth, "tension": tension}
+        )
         return state_fragment
 
     # ------------------------------------------------------------------
@@ -2726,7 +2840,8 @@ class LLMRequestPipeline:
         # 原先只在 webui 展示、从不入 prompt。这里把它落成一句长度提示——用户一直发短句
         # （纠正/追问）时压短回复，别拿大段轰炸。仅在明显偏离中性(1.0)时出手，避免噪声。
         try:
-            rhythm = self._services.rhythm_learner
+            services = self._service_bundle()
+            rhythm = getattr(services, "rhythm_learner", None)
             if rhythm is None:
                 raise LookupError("rhythm capability unavailable")
             rl_factor = float(rhythm.get_reply_length_factor(session_key))
@@ -2804,7 +2919,10 @@ class LLMRequestPipeline:
             )
 
         # 兜底：若 initialize() 生命周期钩子未启动生命模拟器（幂等，已启动则跳过）
-        if not getattr(p, "_life_simulator_started", False):
+        if (
+            not getattr(self, "_services_explicit", False)
+            and not getattr(p, "_life_simulator_started", False)
+        ):
             start_fn = getattr(p, "_start_life_simulator", None)
             if callable(start_fn):
                 start_fn()
@@ -2838,13 +2956,16 @@ class LLMRequestPipeline:
 
             # CP8-P4-D：会话首次活跃时从 KV 恢复一次进化档案（跨重启累积学习）。
             # host() 同步无法 await，故恢复放在此异步入口；一次性守卫内部自管。
-            sched = getattr(p, "_autonomy_scheduler", None)
-            consol = getattr(sched, "_consolidation", None)
-            if consol is not None:
-                try:
-                    await consol.ensure_restored(session_key)
-                except Exception as exc:
-                    logger.debug("Sylanne restore evolution [%s]: %s", session_key, exc)
+            if not getattr(self, "_services_explicit", False):
+                sched = getattr(p, "_autonomy_scheduler", None)
+                consol = getattr(sched, "_consolidation", None)
+                if consol is not None:
+                    try:
+                        await consol.ensure_restored(session_key)
+                    except Exception as exc:
+                        logger.debug(
+                            "Sylanne restore evolution [%s]: %s", session_key, exc
+                        )
 
             # 将评估结果注入计算栈
             now = self._now()
@@ -2858,25 +2979,27 @@ class LLMRequestPipeline:
             # tick 的 assessment——apply_assessment 是 SDK 唯一 assessment 入口，借
             # 本来就要打的这一拍入体，零额外 tick。v1 退役后这是唯一评价来源；
             # 它不含 intent 键 → SDK 里 intent=="撒娇" 的硬编码路径自然断粮。
-            try:
-                from sylanne_alpha.v2core.integration import consume_pending_assessment
+            if not getattr(self, "_services_explicit", False):
+                try:
+                    from sylanne_alpha.v2core.integration import consume_pending_assessment
 
-                _v2a = consume_pending_assessment(p, scope or session_key)
-                if _v2a:
-                    pre_assessment = {**(pre_assessment or {}), **_v2a}
-            except Exception as exc:
-                logger.debug("Sylanne v2core assessment merge skipped: %s", exc)
+                    _v2a = consume_pending_assessment(p, scope or session_key)
+                    if _v2a:
+                        pre_assessment = {**(pre_assessment or {}), **_v2a}
+                except Exception as exc:
+                    logger.debug("Sylanne v2core assessment merge skipped: %s", exc)
             # 对话质量分(float)滞后注入 event.values["dialogue_quality"]:上一轮自评经
             # rt["pending_quality"] 携带至本轮 → kernel.tick 透传 process(dialogue_quality=)
             # → _drift_embodiment 自动漂移(canonical 正道,替代已退役 feedback_quality 后门)。
-            try:
-                from sylanne_alpha.v2core.integration import consume_pending_quality
+            if not getattr(self, "_services_explicit", False):
+                try:
+                    from sylanne_alpha.v2core.integration import consume_pending_quality
 
-                _dq = consume_pending_quality(p, scope or session_key)
-                if _dq is not None:
-                    event_values = {**event_values, "dialogue_quality": _dq}
-            except Exception as exc:
-                logger.debug("Sylanne v2core quality inject skipped: %s", exc)
+                    _dq = consume_pending_quality(p, scope or session_key)
+                    if _dq is not None:
+                        event_values = {**event_values, "dialogue_quality": _dq}
+                except Exception as exc:
+                    logger.debug("Sylanne v2core quality inject skipped: %s", exc)
             event = SylanneAlphaHostEvent(
                 text=text,
                 confidence=event_confidence,
@@ -2947,7 +3070,8 @@ class LLMRequestPipeline:
                     "assessor": pre_assessment if pre_assessment else None,
                     "timing_ns": _comp_timing_ns(host.kernel.computation),
                 }
-                p._computation_logs.append(log_entry)
+                if not getattr(self, "_services_explicit", False):
+                    p._computation_logs.append(log_entry)
             except Exception:
                 pass  # Never let logging break the main path
 
@@ -2961,16 +3085,16 @@ class LLMRequestPipeline:
             _current_warmth = host.kernel.computation.engine.observe().get(
                 "warmth", 0.0
             )
-            memory_system = p._memory_system_for_session(session_key)
+            memory_system = self._memory_system_for_session(session_key)
 
             # 将用户消息追加到对话缓冲区（v2：不直接写入记忆层）
             from sylanne_alpha.memory_system import ConversationBuffer
 
-            buf = p._store.conversation_buffers.get_or_create(
+            buf = self._conversation_buffer_for_session(
                 session_key, lambda: ConversationBuffer(session_key=session_key)
             )
             # 群聊：在用户消息前注入影子缓冲区（旁观到的群聊上下文）
-            social = self._services.social_field
+            social = self._service_social_field()
             _is_group = bool(
                 social is not None and social.is_group_context_by_key(session_key)
             )
@@ -2980,7 +3104,11 @@ class LLMRequestPipeline:
                 else ""
             )
             if _is_group and _group_id:
-                _astrbot_group_context_active = p._detect_astrbot_group_context()
+                _astrbot_group_context_active = (
+                    False
+                    if getattr(self, "_services_explicit", False)
+                    else p._detect_astrbot_group_context()
+                )
                 shadow_entries = social.drain_shadow_buffer(_group_id)
                 if shadow_entries and shadow_entries[-1]["text"][:200] == text[:200]:
                     shadow_entries = shadow_entries[:-1]
@@ -3045,7 +3173,7 @@ class LLMRequestPipeline:
         """
         p = self._plugin
         try:
-            memory_system = p._memory_system_for_session(session_key)
+            memory_system = self._memory_system_for_session(session_key)
             texts = [item.text[:200] for item in items[:10]]
             items_text = "\n".join(f"- {t}" for t in texts)[:2000]
             items_text = sanitize_for_summary(items_text)
@@ -3110,7 +3238,7 @@ class LLMRequestPipeline:
         p = self._plugin
 
         try:
-            buf = p._store.conversation_buffers.get(session_key)
+            buf = self._conversation_buffer_for_session(session_key)
             if not buf or not buf.messages:
                 return
             host = self._service_host(session_key)
@@ -3120,7 +3248,7 @@ class LLMRequestPipeline:
             if not msgs:
                 return
 
-            memory_system = p._memory_system_for_session(session_key)
+            memory_system = self._memory_system_for_session(session_key)
             current_warmth = host.kernel.computation.engine.observe().get("warmth", 0.0)
 
             # Build conversation text for summarization (truncate to 2000 chars)
@@ -3329,8 +3457,9 @@ class LLMRequestPipeline:
                                         # 缓存清空(session_context.py:681 超 512 整表
                                         # clear)或重启后即分叉，导致反向索引键写读
                                         # 不一致、货架桶在 purge 后残留。
-                                        state_persistence = (
-                                            self._services.state_persistence
+                                        services = self._service_bundle()
+                                        state_persistence = getattr(
+                                            services, "state_persistence", None
                                         )
                                         if state_persistence is None:
                                             raise RuntimeError(
@@ -3346,7 +3475,7 @@ class LLMRequestPipeline:
                                             )
                                         shelf_registered = (
                                             await register_person_shelf_origin(
-                                                self._services,
+                                                services,
                                                 shelf_safe_sk,
                                                 shelf_platform,
                                                 shelf_sender_id,
@@ -3355,7 +3484,7 @@ class LLMRequestPipeline:
                                         )
                                         if shelf_registered:
                                             shelf_bucket = await load_person_shelf(
-                                                self._services,
+                                                services,
                                                 shelf_platform,
                                                 shelf_sender_id,
                                             )
@@ -3369,7 +3498,7 @@ class LLMRequestPipeline:
                                                 )
                                             )
                                             await save_person_shelf(
-                                                self._services,
+                                                services,
                                                 shelf_platform,
                                                 shelf_sender_id,
                                                 shelf_bucket,
@@ -3417,12 +3546,11 @@ class LLMRequestPipeline:
 
     async def _session_idle_check_loop(self) -> None:
         """每10秒检查会话缓冲区是否需要 flush。"""
-        p = self._plugin
         try:
             while True:
                 await asyncio.sleep(10)
                 try:
-                    for session_key, buf in p._store.conversation_buffers.snapshot_items():
+                    for session_key, buf in self._conversation_buffer_items():
                         reason = buf.should_flush()
                         if reason:
                             await self._flush_conversation_to_l1(session_key)
@@ -3443,12 +3571,11 @@ class LLMRequestPipeline:
 
     async def _consolidation_loop(self) -> None:
         """每5分钟检查是否需要执行整理（6:00/18:00 或 L1 满 60 条）。"""
-        p = self._p
         try:
             while True:
                 await asyncio.sleep(300)
                 try:
-                    for session_key, memory_system in p._store.memory_systems.snapshot_items():
+                    for session_key, memory_system in self._memory_system_items():
                         if not memory_system.needs_consolidation():
                             continue
                         completed = await self._run_consolidation(
@@ -3886,6 +4013,8 @@ class LLMRequestPipeline:
         感知 LLM/HTTP 细节。任何异常都不应回传给 life_sim tick（qzone_share 内部
         已 try/except 兜底，这里再兜一层防御性网）。
         """
+        if getattr(self, "_services_explicit", False):
+            return
         try:
             from sylanne_alpha import qzone_share
 
@@ -4198,7 +4327,7 @@ class LLMRequestPipeline:
           feedback_pressure/cooldown——等于她自己的收回被记成用户冷淡。
         audit 按 session_key 索引（origin_session 隔离：A 没回应不抬 B 的 cooldown）。
         """
-        if not event_id:
+        if getattr(self, "_services_explicit", False) or not event_id:
             return
         # M8：先写反馈 audit（不依赖 life_sim 是否存在；session_key 空则跳过）。
         # withheld 不在此列——她自己收回的发言不该反过来抬用户的"冷淡"计数。
@@ -4259,6 +4388,8 @@ class LLMRequestPipeline:
             elif LLMRequestPipeline._requires_scoped_runtime(self):
                 # A real registry without the exact binding must not write a
                 # similarly named raw session bucket.
+                return
+            elif getattr(self, "_services_explicit", False):
                 return
             else:
                 # Narrow registry-free compatibility for historical test doubles.
