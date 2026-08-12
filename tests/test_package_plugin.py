@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import importlib
+import json
 import os
 import subprocess
 import stat
+import struct
+import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -1185,3 +1191,118 @@ def test_machine_local_identity_is_always_excluded(
     )
 
     assert package_plugin.should_include(identity) is False
+
+
+def test_clean_committed_repo_builds_auditable_importable_package(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    files = {
+        ".gitignore": b"dist/\n",
+        "__init__.py": b"\"\"\"Acceptance package root.\"\"\"\n",
+        "main.py": (
+            b'PLUGIN_VERSION = "9.8.7"\n\n'
+            b"def register(*_args):\n"
+            b"    return lambda target: target\n\n"
+            b'@register("Sylanne", "2718labs", "acceptance", "9.8.7")\n'
+            b"class EmotionalStatePlugin:\n"
+            b"    pass\n"
+        ),
+        "metadata.yaml": b'version: "9.8.7"\n',
+        "sylanne_alpha/__init__.py": b"",
+        "sylanne_alpha/v3bridge/__init__.py": b"",
+        "sylanne_alpha/v3bridge/build_flags.py": (
+            b"raise RuntimeError('tracked placeholder must be replaced')\n"
+        ),
+        "sylanne_alpha/_engine/_identity.json": (
+            b'{"copy_id":"RAW-COPY-ID-SENTINEL"}\n'
+        ),
+        "raw/provider-secret.txt": b"RAW-SECRET-SENTINEL\n",
+        "UI/index.html": b"<!doctype html><title>Acceptance UI</title>\n",
+        "pages/dashboard/index.html": (
+            b"<!doctype html><title>Acceptance Pages</title>\n"
+        ),
+    }
+    for relative, content in files.items():
+        target = repo / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+
+    _git(repo, "init", "--quiet")
+    _git(repo, "config", "user.name", "Packaging Acceptance")
+    _git(repo, "config", "user.email", "packaging-acceptance@example.invalid")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "--quiet", "-m", "acceptance fixture")
+    commit = _git(repo, "rev-parse", "HEAD").stdout.decode("ascii").strip()
+    assert _git(repo, "status", "--porcelain").stdout == b""
+
+    monkeypatch.setattr(package_plugin, "ROOT", repo)
+    output = package_plugin.build_package(
+        repo / "dist" / "acceptance.zip",
+        channel="stable",
+    )
+    checksum = output.with_name(f"{output.name}.sha256")
+
+    with zipfile.ZipFile(output) as archive:
+        names = archive.namelist()
+        contents = {name: archive.read(name) for name in names}
+
+    prefix = f"{package_plugin.PLUGIN_NAME}/"
+    flags_name = f"{prefix}sylanne_alpha/v3bridge/build_flags.py"
+    manifest_name = f"{prefix}{package_plugin.MANIFEST_NAME}"
+    assert {
+        f"{prefix}UI/index.html",
+        f"{prefix}pages/dashboard/index.html",
+        flags_name,
+        manifest_name,
+        f"{prefix}main.py",
+        f"{prefix}metadata.yaml",
+    } <= set(names)
+    assert not [name for name in names if "_identity" in name or "/raw/" in name]
+    shipped_bytes = b"\n".join(contents.values())
+    assert b"RAW-COPY-ID-SENTINEL" not in shipped_bytes
+    assert b"RAW-SECRET-SENTINEL" not in shipped_bytes
+
+    manifest = json.loads(contents[manifest_name].decode("utf-8"))
+    assert manifest["schema"] == "sylanne_build_manifest_v1"
+    assert manifest["channel"] == "stable"
+    assert manifest["metadata_version"] == "9.8.7"
+    assert manifest["git_commit"] == commit
+    flags_digest = hashlib.sha256(contents[flags_name]).hexdigest()
+    assert manifest["generated_file_digest"] == flags_digest
+    assert manifest["generated_files"] == {flags_name: flags_digest}
+
+    payload = hashlib.sha256()
+    for name in sorted(
+        (entry for entry in names if entry != manifest_name),
+        key=lambda entry: entry.encode("utf-8"),
+    ):
+        path_bytes = name.encode("utf-8")
+        content = contents[name]
+        payload.update(struct.pack(">I", len(path_bytes)))
+        payload.update(path_bytes)
+        payload.update(struct.pack(">Q", len(content)))
+        payload.update(content)
+    assert manifest["payload_digest"] == payload.hexdigest()
+    archive_digest = hashlib.sha256(output.read_bytes()).hexdigest()
+    assert checksum.read_text(encoding="utf-8") == (
+        f"{archive_digest}  {output.name}\n"
+    )
+
+    sys.path.insert(0, str(output))
+    try:
+        flags = importlib.import_module(
+            "astrbot_plugin_sylanne.sylanne_alpha.v3bridge.build_flags"
+        )
+        assert flags.V3_SHADOW_ENABLED is False
+        assert flags.BUILD_CHANNEL == "stable"
+    finally:
+        sys.path.remove(str(output))
+        for name in list(sys.modules):
+            if name == package_plugin.PLUGIN_NAME or name.startswith(
+                f"{package_plugin.PLUGIN_NAME}."
+            ):
+                del sys.modules[name]
+
+    assert _git(repo, "status", "--porcelain").stdout == b""

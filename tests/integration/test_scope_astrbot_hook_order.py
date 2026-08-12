@@ -4,7 +4,9 @@ import asyncio
 import ast
 import contextvars
 from dataclasses import replace
+import hashlib
 import inspect
+import json
 import textwrap
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -148,7 +150,12 @@ def _proof_plugin(tmp_path):
     return plugin, manager
 
 
-def _install_proof_tail(monkeypatch, observed: list[RequestRuntimeView]) -> None:
+def _install_proof_tail(
+    monkeypatch,
+    observed: list[RequestRuntimeView],
+    *,
+    publish_transport_owner: bool = False,
+) -> None:
     monkeypatch.setattr(
         EmotionalStatePlugin,
         "_on_transport_ready_safety",
@@ -174,11 +181,12 @@ def _install_proof_tail(monkeypatch, observed: list[RequestRuntimeView]) -> None
         "_on_message_after_scope_frozen",
         legacy_ready,
     )
-    monkeypatch.setattr(
-        EmotionalStatePlugin,
-        "_publish_transport_runtime_owner",
-        lambda *_args: True,
-    )
+    if not publish_transport_owner:
+        monkeypatch.setattr(
+            EmotionalStatePlugin,
+            "_publish_transport_runtime_owner",
+            lambda *_args: True,
+        )
     monkeypatch.setattr(
         EmotionalStatePlugin,
         "_start_life_simulator",
@@ -189,6 +197,62 @@ def _install_proof_tail(monkeypatch, observed: list[RequestRuntimeView]) -> None
         "_on_scope_ready_llm_request",
         tail,
     )
+
+
+def _canonical_acceptance_snapshot(view: RequestRuntimeView) -> bytes:
+    scope = view.resolved.scope
+    assert scope is not None
+    token = scope.storage_token
+    store = view.persona_runtime.store
+
+    def snapshot_payload(gateway, component: str):
+        assert gateway is not None
+        snapshot = gateway.load(component)
+        if snapshot is None:
+            return None
+        return {
+            "generation": snapshot.generation,
+            "payload": snapshot.payload,
+        }
+
+    relation = view.relation_runtime
+    return json.dumps(
+        {
+            "scope": {
+                "bot_ref": scope.bot_ref.token,
+                "persona_ref": scope.persona_ref.token,
+                "session_ref": scope.session_ref.token,
+                "storage_token": token,
+                "scope_generation": scope.scope_generation,
+            },
+            "session_store": {
+                "last_user_text": store.last_user_texts.get(token),
+                "queue": store.background_post_queues.get(token),
+                "host": store.hosts.get(token),
+            },
+            "device": snapshot_payload(
+                view.session_runtime.persistence,
+                "device-context",
+            ),
+            "relation": (
+                None
+                if relation is None
+                else {
+                    "scope": {
+                        "persona_ref": relation.scope.persona_ref.token,
+                        "relation_ref": relation.scope.relation_ref.token,
+                    },
+                    "age": snapshot_payload(
+                        relation.persistence,
+                        "relationship-age",
+                    ),
+                }
+            ),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
 
 
 @pytest.mark.asyncio
@@ -1123,6 +1187,118 @@ async def test_concurrent_same_transport_message_isolated_by_bot_account(
         right_view.persona_runtime.store.last_user_texts.get(left_scope.storage_token)
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_same_bot_persona_a_b_a_restores_exact_owner_without_touching_b(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    plugin, manager = _proof_plugin(tmp_path)
+    observed: list[RequestRuntimeView] = []
+    _install_proof_tail(
+        monkeypatch,
+        observed,
+        publish_transport_owner=True,
+    )
+    base_personality = {
+        "begin_dialogs": [],
+        "tools": None,
+        "skills": [],
+    }
+    manager.resolve_selected_persona.side_effect = [
+        ("persona-a", {**base_personality, "prompt": "A"}, None, False),
+        ("persona-b", {**base_personality, "prompt": "B"}, None, False),
+        ("persona-a", {**base_personality, "prompt": "A"}, None, False),
+    ]
+    events = [
+        _ProofEvent(
+            "42",
+            "same-human",
+            self_id="same-bot",
+            message_id=message_id,
+        )
+        for message_id in ("turn-a-1", "turn-b", "turn-a-2")
+    ]
+    request = SimpleNamespace(conversation=SimpleNamespace(persona_id=None))
+
+    for event in events[:2]:
+        await EmotionalStatePlugin.on_message(plugin, event)
+        await EmotionalStatePlugin.on_llm_request(plugin, event, request)
+
+    first_a, persona_b = observed
+    a_scope = first_a.resolved.scope
+    b_scope = persona_b.resolved.scope
+    assert a_scope is not None and b_scope is not None
+    assert a_scope.bot_ref == b_scope.bot_ref
+    assert a_scope.session_ref == b_scope.session_ref
+    assert a_scope.persona_ref != b_scope.persona_ref
+    assert first_a.persona_runtime is not persona_b.persona_runtime
+    assert first_a.session_runtime is not persona_b.session_runtime
+    assert first_a.relation_runtime is not persona_b.relation_runtime
+    assert first_a.relation_runtime is not None
+    assert persona_b.relation_runtime is not None
+    assert (
+        first_a.relation_runtime.scope.relation_ref
+        == persona_b.relation_runtime.scope.relation_ref
+    )
+
+    first_a.persona_runtime.store.last_bot_texts.set(
+        a_scope.storage_token,
+        "A-sticky",
+    )
+    b_store = persona_b.persona_runtime.store
+    b_store.last_user_texts.set(b_scope.storage_token, "B-session")
+    b_store.background_post_queues.set(
+        b_scope.storage_token,
+        {"items": ["B-queue"]},
+    )
+    b_store.hosts.set(b_scope.storage_token, {"marker": "B-host"})
+    persona_b.relation_runtime.record_first_interaction(123.0)
+    device = persona_b.session_runtime.device_context_owner()
+    assert device is not None
+    device.detect_change("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+    before_b = _canonical_acceptance_snapshot(persona_b)
+    before_b_hash = hashlib.sha256(before_b).hexdigest()
+
+    await EmotionalStatePlugin.on_message(plugin, events[2])
+    await EmotionalStatePlugin.on_llm_request(plugin, events[2], request)
+
+    assert len(observed) == 3
+    restored_a = observed[2]
+    restored_scope = restored_a.resolved.scope
+    assert restored_scope == a_scope
+    assert restored_a is not first_a
+    assert restored_a.persona_runtime is first_a.persona_runtime
+    assert restored_a.session_runtime is first_a.session_runtime
+    assert restored_a.relation_runtime is first_a.relation_runtime
+    assert [
+        view.resolved.turn_generation for view in observed
+    ] == sorted(view.resolved.turn_generation for view in observed)
+    assert len({view.resolved.turn_generation for view in observed}) == 3
+    assert (
+        restored_a.persona_runtime.store.last_bot_texts.get(a_scope.storage_token)
+        == "A-sticky"
+    )
+
+    after_b = _canonical_acceptance_snapshot(persona_b)
+    assert after_b == before_b
+    assert hashlib.sha256(after_b).hexdigest() == before_b_hash
+    assert plugin._scope_runtime_registry.for_scope(b_scope) is persona_b.persona_runtime
+    assert plugin._scope_runtime_registry.exact_session(b_scope) is persona_b.session_runtime
+    assert plugin._scope_runtime_registry.for_scope(a_scope) is first_a.persona_runtime
+    assert plugin._scope_runtime_registry.exact_session(a_scope) is first_a.session_runtime
+    transport = events[2].get_extra("_sylanne_transport_scope_v1")
+    current_owner = plugin._scope_runtime_registry.transport_owner_or_none(transport)
+    assert current_owner is not None
+    assert current_owner.scope == a_scope
+    assert current_owner.persona_runtime is first_a.persona_runtime
+    assert current_owner.session_runtime is first_a.session_runtime
+    assert plugin._scope_runtime_registry.exact_session_or_none(None) is None
+    assert plugin._scope_runtime_registry.persona_count == 2
+    assert plugin._scope_runtime_registry.session_count == 2
+    assert manager.resolve_selected_persona.await_count == 3
+    assert [event.sender_reads for event in events] == [1, 1, 1]
 
 
 @pytest.mark.asyncio

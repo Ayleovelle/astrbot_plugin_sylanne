@@ -52,11 +52,12 @@ def _persona(index: int = 0) -> PersonaRevisionRef:
 
 def _source(
     *,
+    persona_id: str = "persona-genesis-test",
     prompt: str = "a calm, precise persona",
     begin_dialogs: tuple[str, ...] = (),
 ) -> PersonaSource:
     return PersonaSource(
-        persona_id="persona-genesis-test",
+        persona_id=persona_id,
         prompt=prompt,
         begin_dialogs=begin_dialogs,
         tools=None,
@@ -602,6 +603,139 @@ def test_provider_slot_is_exclusive_across_a_simulated_provider_await(tmp_path: 
     holder.join(timeout=20)
     assert holder.exitcode == 0
     assert outcomes.get(timeout=10) == ("holder", True)
+
+
+@pytest.mark.asyncio
+async def test_four_owner_restart_preserves_budget_backoff_and_single_provider_slot(
+    tmp_path: Path,
+) -> None:
+    repository = ScopeRepository(tmp_path)
+    sources = [
+        _source(persona_id=f"persona-{index}", prompt=f"prompt-{index}")
+        for index in range(4)
+    ]
+    personae = [
+        repository.activate_persona_revision(
+            _persona_for_source(source, index=index)
+        )
+        for index, source in enumerate(sources)
+    ]
+    first_provider = _Provider(error=RuntimeError("provider unavailable"))
+    first_context = _ProviderContext(first_provider)
+    first_task_sets: list[set[object]] = [set() for _ in personae]
+    first_owners = [
+        _owner(persona, repository, tasks)
+        for persona, tasks in zip(personae, first_task_sets, strict=True)
+    ]
+
+    first_tasks: list[asyncio.Task[None]] = []
+    for index, (owner, source, tasks) in enumerate(
+        zip(first_owners, sources, first_task_sets, strict=True),
+        start=1,
+    ):
+        assert owner.schedule(
+            source,
+            config=_enabled_config(),
+            context=first_context,
+            origin_turn_generation=index,
+        ) is False
+        task = next(iter(tasks))
+        assert isinstance(task, asyncio.Task)
+        first_tasks.append(task)
+
+    await asyncio.wait_for(first_provider.entered.wait(), timeout=1)
+    assert first_provider.calls == 1
+    assert first_context.lookups == 1
+    assert len(first_provider.requests) == 1
+    first_provider.release.set()
+    await asyncio.gather(*first_tasks)
+    assert all(not tasks for tasks in first_task_sets)
+
+    first_states = [repository.read_genesis(persona) for persona in personae]
+    backoff_indices = [
+        index
+        for index, snapshot in enumerate(first_states)
+        if snapshot is not None and snapshot.payload["state"] == "backoff"
+    ]
+    assert len(backoff_indices) == 1
+    backoff_index = backoff_indices[0]
+    assert all(
+        snapshot is None
+        for index, snapshot in enumerate(first_states)
+        if index != backoff_index
+    )
+    global_path = tmp_path / "persona-genesis-global.json"
+    first_global = json.loads(global_path.read_text(encoding="utf-8"))
+    assert first_global["calls"] == 1
+    assert first_global["lease"] is None
+    backoff_path = repository.genesis_path(personae[backoff_index])
+    backoff_bytes = backoff_path.read_bytes()
+
+    restarted = ScopeRepository(tmp_path)
+    restarted_global = json.loads(global_path.read_text(encoding="utf-8"))
+    assert restarted_global == first_global
+    blocked_tasks: set[object] = set()
+    blocked_provider = _Provider()
+    blocked_context = _ProviderContext(blocked_provider)
+    blocked_owner = _owner(
+        personae[backoff_index],
+        restarted,
+        blocked_tasks,
+    )
+    assert blocked_owner.schedule(
+        sources[backoff_index],
+        config=_enabled_config(),
+        context=blocked_context,
+        origin_turn_generation=99,
+    ) is False
+    assert blocked_tasks == set()
+    assert blocked_context.lookups == 0
+    assert blocked_provider.calls == 0
+
+    second_provider = _Provider()
+    second_context = _ProviderContext(second_provider)
+    remaining = [index for index in range(4) if index != backoff_index]
+    second_task_sets: list[set[object]] = [set() for _ in remaining]
+    second_owners = [
+        _owner(personae[index], restarted, tasks)
+        for index, tasks in zip(remaining, second_task_sets, strict=True)
+    ]
+    second_tasks: list[asyncio.Task[None]] = []
+    for index, owner, tasks in zip(
+        remaining,
+        second_owners,
+        second_task_sets,
+        strict=True,
+    ):
+        assert owner.schedule(
+            sources[index],
+            config=_enabled_config(),
+            context=second_context,
+            origin_turn_generation=100 + index,
+        ) is False
+        task = next(iter(tasks))
+        assert isinstance(task, asyncio.Task)
+        second_tasks.append(task)
+
+    await asyncio.wait_for(second_provider.entered.wait(), timeout=1)
+    assert second_provider.calls == 1
+    assert second_context.lookups == 1
+    assert len(second_provider.requests) == 1
+    second_provider.release.set()
+    await asyncio.gather(*second_tasks)
+    assert all(not tasks for tasks in second_task_sets)
+
+    final_states = [restarted.read_genesis(persona) for persona in personae]
+    assert sum(
+        snapshot is not None and snapshot.payload["state"] == "active"
+        for snapshot in final_states
+    ) == 1
+    assert final_states[backoff_index] is not None
+    assert final_states[backoff_index].payload["state"] == "backoff"
+    assert backoff_path.read_bytes() == backoff_bytes
+    final_global = json.loads(global_path.read_text(encoding="utf-8"))
+    assert final_global["calls"] == 2
+    assert final_global["lease"] is None
 
 
 def test_two_process_repositories_cas_daily_budget_at_32(tmp_path: Path) -> None:
