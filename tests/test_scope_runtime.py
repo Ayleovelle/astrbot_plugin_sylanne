@@ -34,6 +34,7 @@ from sylanne_alpha.scope_runtime import (
 )
 from sylanne_alpha.scope_repository import ScopeRepository
 from sylanne_alpha.session_context import SessionContext
+from sylanne_alpha.session_state_store import SessionStateStore
 from sylanne_alpha.v2core import integration
 from sylanne_alpha.webui_routes import WebUIRoutes
 from tests.scope_fixtures import scopes
@@ -653,6 +654,90 @@ async def test_claimed_session_child_inherits_generation_but_unbound_task_cannot
     )
 
     assert store.last_user_texts.get(scope.storage_token) == "inherited child"
+
+
+@pytest.mark.asyncio
+async def test_stale_generation_cannot_replace_or_enter_current_conv_sync_lease(
+    scopes,
+) -> None:
+    registry = ScopeRuntimeRegistry.for_test()
+    old_scope = scopes.bot_a_persona_a
+    new_scope = replace(old_scope, scope_generation=1)
+    registry.exact_session(old_scope)
+    store = registry.for_scope(old_scope).store
+    release_old = asyncio.Event()
+    old_entered: list[bool] = []
+    old_rejected: list[bool] = []
+
+    async def _old_generation_lease() -> None:
+        await release_old.wait()
+        try:
+            async with store.lease_conv_sync_lock(
+                old_scope.storage_token,
+                "old-generation-umo",
+            ):
+                old_entered.append(True)
+        except RuntimeError:
+            old_rejected.append(True)
+
+    old_task = asyncio.create_task(_old_generation_lease())
+    await asyncio.sleep(0)
+    registry.exact_session(new_scope)
+
+    async with store.lease_conv_sync_lock(
+        new_scope.storage_token,
+        "new-generation-umo",
+    ):
+        release_old.set()
+        await old_task
+        registry.release_session(old_scope)
+        assert store.conv_sync_locks.has("new-generation-umo") is True
+        assert store.conv_sync_locks.has("old-generation-umo") is False
+
+    assert old_rejected == [True]
+    assert old_entered == []
+    registry.release_session(new_scope)
+    assert store.conv_sync_locks.has("new-generation-umo") is False
+
+
+@pytest.mark.asyncio
+async def test_claim_release_metadata_is_bounded_without_stale_resurrection() -> None:
+    store = SessionStateStore()
+    first_token = "scope_v1_churn_0"
+    release_stale = asyncio.Event()
+    store.claim_session(first_token, 0)
+
+    async def _stale_write() -> None:
+        await release_stale.wait()
+        store.last_user_texts.set(first_token, "stale")
+
+    stale_task = asyncio.create_task(_stale_write())
+    await asyncio.sleep(0)
+    store.release_session(first_token)
+    for index in range(1, 205):
+        token = f"scope_v1_churn_{index}"
+        store.claim_session(token, 0)
+        store.last_user_texts.set(token, "current")
+        store.release_session(token)
+
+    assert len(store._scope_aware_tokens) <= 200
+    assert len(store._scope_generations) <= 200
+    assert store._session_generation_binding.get() == {}
+
+    release_stale.set()
+    await stale_task
+    await asyncio.create_task(
+        _stale_write(),
+        context=contextvars.Context(),
+    )
+    unchecked = dict(store.last_user_texts._snapshot_items_unchecked())
+    assert first_token not in unchecked
+
+    store.last_user_texts.set("legacy-session", "legacy")
+    store.release_session("legacy-session")
+    assert store.last_user_texts.get("legacy-session") is None
+    store.last_user_texts.set("legacy-session", "reused")
+    assert store.last_user_texts.get("legacy-session") == "reused"
 
 
 @pytest.mark.asyncio

@@ -930,7 +930,12 @@ class LLMRequestPipeline:
             # lifecycle already performs the release; resolving ``plugin._store``
             # after that scope is retired would cross the frozen-scope fence.
             return
-        self._runtime_owner().release_session(
+        owner = self._runtime_owner()
+        if expected_generation is None and owner.is_scope_aware_session(session_key):
+            expected_generation = owner.bound_session_generation(session_key)
+            if expected_generation is None:
+                return
+        owner.release_session(
             session_key,
             expected_generation=expected_generation,
         )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any
@@ -360,6 +361,43 @@ def test_explicit_prompt_cache_same_token_aba_rejects_old_generation_write() -> 
         resume_old.set()
         await old_task
         assert owner.system_prompt_cache.get("same") == "generation-two"
+
+    asyncio.run(_exercise())
+
+
+def test_explicit_claimed_release_without_generation_uses_calling_lease() -> None:
+    async def _exercise() -> None:
+        token = "scope_v1_pipeline_release"
+        owner = SessionStateStore()
+        pipe = LLMRequestPipeline(  # type: ignore[arg-type]
+            _PoisonPlugin(),
+            services=PluginServices(config={}, runtime_state=owner),
+        )
+        owner.claim_session(token, 1)
+        owner.system_prompt_cache.set(token, "generation-one")
+        release_old = asyncio.Event()
+
+        async def _old_generation_release() -> None:
+            await release_old.wait()
+            pipe.release_session(token)
+
+        old_task = asyncio.create_task(_old_generation_release())
+        await asyncio.sleep(0)
+        owner.claim_session(token, 2)
+        owner.system_prompt_cache.set(token, "generation-two")
+
+        release_old.set()
+        await old_task
+        assert owner.system_prompt_cache.get(token) == "generation-two"
+
+        await asyncio.create_task(
+            _old_generation_release(),
+            context=contextvars.Context(),
+        )
+        assert owner.system_prompt_cache.get(token) == "generation-two"
+
+        pipe.release_session(token)
+        assert owner.system_prompt_cache.get(token) is None
 
     asyncio.run(_exercise())
 

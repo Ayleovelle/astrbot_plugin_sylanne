@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import contextvars
+import hashlib
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, Generic, Iterator, TypeVar
 
@@ -34,6 +35,9 @@ if TYPE_CHECKING:
     from sylanne_alpha.memory_system import MemorySystem
 
 V = TypeVar("V")
+
+_OWNER_LEASE_CAPACITY = 200
+_SCOPE_FILTER_BYTES = 2048
 
 
 class SessionMap(Generic[V]):
@@ -144,6 +148,11 @@ class SessionMap(Generic[V]):
 
         return self._d.pop(key, default)
 
+    def _get_unchecked(self, key: str, default: V | None = None) -> V | None:
+        """Store-internal exact-owner read primitive."""
+
+        return self._d.get(key, default)
+
     def _clear_unchecked(self) -> None:
         """Store-internal global lifecycle cleanup primitive."""
 
@@ -182,8 +191,18 @@ class SessionStateStore:
         # 登记表：所有需按 session_key 清理的 SessionMap（register 自动追加）
         self._maps: list[SessionMap] = []
         self._task_cleanup_waiters: set[asyncio.Task[Any]] = set()
-        self._scope_aware_tokens: set[str] = set()
-        self._scope_generations: dict[str, int] = {}
+        # Keep the current/retired high-water generation together in one bounded
+        # owner table.  A retired record is a tombstone: reclaiming the same
+        # generation cannot resurrect an old task.  ``_scope_aware_tokens`` is
+        # retained as a compatibility view for diagnostics/tests.
+        self._scope_generations: BoundedDict = BoundedDict(
+            maxsize=_OWNER_LEASE_CAPACITY
+        )
+        self._scope_aware_tokens = self._scope_generations
+        # Fixed-size, no-false-negative ownership history.  It lets an evicted
+        # claimed token remain fail-closed without turning never-claimed legacy
+        # keys (including scope-shaped fixture keys) into claimed sessions.
+        self._scope_token_filter = bytearray(_SCOPE_FILTER_BYTES)
         self._session_generation_binding: contextvars.ContextVar[dict[str, int]] = (
             contextvars.ContextVar(
                 f"sylanne-session-store-generation:{id(self)}",
@@ -191,6 +210,7 @@ class SessionStateStore:
             )
         )
         self._generation_tasks: dict[tuple[str, int], set[Any]] = {}
+        self._closed = False
 
         # ---- 业务核心（真语义）----
         self.hosts: SessionMap = self._reg("hosts", BoundedDict(maxsize=200))
@@ -330,8 +350,11 @@ class SessionStateStore:
         # 该容器按 UMO 而非 session_key 索引，不能交给 `_reg` 按 session_key
         # 直接 pop。其生命周期由下面的会话所有权 + 租用计数共同管理。
         self.conv_sync_locks: SessionMap = SessionMap("conv_sync_locks", {})
-        self._conv_sync_session_umos: dict[str, str] = {}
         self._conv_sync_lock_leases: dict[str, int] = {}
+        self._conv_sync_session_umos: BoundedDict = BoundedDict(
+            maxsize=_OWNER_LEASE_CAPACITY,
+            on_evict=self._conv_sync_owner_evicted,
+        )
 
     def _reg(self, name: str, backing: Any) -> SessionMap:
         m: SessionMap = SessionMap(
@@ -346,31 +369,110 @@ class SessionStateStore:
     def claim_session(self, session_key: str, generation: int) -> None:
         """Claim an exact validated scope generation and fence its predecessor."""
 
-        self._scope_aware_tokens.add(session_key)
-        current = self._scope_generations.get(session_key)
+        if self._closed:
+            raise RuntimeError("session state store is closed")
+        record = self._scope_generations.get(session_key)
+        if record is None and self._scope_token_was_claimed(session_key):
+            raise RuntimeError("evicted session owner cannot be reclaimed")
+        current = record[0] if self._valid_generation_record(record) else None
+        active = bool(record[1]) if self._valid_generation_record(record) else False
         if current is not None and generation < current:
             raise RuntimeError("session generation cannot move backwards")
+        if current == generation and not active:
+            raise RuntimeError("retired session generation cannot be reclaimed")
+        self._remember_scope_token(session_key)
         if current != generation:
-            self._scope_generations[session_key] = generation
+            self._scope_generations[session_key] = (generation, True)
             self._cancel_fragment_buffer(
                 session_key,
-                self.fragment_buffers.get(session_key),
+                self.fragment_buffers._get_unchecked(session_key),
             )
+            if current is not None:
+                self._release_conv_sync_owner(session_key, current)
             self._clear_session_state(session_key)
             if current is not None:
                 self._cancel_generation_tasks(session_key, current)
+        else:
+            self._scope_generations[session_key] = (generation, True)
         self._authorize_current_task(session_key, generation)
+
+    @staticmethod
+    def _valid_generation_record(value: Any) -> bool:
+        return (
+            isinstance(value, tuple)
+            and len(value) == 2
+            and type(value[0]) is int
+            and type(value[1]) is bool
+        )
+
+    @staticmethod
+    def _scope_filter_indexes(session_key: str) -> tuple[int, int, int, int]:
+        digest = hashlib.blake2s(
+            session_key.encode("utf-8"),
+            digest_size=8,
+            person=b"syllease",
+        ).digest()
+        bit_count = _SCOPE_FILTER_BYTES * 8
+        return tuple(
+            int.from_bytes(digest[offset : offset + 2], "big") % bit_count
+            for offset in range(0, 8, 2)
+        )  # type: ignore[return-value]
+
+    def _remember_scope_token(self, session_key: str) -> None:
+        for index in self._scope_filter_indexes(session_key):
+            self._scope_token_filter[index // 8] |= 1 << (index % 8)
+
+    def _scope_token_was_claimed(self, session_key: str) -> bool:
+        return all(
+            self._scope_token_filter[index // 8] & (1 << (index % 8))
+            for index in self._scope_filter_indexes(session_key)
+        )
 
     def _authorize_current_task(self, session_key: str, generation: int) -> None:
         bindings = dict(self._session_generation_binding.get())
+        bindings.pop(session_key, None)
         bindings[session_key] = generation
+        while len(bindings) > _OWNER_LEASE_CAPACITY:
+            bindings.pop(next(iter(bindings)))
         self._session_generation_binding.set(bindings)
 
+    def _unbind_current_task(self, session_key: str, generation: int) -> None:
+        bindings = dict(self._session_generation_binding.get())
+        if bindings.get(session_key) != generation:
+            return
+        bindings.pop(session_key, None)
+        self._session_generation_binding.set(bindings)
+
+    def bound_session_generation(self, session_key: str) -> int | None:
+        """Return this context's exact claimed generation, if one is bound."""
+
+        generation = self._session_generation_binding.get().get(session_key)
+        return generation if type(generation) is int else None
+
+    def is_scope_aware_session(self, session_key: str) -> bool:
+        """Whether a token must use the fail-closed generation lease path."""
+
+        return (
+            session_key in self._scope_generations
+            or self._scope_token_was_claimed(session_key)
+            or session_key in self._session_generation_binding.get()
+        )
+
+    def _session_mutation_lease(self, session_key: str) -> tuple[bool, int | None]:
+        if self._closed:
+            return False, None
+        bound = self.bound_session_generation(session_key)
+        record = self._scope_generations.get(session_key)
+        if self._valid_generation_record(record):
+            generation, active = record
+            return bool(active and bound == generation), generation
+        if self._scope_token_was_claimed(session_key) or bound is not None:
+            return False, None
+        return True, None
+
     def _allows_session_mutation(self, session_key: str) -> bool:
-        if session_key not in self._scope_aware_tokens:
-            return True
-        bindings = self._session_generation_binding.get()
-        return bindings.get(session_key) == self._scope_generations.get(session_key)
+        allowed, _generation = self._session_mutation_lease(session_key)
+        return allowed
 
     def _register_task_value(self, map_name: str, session_key: str, value: Any) -> None:
         if map_name not in {
@@ -379,8 +481,8 @@ class SessionStateStore:
             "background_post_checkpoint_tasks",
         }:
             return
-        generation = self._scope_generations.get(session_key)
-        if generation is None:
+        allowed, generation = self._session_mutation_lease(session_key)
+        if not allowed or generation is None:
             return
         collection = value if isinstance(value, (set, list, tuple)) else (value,)
         for task in collection:
@@ -417,8 +519,8 @@ class SessionStateStore:
         )
 
     def _clear_if_generation(self, session_key: str, generation: int) -> None:
-        current = self._scope_generations.get(session_key)
-        if current == generation or current is None:
+        record = self._scope_generations.get(session_key)
+        if self._valid_generation_record(record) and record[0] == generation:
             self._clear_session_state(session_key)
 
     @staticmethod
@@ -515,7 +617,12 @@ class SessionStateStore:
         expected_generation: int | None = None,
     ) -> None:
         """释放某会话在所有已登记 SessionMap 中的态。漏登记 = 容器不在 = 立即暴露。"""
-        if expected_generation is None:
+        claimed = self.is_scope_aware_session(session_key)
+        if expected_generation is None and claimed:
+            expected_generation = self.bound_session_generation(session_key)
+            if expected_generation is None:
+                return
+        if expected_generation is None or not claimed:
             owned_tasks = self._task_values(
                 self.background_tasks.get(session_key, set()),
                 self.segmented_tasks.get(session_key),
@@ -526,29 +633,34 @@ class SessionStateStore:
             owned_tasks = list(
                 self._generation_tasks.get((session_key, expected_generation), ())
             )
+            record = self._scope_generations.get(session_key)
             should_clear = (
-                self._scope_generations.get(session_key) == expected_generation
+                self._valid_generation_record(record)
+                and record == (expected_generation, True)
             )
+            if should_clear:
+                self._scope_generations[session_key] = (expected_generation, False)
         self._cancel_and_drain_tasks(
             session_key,
             owned_tasks,
             after_drain=lambda: (
                 self._clear_session_state(session_key)
-                if expected_generation is None
+                if not claimed or expected_generation is None
                 else self._clear_if_generation(session_key, expected_generation)
             ),
         )
-        if should_clear and expected_generation is not None:
-            self._scope_generations.pop(session_key, None)
         if should_clear:
             self._cancel_fragment_buffer(
                 session_key,
-                self.fragment_buffers.get(session_key),
+                self.fragment_buffers._get_unchecked(session_key),
             )
-            conv_sync_umo = self._conv_sync_session_umos.pop(session_key, None)
+            self._release_conv_sync_owner(
+                session_key,
+                expected_generation if claimed else None,
+            )
             self._clear_session_state(session_key)
-            if conv_sync_umo is not None:
-                self._release_unused_conv_sync_lock(conv_sync_umo)
+        if expected_generation is not None:
+            self._unbind_current_task(session_key, expected_generation)
 
     def track_background_task(self, session_key: str, task: Any) -> Any:
         """登记 pipeline 短任务，并在完成后自动解除 owner 引用。"""
@@ -566,7 +678,7 @@ class SessionStateStore:
         self._register_task_value("background_tasks", session_key, task)
 
         def _discard(done: Any) -> None:
-            if session_key not in self._scope_aware_tokens:
+            if not self.is_scope_aware_session(session_key):
                 self._consume_task_result(done)
             current = self.background_tasks.get(session_key)
             if isinstance(current, set):
@@ -582,6 +694,7 @@ class SessionStateStore:
     async def aclose(self) -> None:
         """Cancel/await all owner tasks, then release every registered session state."""
 
+        self._closed = True
         tasks: list[Any] = []
         owned_tasks = self._task_values(
             *(
@@ -609,6 +722,10 @@ class SessionStateStore:
         while self._task_cleanup_waiters:
             cleanup_waiters = tuple(self._task_cleanup_waiters)
             await asyncio.gather(*cleanup_waiters, return_exceptions=True)
+        self._scope_generations.clear()
+        self._scope_token_filter[:] = b"\x00" * len(self._scope_token_filter)
+        self._generation_tasks.clear()
+        self._session_generation_binding.set({})
 
     def reset_all(self) -> None:
         """整体清空所有会话态（供 state_persistence 的全局 reset 用）。"""
@@ -684,17 +801,39 @@ class SessionStateStore:
         """仅在 UMO 已无会话所有者和 holder/waiter 时删除其锁。"""
         if self._conv_sync_lock_leases.get(umo, 0) > 0:
             return
-        if umo in self._conv_sync_session_umos.values():
+        if any(
+            isinstance(record, tuple) and len(record) == 2 and record[1] == umo
+            for record in self._conv_sync_session_umos.values()
+        ):
             return
         self.conv_sync_locks.pop(umo, None)
+
+    def _conv_sync_owner_evicted(self, _session_key: str, record: Any) -> None:
+        if isinstance(record, tuple) and len(record) == 2:
+            self._release_unused_conv_sync_lock(str(record[1]))
+
+    def _release_conv_sync_owner(
+        self,
+        session_key: str,
+        expected_generation: int | None,
+    ) -> None:
+        record = self._conv_sync_session_umos.get(session_key)
+        if record is None or record[0] != expected_generation:
+            return
+        self._conv_sync_session_umos.pop(session_key, None)
+        self._release_unused_conv_sync_lock(str(record[1]))
 
     @asynccontextmanager
     async def lease_conv_sync_lock(self, session_key: str, umo: str) -> Any:
         """租用同一 UMO 的同步锁，并把持有者和等待者都纳入生命周期。"""
-        previous_umo = self._conv_sync_session_umos.get(session_key)
-        self._conv_sync_session_umos[session_key] = umo
-        if previous_umo is not None and previous_umo != umo:
-            self._release_unused_conv_sync_lock(previous_umo)
+        allowed, generation = self._session_mutation_lease(session_key)
+        if not allowed:
+            raise RuntimeError("stale session generation cannot lease sync lock")
+        owner_record = (generation, umo)
+        previous = self._conv_sync_session_umos.get(session_key)
+        self._conv_sync_session_umos[session_key] = owner_record
+        if previous is not None and previous != owner_record:
+            self._release_unused_conv_sync_lock(str(previous[1]))
 
         lock = self.get_conv_sync_lock(umo)
         self._conv_sync_lock_leases[umo] = (
@@ -702,6 +841,17 @@ class SessionStateStore:
         )
         try:
             async with lock:
+                still_allowed, current_generation = self._session_mutation_lease(
+                    session_key
+                )
+                if generation is not None and (
+                    not still_allowed
+                    or current_generation != generation
+                    or self._conv_sync_session_umos.get(session_key) != owner_record
+                ):
+                    raise RuntimeError(
+                        "session generation changed while waiting for sync lock"
+                    )
                 yield lock
         finally:
             remaining = self._conv_sync_lock_leases.get(umo, 1) - 1
