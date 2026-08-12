@@ -7,7 +7,7 @@
   4. 管理记忆 v2 生命周期：对话缓冲 flush、整理、再巩固
   5. 驱动生命模拟器（Life Simulator）的 LLM 回调
 
-所有方法通过 ``self._plugin`` 委托访问插件实例属性。
+服务能力只通过 ``self._services`` 获取；插件引用仅承载实例局部运行状态。
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from sylanne_alpha.content_sanitizer import (
     is_content_filter_refusal,
 )
 from sylanne_alpha.message_dispatch import realtime_flags
+from sylanne_alpha.plugin_services import PluginServices
 from sylanne_alpha.provider_routing import (
     ProviderFeature,
     call_text_provider_once,
@@ -741,16 +742,96 @@ class LLMRequestPipeline:
       event 到达 → 群聊 SFPD 过滤 → 碎片防抖 → 状态注入 → prompt 组装 → 发出请求
 
     与其他组件的关系：
-      - 持有插件实例引用 (self._plugin)，通过它访问 host/kernel/memory 等子系统
+      - 通过 PluginServices 获取配置、上下文、社交场和回调能力
+      - 插件引用仅用于实例局部运行状态、冻结 scope 与 transient sink
       - 调用 AsyncAssessor 做前台快速评估
       - 调用 MemorySystem 做记忆召回和写入
       - 驱动 LifeSimulator 的 LLM 回调
     """
 
-    def __init__(self, plugin: PluginHost) -> None:
+    def __init__(
+        self,
+        plugin: PluginHost,
+        *,
+        services: PluginServices | None = None,
+    ) -> None:
         self._p = plugin
+        self._plugin = plugin
+        if services is not None:
+            self._services = services
+        else:
+            def _compat_capability(name: str) -> Any | None:
+                try:
+                    return getattr(plugin, name, None)
+                except Exception:
+                    return None
+
+            config = _compat_capability("config")
+            if config is None:
+                config = _compat_capability("_config")
+            self._services = PluginServices(
+                config=config if config is not None else {},
+                logger=_compat_capability("logger"),
+                context=_compat_capability("context"),
+                rhythm_learner=_compat_capability("_rhythm_learner"),
+                social_field=_compat_capability("_social_field"),
+                put_kv_data=_compat_capability("put_kv_data"),
+                get_kv_data=_compat_capability("get_kv_data"),
+                delete_kv_data=_compat_capability("delete_kv_data"),
+                session_key_fn=_compat_capability("_session_key"),
+                host_fn=_compat_capability("_host"),
+                schedule_buffer_persist_fn=_compat_capability(
+                    "_schedule_buffer_persist"
+                ),
+                has_conversation_manager_fn=_compat_capability(
+                    "_has_conversation_manager"
+                ),
+                sync_message_to_conv_mgr_fn=_compat_capability(
+                    "_sync_message_to_conv_mgr"
+                ),
+                observe_response_fn=_compat_capability("observe_response"),
+                astrbot_message_fn=_compat_capability("_astrbot_message"),
+                observed_now_fn=_compat_capability("_observed_now"),
+                assess_emotion_fn=_compat_capability("_assess_emotion"),
+                save_state_fn=_compat_capability("_save_state"),
+                state_persistence=_compat_capability("_state_persistence"),
+            )
         if not hasattr(self._p, "_cached_system_prompts"):
             self._p._cached_system_prompts = {}
+
+    def _service_host(self, session_key: str) -> Any | None:
+        """Resolve a host only through the injected callback capability."""
+
+        host_fn = self._services.host_fn
+        if not callable(host_fn):
+            return None
+        try:
+            return host_fn(session_key)
+        except Exception:
+            return None
+
+    def _service_session_key(self, event: Any) -> str:
+        """Resolve an event key only through the injected callback capability."""
+
+        session_key_fn = self._services.session_key_fn
+        if not callable(session_key_fn):
+            return ""
+        try:
+            session_key = session_key_fn(event)
+        except Exception:
+            return ""
+        return session_key if isinstance(session_key, str) and session_key else ""
+
+    def _schedule_buffer_persist(self, session_key: str) -> None:
+        """Invoke the injected persistence scheduler when that capability exists."""
+
+        schedule = self._services.schedule_buffer_persist_fn
+        if not callable(schedule):
+            return
+        try:
+            schedule(session_key)
+        except Exception:
+            return
 
     def _active_scope(self) -> Any | None:
         """Return the request-bound frozen scope, never a recent-session guess."""
@@ -837,7 +918,7 @@ class LLMRequestPipeline:
         commit boundary after every transient producer has run.
         """
 
-        config = getattr(self._p, "config", None)
+        config = self._services.config
         if (
             not isinstance(config, Mapping)
             or config.get("sylanne_alpha_persona_genesis_enabled") is not True
@@ -907,12 +988,14 @@ class LLMRequestPipeline:
                     return ""
                 from sylanne_alpha import relationship_layer as _rl
 
-                sf = getattr(p, "_social_field", None)
-                if sf is not None and sf.is_group_context_by_key(sk):
+                sf = self._services.social_field
+                if sf is None or sf.is_group_context_by_key(sk):
                     return ""
                 return sk if _rl.is_romantic(p, sk) else ""
             from sylanne_alpha import relationship_layer as _rl
-            sf = getattr(p, "_social_field", None)
+            sf = self._services.social_field
+            if sf is None:
+                return ""
             best_key = ""
             best_time = -1.0
             for sk, host in p._store.hosts.items():
@@ -945,7 +1028,7 @@ class LLMRequestPipeline:
         persona_source = getattr(resolved, "persona_source", None)
         system_prompt = str(getattr(persona_source, "prompt", "") or "").strip()
         if system_prompt:
-            self._session_state.cached_system_prompts[session_key] = system_prompt
+            self._p._cached_system_prompts[session_key] = system_prompt
 
     def _life_sim_persona_getter(self, session_key: str = "") -> str:
         """返回生命模拟器使用的人格描述。
@@ -972,10 +1055,7 @@ class LLMRequestPipeline:
         if locked:
             return locked[:500]
 
-        if self._session_state is not None:
-            cached_prompts = self._session_state.cached_system_prompts
-        else:
-            cached_prompts = {}
+        cached_prompts = self._p._cached_system_prompts
         if session_key:
             cached = str(cached_prompts.get(session_key, "") or "").strip()
         else:
@@ -1016,7 +1096,6 @@ class LLMRequestPipeline:
         if message_text.strip():
             return message_text
 
-        p = self._plugin
         config = self._services.config or {}
 
         # 检查消息是否包含非文本内容
@@ -1051,7 +1130,7 @@ class LLMRequestPipeline:
 
         # 调用多模态 LLM 转述
         try:
-            context = getattr(p, "context", None)
+            context = self._services.context
             if context is None or not hasattr(context, "llm_generate"):
                 return f"[用户发送了{len(image_urls)}张图片]"
 
@@ -1097,9 +1176,8 @@ class LLMRequestPipeline:
     async def _detect_multimodal_provider(self, event: Any | None = None) -> str:
         """通过中央路由选择图片转述 provider，保留既有能力检测口径。"""
 
-        p = self._p
-        config = p.config or {}
-        context = getattr(p, "context", None)
+        config = self._services.config or {}
+        context = self._services.context
         if context is None:
             return ""
 
@@ -1217,7 +1295,9 @@ class LLMRequestPipeline:
             t1 = loop.create_task(self._session_idle_check_loop())
             t2 = loop.create_task(self._consolidation_loop())
             p._background_tasks.extend([t1, t2])
-        session_key = p._session_key(event)
+        session_key = self._service_session_key(event)
+        if not session_key:
+            return
         # 维护 session_key → unified_msg_origin 映射，供主动发送时使用（已在 __init__ 预初始化）
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         if umo:
@@ -1231,22 +1311,25 @@ class LLMRequestPipeline:
         # 次要修复②：两侧口径统一走 realtime_flags（正规键 OR 旧别名），不再
         # 各自维护一份不对称的判定（此前请求侧只认正规键，响应侧额外兼容别名，
         # 若用户只设别名键会导致请求侧误判两开关都关，M4a 强制关流因此漏触发）。
-        realtime_enabled, intercept = realtime_flags(p.config)
+        realtime_enabled, intercept = realtime_flags(self._services.config or {})
         # ---- 群聊 SFPD（社交场域感知调度）----
         # 收集社交信号 → 传入计算栈 → L7 表达层决定是否响应
-        _is_group = p._social_field.is_group_context(event)
+        social = self._services.social_field
+        if social is None:
+            return
+        _is_group = social.is_group_context(event)
         _should_respond = True
         _group_id = ""
         if _is_group and message_text:
-            _group_id = p._social_field.extract_group_id(event)
+            _group_id = social.extract_group_id(event)
             # 红线闸 MAJOR 修复（design §2.2 R6）：登记"货架格式群标识"
             # （extract_group_id_from_key(session_key)，与写侧 origin_id/
             # R1 current_group_id 同源）→ collect() 实际用的原始群 key 的
             # 别名，供 peek_recent_group_senders 跨格式命中。不影响 SFPD
             # 既有行为，只是给 R6 一条查找路径。
             try:
-                p._social_field.register_group_key_alias(
-                    p._social_field.extract_group_id_from_key(session_key),
+                social.register_group_key_alias(
+                    social.extract_group_id_from_key(session_key),
                     _group_id,
                 )
             except Exception as e:
@@ -1259,7 +1342,7 @@ class LLMRequestPipeline:
             )
 
             # 收集社交信号（发言频率、@bot、提及名字等）
-            signals = p._social_field.collect(
+            signals = social.collect(
                 group_id=_group_id,
                 sender_id=sender_id,
                 text=message_text,
@@ -1268,7 +1351,9 @@ class LLMRequestPipeline:
 
             # 将社交信号注入计算栈，L7 用它们调制表达阈值
             try:
-                host = p._host(session_key)
+                host = self._service_host(session_key)
+                if host is None:
+                    return
                 host.kernel.computation.apply_social_signals(signals)
                 # 累积社交沉默（群聊活跃但 bot 未发言的时间）
                 host.kernel.computation.engine.social_void.tick(group_active=True)
@@ -1320,7 +1405,9 @@ class LLMRequestPipeline:
             # 回退到上面算出的配置/默认值，零行为变化。
             median_gap = None
             try:
-                median_gap = p._rhythm_learner.get_intra_burst_median_gap(session_key)
+                rhythm = self._services.rhythm_learner
+                if rhythm is not None:
+                    median_gap = rhythm.get_intra_burst_median_gap(session_key)
             except Exception:
                 median_gap = None
             max_wait = self._adaptive_max_wait(max_wait, median_gap)
@@ -1493,7 +1580,7 @@ class LLMRequestPipeline:
         )
         self._set_transient_context_budget(
             request,
-            _compute_injection_budget(gap_seconds, p.config or {}),
+            _compute_injection_budget(gap_seconds, self._services.config or {}),
         )
 
         # Priority 0 is the deliberate exception: admit the deliverable
@@ -1748,7 +1835,9 @@ class LLMRequestPipeline:
         # ResultDecorateStage，on_decorating_result 钩子够不着），并在启用
         # 首句快速发送时叠加首句抢发逻辑。
         stream_first = bool(
-            (p._config or {}).get("sylanne_alpha_stream_first_sentence_enabled")
+            (self._services.config or {}).get(
+                "sylanne_alpha_stream_first_sentence_enabled"
+            )
         )
         if hasattr(event, "send_streaming") and not getattr(
             event, "_sylanne_stream_wrapped", False
@@ -1841,8 +1930,10 @@ class LLMRequestPipeline:
         current_prompt = str(getattr(request, "prompt", "") or "")
 
         # 计算 gap_seconds 用于控制注入强度
-        host_for_gap = p._host(session_key)
-        _last_ev = host_for_gap.kernel.last_event or {}
+        host_for_gap = self._service_host(session_key)
+        _last_ev = (
+            host_for_gap.kernel.last_event or {} if host_for_gap is not None else {}
+        )
         _has_prev = bool(_last_ev.get("now") or _last_ev.get("text"))
         if _has_prev:
             _last_now = float(_last_ev.get("now") or 0.0)
@@ -1906,12 +1997,13 @@ class LLMRequestPipeline:
         unfinished = p._store.unfinished_replies.pop(session_key, "")
         unfinished_fragment = ""
         if unfinished:
-            host = p._host(session_key)
-            host.kernel.body.observe_shadow_signal(
-                text="", flags=["unfinished_reply"], kind="interruption"
-            )
-            mark_dirty("session")
-            await p._persist_kernel(session_key, host)
+            host = self._service_host(session_key)
+            if host is not None:
+                host.kernel.body.observe_shadow_signal(
+                    text="", flags=["unfinished_reply"], kind="interruption"
+                )
+                mark_dirty("session")
+                await p._persist_kernel(session_key, host)
 
         # 消费待发送的生命事件上下文
         outreach_fragment = ""
@@ -1975,12 +2067,16 @@ class LLMRequestPipeline:
         _MEMORY_GAP_SKIP = 120
         _MEMORY_GAP_LIGHT = 7200
         recall_allowed = message_text and gap_seconds >= _MEMORY_GAP_SKIP
-        if recall_allowed:
-            host = p._host(session_key)
+        host = self._service_host(session_key) if recall_allowed else None
+        if recall_allowed and host is not None:
             memory_system = p._memory_system_for_session(session_key)
             current_warmth = host.kernel.computation.engine.observe().get("warmth", 0.0)
             query_embedding = None
-            enabled = bool(p._config.get("sylanne_alpha_embedding_memory_enabled"))
+            enabled = bool(
+                (self._services.config or {}).get(
+                    "sylanne_alpha_embedding_memory_enabled"
+                )
+            )
             if enabled:
                 try:
                     provider = await self._embedding_provider_if_enabled()
@@ -2188,7 +2284,7 @@ class LLMRequestPipeline:
 
         # ---- scope=owner 身份门控（与写侧同一形态，见 _flush_conversation_to_l1）----
         if settings.scope == "owner":
-            owner_cfg = getattr(p, "config", None) or {}
+            owner_cfg = self._services.config or {}
             owner_id = str(owner_cfg.get("sylanne_alpha_owner_id", "") or "")
             if not owner_id or sender_id != owner_id:
                 return ""
@@ -2200,7 +2296,7 @@ class LLMRequestPipeline:
         # 无关。改用 event 真源：`get_message_type()` + `get_group_id()`，
         # 与写侧 `resolve_authenticated_identity` 的 group 判据同一口径，
         # 写读两侧的 origin group_id 由此真正对齐（R3 同群放行才真的成立）。
-        social = getattr(p, "_social_field", None)
+        social = self._services.social_field
         if social is None:
             return ""
         try:
@@ -2312,7 +2408,9 @@ class LLMRequestPipeline:
             state_fragment 字符串，无信号时为空。
         """
         p = self._p
-        host = p._host(session_key)
+        host = self._service_host(session_key)
+        if host is None:
+            return ""
         comp = host.kernel.computation
         emotion = comp.engine.observe()
         sheaf_obs = comp.sheaf.observe()
@@ -2428,7 +2526,10 @@ class LLMRequestPipeline:
         # 原先只在 webui 展示、从不入 prompt。这里把它落成一句长度提示——用户一直发短句
         # （纠正/追问）时压短回复，别拿大段轰炸。仅在明显偏离中性(1.0)时出手，避免噪声。
         try:
-            rl_factor = float(self._p._rhythm_learner.get_reply_length_factor(session_key))
+            rhythm = self._services.rhythm_learner
+            if rhythm is None:
+                raise LookupError("rhythm capability unavailable")
+            rl_factor = float(rhythm.get_reply_length_factor(session_key))
             if rl_factor <= 0.8:
                 sys_parts.append("[对方在发短消息，回复也精简些，别长篇大论]")
             elif rl_factor >= 1.4:
@@ -2436,7 +2537,9 @@ class LLMRequestPipeline:
         except Exception:
             pass
 
-        max_context_tokens = int((p.config or {}).get("max_context_tokens", 8000))
+        max_context_tokens = int(
+            (self._services.config or {}).get("max_context_tokens", 8000)
+        )
         if max_context_tokens > 0:
             estimated_chars = (
                 len(current_prompt) + len(message_text)
@@ -2528,7 +2631,9 @@ class LLMRequestPipeline:
 
         try:
             # 前台评价由 v2core PERCEPT 本地生成并暂存；此处不再同步调用 LLM。
-            host = p._host(session_key)
+            host = self._service_host(session_key)
+            if host is None:
+                return
             assessment: dict = {}
 
             # CP8-P4-D：会话首次活跃时从 KV 恢复一次进化档案（跨重启累积学习）。
@@ -2663,15 +2768,18 @@ class LLMRequestPipeline:
                 session_key, lambda: ConversationBuffer(session_key=session_key)
             )
             # 群聊：在用户消息前注入影子缓冲区（旁观到的群聊上下文）
-            _is_group = p._social_field.is_group_context_by_key(session_key)
+            social = self._services.social_field
+            _is_group = bool(
+                social is not None and social.is_group_context_by_key(session_key)
+            )
             _group_id = (
-                p._social_field.extract_group_id_from_key(session_key)
+                social.extract_group_id_from_key(session_key)
                 if _is_group
                 else ""
             )
             if _is_group and _group_id:
                 _astrbot_group_context_active = p._detect_astrbot_group_context()
-                shadow_entries = p._social_field.drain_shadow_buffer(_group_id)
+                shadow_entries = social.drain_shadow_buffer(_group_id)
                 if shadow_entries and shadow_entries[-1]["text"][:200] == text[:200]:
                     shadow_entries = shadow_entries[:-1]
                 if shadow_entries:
@@ -2684,7 +2792,7 @@ class LLMRequestPipeline:
                         buf.inject_context(shadow_entries)
             buf.append("user", text)
             p._store.last_user_texts.set(session_key, text[:120])
-            p._schedule_buffer_persist(session_key)
+            self._schedule_buffer_persist(session_key)
 
             # leg-3：AstrBot ConversationManager 的用户轮同步已上移到本方法顶部
             # （try 之前），保证上游任一评估/内核异常都不会跳过它。此处不再重复调度。
@@ -2766,7 +2874,9 @@ class LLMRequestPipeline:
                         memory_system.remove_compressed(
                             [item.id for item in items[:10]]
                         )
-                        host = p._host(session_key)
+                        host = self._service_host(session_key)
+                        if host is None:
+                            return
                         # MEM-03 PR-5：删死写 body._memory_system（白名单丢弃、从未幸存）；
                         # _persist_kernel + KV save 保留。
                         await p._persist_kernel(session_key, host)
@@ -2798,12 +2908,14 @@ class LLMRequestPipeline:
             buf = p._store.conversation_buffers.get(session_key)
             if not buf or not buf.messages:
                 return
+            host = self._service_host(session_key)
+            if host is None:
+                return
             msgs = buf.drain()
             if not msgs:
                 return
 
             memory_system = p._memory_system_for_session(session_key)
-            host = p._host(session_key)
             current_warmth = host.kernel.computation.engine.observe().get("warmth", 0.0)
 
             # Build conversation text for summarization (truncate to 2000 chars)
@@ -2909,7 +3021,7 @@ class LLMRequestPipeline:
                     if shelf_sender_id:
                         shelf_proceed = True
                         if settings.scope == "owner":
-                            owner_cfg = getattr(p, "config", None) or {}
+                            owner_cfg = self._services.config or {}
                             owner_id = str(
                                 owner_cfg.get("sylanne_alpha_owner_id", "") or ""
                             )
@@ -3014,10 +3126,15 @@ class LLMRequestPipeline:
                                         # 缓存清空(session_context.py:681 超 512 整表
                                         # clear)或重启后即分叉，导致反向索引键写读
                                         # 不一致、货架桶在 purge 后残留。
-                                        shelf_safe_sk = (
-                                            p._state_persistence._safe_session_key(
-                                                session_key
+                                        state_persistence = (
+                                            self._services.state_persistence
+                                        )
+                                        if state_persistence is None:
+                                            raise RuntimeError(
+                                                "state persistence capability unavailable"
                                             )
+                                        shelf_safe_sk = (
+                                            state_persistence._safe_session_key(session_key)
                                         )
                                         shelf_registered = (
                                             await register_person_shelf_origin(
@@ -3060,7 +3177,9 @@ class LLMRequestPipeline:
 
             # Embedding for memorable summaries
             embedding_enabled = bool(
-                p._config.get("sylanne_alpha_embedding_memory_enabled")
+                (self._services.config or {}).get(
+                    "sylanne_alpha_embedding_memory_enabled"
+                )
             )
             if embedding_enabled:
                 try:
@@ -3200,7 +3319,9 @@ class LLMRequestPipeline:
 
             # Generate embeddings for confirmed items
             embedding_enabled = bool(
-                p._config.get("sylanne_alpha_embedding_memory_enabled")
+                (self._services.config or {}).get(
+                    "sylanne_alpha_embedding_memory_enabled"
+                )
             )
             if embedding_enabled:
                 provider = await self._embedding_provider_if_enabled()
@@ -3223,7 +3344,9 @@ class LLMRequestPipeline:
             memory_system.clear_unconfirmed()
 
             # Persist
-            host = p._host(session_key)
+            host = self._service_host(session_key)
+            if host is None:
+                return False
             # MEM-03 PR-5：删死写 body._memory_system；_persist_kernel + KV save 保留。
             await p._persist_kernel(session_key, host)
             await p._save_sylanne_memory_state(session_key, memory_system)
@@ -3290,8 +3413,9 @@ class LLMRequestPipeline:
         Returns:
             最近 3 条记忆痕迹的文本列表。
         """
-        p = self._plugin
-        host = p._host(session_key)
+        host = self._service_host(session_key)
+        if host is None:
+            return []
         traces = host.kernel.body.memory.get("traces", [])
         lines: list[str] = []
         for trace in traces[-3:]:
@@ -3307,11 +3431,10 @@ class LLMRequestPipeline:
     async def _embedding_provider_if_enabled(self) -> Any | None:
         """Resolve embedding provider only after the existing memory gate is on."""
 
-        p = self._p
-        config = getattr(p, "_config", None) or getattr(p, "config", None) or {}
+        config = self._services.config or {}
         if not bool(config.get("sylanne_alpha_embedding_memory_enabled")):
             return None
-        context = getattr(p, "context", None)
+        context = self._services.context
         if context is None:
             return None
         try:
@@ -3347,9 +3470,8 @@ class LLMRequestPipeline:
         Returns:
             LLM 返回的文本，失败返回空字符串。
         """
-        p = self._p
-        config = getattr(p, "_config", None) or getattr(p, "config", None) or {}
-        context = getattr(p, "context", None)
+        config = self._services.config or {}
+        context = self._services.context
         if context is None:
             return ""
 
@@ -3419,7 +3541,11 @@ class LLMRequestPipeline:
         任何无效值（None / 非数字 / 字符串 "0" / <=0）都安全回退 1024
         （gemini PR#46：`or 1024` 对字符串 "0" 失效——非空串为真值会绕过默认值）。"""
         try:
-            val = int(self._p._config.get("sylanne_alpha_assessor_max_tokens"))
+            val = int(
+                (self._services.config or {}).get(
+                    "sylanne_alpha_assessor_max_tokens"
+                )
+            )
         except (TypeError, ValueError):
             return 1024
         return val if val > 0 else 1024
@@ -3469,9 +3595,8 @@ class LLMRequestPipeline:
         + 主动消息复读」的源头之一（provider 没配/不可用时无声无息）。改为按 cause 节流
         告警（首次 + 每 N 次重发），让故障可见。返回契约不变：失败仍返回空串。
         """
-        p = self._p
-        config = getattr(p, "_config", None) or getattr(p, "config", None) or {}
-        context = getattr(p, "context", None)
+        config = self._services.config or {}
+        context = self._services.context
         if context is None:
             self._life_sim_warn(
                 "no_provider_api", "运行环境无 provider context，生活模拟 LLM 调用降级为空"
@@ -3706,7 +3831,7 @@ class LLMRequestPipeline:
             # ② 再过 Bridge gate（quiet_hours/min_interval）+ hesitation
             bridge = getattr(p, "_proactive_bridge", None)
             bridge_on = bool(
-                (getattr(p, "config", None) or {}).get(
+                (self._services.config or {}).get(
                     "sylanne_alpha_proactive_bridge_enabled", False
                 )
             )
@@ -3723,7 +3848,7 @@ class LLMRequestPipeline:
                     return
                 # 犹豫：发前迟疑 / 最后一刻收回 / 踌躇词试探
                 hesit_on = bool(
-                    (getattr(p, "config", None) or {}).get(
+                    (self._services.config or {}).get(
                         "sylanne_alpha_proactive_hesitation", False
                     )
                 )

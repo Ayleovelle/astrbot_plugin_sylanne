@@ -148,8 +148,7 @@ class _FakePlugin:
 def _mk_pipeline(plugin: _FakePlugin, summarizer_return: str = "摘要内容OK"):
     from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline
 
-    pipe = LLMRequestPipeline.__new__(LLMRequestPipeline)
-    pipe._p = plugin
+    pipe = LLMRequestPipeline(plugin)
     pipe._summarizer_llm_call = AsyncMock(return_value=summarizer_return)
     return pipe
 
