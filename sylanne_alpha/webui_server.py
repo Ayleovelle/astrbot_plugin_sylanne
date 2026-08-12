@@ -4791,7 +4791,7 @@ class WebUILifecycle:
 
         幂等设计：若已有活跃的 task 或 thread 则跳过。
         """
-        if not self._services.config.get("sylanne_webui_enabled", False):
+        if not self._p._cfg_bool("sylanne_webui_enabled", False):
             return
         self.publish_active_plugin()
         webui_mod = self._current_webui_module_ref()
@@ -4810,23 +4810,23 @@ class WebUILifecycle:
         # _ensure_token 持久化进配置,运维需要时从配置取。这里只记"已就绪 + 长度"。
         self._p.logger.info("Sylanne WebUI auth token ready (redacted, %d chars)", len(token))
         try:
-            start_webui_background(self._plugin, host=webui_host, port=webui_port)
-            self._services.logger.info(
+            start_webui_background(self._p, host=webui_host, port=webui_port)
+            self._p.logger.info(
                 f"Sylanne WebUI server start requested: http://{webui_host}:{webui_port}"
             )
         except RuntimeError as exc:
-            self._services.logger.debug(
+            self._p.logger.debug(
                 f"Sylanne WebUI server deferred until event loop is running: {exc}"
             )
         except Exception as exc:
-            self._services.logger.warning(f"Sylanne WebUI server failed: {exc}")
+            self._p.logger.warning(f"Sylanne WebUI server failed: {exc}")
 
     def runtime_info(self) -> dict[str, Any]:
         return {
             "plugin_name": "astrbot_plugin_sylanne",
-            "runtime_id": str(getattr(self._plugin, "_webui_runtime_id", "") or ""),
-            "instance_id": hex(id(self._plugin)),
-            "module": self._plugin.__class__.__module__,
+            "runtime_id": str(getattr(self._p, "_webui_runtime_id", "") or ""),
+            "instance_id": hex(id(self._p)),
+            "module": self._p.__class__.__module__,
         }
 
     def iter_loaded_server_modules(self) -> list[tuple[str, Any]]:
@@ -4989,7 +4989,7 @@ class WebUILifecycle:
             if not callable(setter):
                 continue
             try:
-                setter(self._plugin)
+                setter(self._p)
                 updated.append(name)
             except Exception:
                 continue
@@ -5077,7 +5077,7 @@ class WebUILifecycle:
         return stopped
 
     def schedule_listener_takeover(self) -> None:
-        if not self._services.config.get("sylanne_webui_enabled", False):
+        if not self._p._cfg_bool("sylanne_webui_enabled", False):
             return
         try:
             loop = asyncio.get_running_loop()
@@ -5088,7 +5088,7 @@ class WebUILifecycle:
             await asyncio.sleep(0.3)
             stopped = await self.stop_stale_server_modules(include_current=True)
             if stopped:
-                self._services.logger.info(
+                self._p.logger.info(
                     f"Sylanne WebUI stopped stale listener modules: {stopped}"
                 )
             self.start_if_enabled()
