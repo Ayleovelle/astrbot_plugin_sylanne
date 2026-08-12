@@ -89,6 +89,33 @@ class _ProofEvent:
         self.extras[key] = value
 
 
+def _ready_scope_runtime_registry(resolver: ScopeResolver) -> ScopeRuntimeRegistry:
+    def ready_persona_runtime(scope) -> PersonaRuntime:
+        runtime = PersonaRuntime(persona_ref=scope.persona_ref)
+
+        def construct_services(owner: PersonaRuntime) -> bool:
+            owner.self_core = object()
+            owner.autonomy_scheduler = object()
+            return True
+
+        runtime.persona_services_factory = construct_services
+        return runtime
+
+    return ScopeRuntimeRegistry(
+        runtime_factory=ready_persona_runtime,
+        repository=resolver._repository,
+    )
+
+
+def _bind_ready_scope_registry(plugin, resolver: ScopeResolver) -> None:
+    plugin._scope_runtime_registry = _ready_scope_runtime_registry(resolver)
+    plugin._scope_runtime_binding = contextvars.ContextVar(
+        f"proof_binding_{id(plugin)}",
+        default=None,
+    )
+    plugin._bound_runtime = lambda: EmotionalStatePlugin._bound_runtime(plugin)
+
+
 def _proof_plugin(tmp_path):
     manager = SimpleNamespace(
         resolve_selected_persona=AsyncMock(
@@ -115,25 +142,7 @@ def _proof_plugin(tmp_path):
     plugin.config = {}
     plugin._config = {}
     plugin._scope_resolver_v1 = resolver
-    def ready_persona_runtime(scope) -> PersonaRuntime:
-        runtime = PersonaRuntime(persona_ref=scope.persona_ref)
-
-        def construct_services(owner: PersonaRuntime) -> bool:
-            owner.self_core = object()
-            owner.autonomy_scheduler = object()
-            return True
-
-        runtime.persona_services_factory = construct_services
-        return runtime
-
-    plugin._scope_runtime_registry = ScopeRuntimeRegistry(
-        runtime_factory=ready_persona_runtime,
-        repository=resolver._repository,
-    )
-    plugin._scope_runtime_binding = contextvars.ContextVar(
-        f"proof_binding_{id(plugin)}",
-        default=None,
-    )
+    _bind_ready_scope_registry(plugin, resolver)
     plugin._session_ctx = SessionContext(plugin)
     plugin._inbound_seen = {}
     return plugin, manager
@@ -210,7 +219,7 @@ async def test_transport_turn_and_persona_freeze_precede_existing_pipeline(
         get_platform_id=lambda: "adapter",
         get_platform_name=lambda: "aiocqhttp",
         get_self_id=lambda: "10001",
-        get_extra=lambda key: extras.get(key),
+        get_extra=lambda key, default=None: extras.get(key, default),
         set_extra=lambda key, value: extras.__setitem__(key, value),
     )
 
@@ -275,6 +284,7 @@ async def test_transport_turn_and_persona_freeze_precede_existing_pipeline(
         _inbound_dup_gate=lambda _event: False,
         _llm_request_pipeline=SimpleNamespace(_on_llm_request_inner=existing_pipeline),
     )
+    _bind_ready_scope_registry(plugin, resolver)
 
     monkeypatch.setattr(
         EmotionalStatePlugin,
@@ -289,6 +299,16 @@ async def test_transport_turn_and_persona_freeze_precede_existing_pipeline(
         EmotionalStatePlugin,
         "_on_message_after_scope_frozen",
         legacy_ready,
+    )
+    monkeypatch.setattr(
+        EmotionalStatePlugin,
+        "_publish_transport_runtime_owner",
+        lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        EmotionalStatePlugin,
+        "_start_life_simulator",
+        lambda *_args: None,
     )
     await EmotionalStatePlugin.on_message(plugin, event)
     transport = extras["_sylanne_transport_scope_v1"]
@@ -399,6 +419,7 @@ async def test_redelivered_event_stops_before_any_legacy_private_write(
             _on_llm_request_inner=existing_pipeline
         ),
     )
+    _bind_ready_scope_registry(plugin, resolver)
     plugin._inbound_dup_gate = lambda event: (
         EmotionalStatePlugin._inbound_dup_gate(plugin, event)
     )
@@ -502,6 +523,7 @@ def test_transport_extra_failure_leaves_no_persisted_resolving_turn(
         set_extra=set_extra,
     )
     plugin = SimpleNamespace(_scope_resolver_v1=resolver)
+    _bind_ready_scope_registry(plugin, resolver)
 
     assert EmotionalStatePlugin._begin_scope_transport(plugin, event) is False
 
@@ -558,6 +580,7 @@ async def test_persona_resolution_failure_runs_no_legacy_private_path(
         _inbound_dup_gate=lambda _event: False,
         _llm_request_pipeline=SimpleNamespace(_on_llm_request_inner=existing_pipeline),
     )
+    _bind_ready_scope_registry(plugin, resolver)
     request = SimpleNamespace(conversation=SimpleNamespace(persona_id=None))
 
     await EmotionalStatePlugin.on_message(plugin, event)
@@ -604,6 +627,7 @@ async def test_resolved_scope_extra_failure_leaves_no_scope_or_frozen_artifact(
         set_extra=set_extra,
     )
     plugin = SimpleNamespace(_scope_resolver_v1=resolver)
+    _bind_ready_scope_registry(plugin, resolver)
     await EmotionalStatePlugin.on_message(plugin, event)
     transport = extras["_sylanne_transport_scope_v1"]
     resolving_turn = extras["_sylanne_transport_turn_v1"]
@@ -658,6 +682,7 @@ async def test_repeated_resolve_reuses_exact_published_scope_without_refreezing(
         set_extra=lambda key, value: extras.__setitem__(key, value),
     )
     plugin = SimpleNamespace(_scope_resolver_v1=resolver)
+    _bind_ready_scope_registry(plugin, resolver)
     request = SimpleNamespace(conversation=SimpleNamespace(persona_id=None))
     await EmotionalStatePlugin.on_message(plugin, event)
 
@@ -704,6 +729,7 @@ async def test_forged_published_scope_fails_closed_without_persona_resolution(
         set_extra=lambda key, value: extras.__setitem__(key, value),
     )
     plugin = SimpleNamespace(_scope_resolver_v1=resolver)
+    _bind_ready_scope_registry(plugin, resolver)
     request = SimpleNamespace(conversation=SimpleNamespace(persona_id=None))
     assert EmotionalStatePlugin._begin_scope_transport(plugin, event) is True
     first = await resolver.resolve(event, request)
@@ -767,6 +793,7 @@ async def test_event_tamper_after_resolve_stops_legacy_and_existing_pipeline(
             _on_llm_request_inner=existing_pipeline
         ),
     )
+    _bind_ready_scope_registry(plugin, resolver)
     assert EmotionalStatePlugin._begin_scope_transport(plugin, event) is True
     original_freeze = EmotionalStatePlugin._freeze_scope_persona
 
@@ -844,6 +871,7 @@ async def test_legacy_core_error_stops_dedup_and_existing_pipeline(tmp_path) -> 
             _on_llm_request_inner=existing_pipeline
         ),
     )
+    _bind_ready_scope_registry(plugin, resolver)
     await EmotionalStatePlugin.on_message(plugin, event)
 
     await EmotionalStatePlugin._on_llm_request_inner(
@@ -887,6 +915,97 @@ async def test_decorated_hooks_read_sender_once_and_publish_only_opaque_subject(
     assert len(observed) == 1
     assert observed[0].relation_runtime is not None
     assert raw_sender not in repr(event.extras)
+
+
+@pytest.mark.asyncio
+async def test_same_bot_same_delivery_key_is_still_deduplicated(tmp_path) -> None:
+    plugin, _manager = _proof_plugin(tmp_path)
+    first = _ProofEvent(
+        "42",
+        "same-human",
+        self_id="bot-left",
+        message_id="same-delivery",
+    )
+    duplicate = _ProofEvent(
+        "42",
+        "same-human",
+        self_id="bot-left",
+        message_id="same-delivery",
+    )
+
+    await EmotionalStatePlugin.on_message(plugin, first)
+    await EmotionalStatePlugin.on_message(plugin, duplicate)
+
+    assert first.get_extra("_syl_inbound_duplicate") is False
+    assert duplicate.get_extra("_syl_inbound_duplicate") is True
+    assert first.sender_reads == duplicate.sender_reads == 0
+    assert len(plugin._inbound_seen) == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_receiving_bot_identity_fails_open_without_sender_read(
+    tmp_path,
+) -> None:
+    plugin, _manager = _proof_plugin(tmp_path)
+    events = [
+        _ProofEvent(
+            "42",
+            "same-human",
+            self_id="",
+            message_id="same-delivery",
+        )
+        for _ in range(2)
+    ]
+
+    await asyncio.gather(
+        *(EmotionalStatePlugin.on_message(plugin, event) for event in events)
+    )
+
+    assert [event.get_extra("_syl_inbound_duplicate") for event in events] == [
+        False,
+        False,
+    ]
+    assert [event.sender_reads for event in events] == [0, 0]
+    assert plugin._inbound_seen == {}
+
+
+def test_inbound_registration_and_fallback_gate_share_canonical_key_helper(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    plugin, _manager = _proof_plugin(tmp_path)
+    calls: list[_ProofEvent] = []
+
+    def canonical_key(event: _ProofEvent):
+        calls.append(event)
+        return (
+            event.get_platform_id(),
+            event.get_self_id(),
+            event.unified_msg_origin,
+            event.message_obj.message_id,
+        )
+
+    monkeypatch.setattr(
+        EmotionalStatePlugin,
+        "_canonical_inbound_duplicate_key",
+        staticmethod(canonical_key),
+    )
+    registered = _ProofEvent(
+        "42",
+        "same-human",
+        self_id="bot-left",
+        message_id="registered-path",
+    )
+    fallback = _ProofEvent(
+        "42",
+        "same-human",
+        self_id="bot-left",
+        message_id="fallback-path",
+    )
+
+    assert EmotionalStatePlugin._register_inbound_duplicate(plugin, registered) is False
+    assert EmotionalStatePlugin._inbound_dup_gate(plugin, fallback) is False
+    assert calls == [registered, fallback]
 
 
 @pytest.mark.asyncio

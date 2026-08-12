@@ -2867,8 +2867,45 @@ class EmotionalStatePlugin(Star):
     # 消息事件监听：捕获所有消息（含未经 LLM 的），更新时间戳和节奏
     # -----------------------------------------------------------------------
 
+    @staticmethod
+    def _canonical_inbound_duplicate_key(
+        event: Any,
+    ) -> tuple[str, str, str, str] | None:
+        """Return one Bot-bound delivery key, or fail open without identity.
+
+        Deduplication runs before scoped transport publication, so it may use only
+        the adapter's current receiving-account identity plus the stable delivery
+        fields.  It must never read the sender or infer a recent/default scope.
+        """
+
+        try:
+            platform_getter = getattr(event, "get_platform_id", None)
+            self_getter = getattr(event, "get_self_id", None)
+            if not callable(platform_getter) or not callable(self_getter):
+                return None
+            platform_id = str(platform_getter() or "")
+            self_id = str(self_getter() or "")
+            umo = getattr(event, "unified_msg_origin", None)
+            message_id = getattr(
+                getattr(event, "message_obj", None),
+                "message_id",
+                None,
+            )
+        except Exception:
+            return None
+        if (
+            not platform_id
+            or not self_id
+            or type(umo) is not str
+            or not umo
+            or type(message_id) is not str
+            or not message_id.strip()
+        ):
+            return None
+        return platform_id, self_id, umo, message_id
+
     def _register_inbound_duplicate(self, event: Any) -> bool:
-        """Register the inbound delivery before any transport or identity read."""
+        """Register delivery before transport publication or sender identity read."""
 
         get_extra = getattr(event, "get_extra", None)
         set_extra = getattr(event, "set_extra", None)
@@ -2880,22 +2917,18 @@ class EmotionalStatePlugin(Star):
                 pass
 
         duplicate = False
-        key = ""
+        key: tuple[str, str, str, str] | None = None
         seen: Any = None
         registered_new = False
         try:
-            umo = str(getattr(event, "unified_msg_origin", "") or "")
-            mid = getattr(getattr(event, "message_obj", None), "message_id", None)
-            key = (
-                umo + "\x00" + mid
-                if umo and isinstance(mid, str) and mid.strip()
-                else ""
+            key = EmotionalStatePlugin._canonical_inbound_duplicate_key(
+                event,
             )
             seen = getattr(self, "_inbound_seen", None)
             # Only pre-register when the event can carry ownership into
             # on_llm_request. Otherwise the legacy gate below would mistake this
             # first legitimate pass for a redelivery.
-            if key and seen is not None and callable(set_extra):
+            if key is not None and seen is not None and callable(set_extra):
                 duplicate = key in seen
                 if not duplicate:
                     seen[key] = time.time()
@@ -3827,12 +3860,12 @@ class EmotionalStatePlugin(Star):
         return self._session_ctx.session_lock(session_key)
 
     def _inbound_dup_gate(self, event: Any) -> bool:
-        """True = 本条入站消息是重复二次投递（同一 (umo, message_id) 已见过），
+        """True = 本条入站消息是同一 Bot delivery key 的重复二次投递，
         调用方应 stop_event 并早退。
 
-        判定"可去重 id"：仅当 unified_msg_origin 与 message_obj.message_id 都
-        是非空稳定串时才登记/比对；否则（None/空/非串——如 webchat 前端未带 id、
-        或任何适配器缺省）直接放行、不登记，宁可漏 dedup 也不误杀合法消息。
+        判定"可去重 id"：仅当 receiving platform/self identity、
+        unified_msg_origin 与 message_obj.message_id 都可用时才登记/比对；否则
+        直接放行、不登记，宁可漏 dedup 也不跨 Bot 误杀合法消息。
 
         本闸只在 on_llm_request（main.py:_on_llm_request_inner 顶端）调用，该
         钩子由框架 internal.py 在 per-session 锁（session_lock_manager）持有
@@ -3853,11 +3886,9 @@ class EmotionalStatePlugin(Star):
             ):
                 return bool(get_extra("_syl_inbound_duplicate", False))
 
-            umo = str(getattr(event, "unified_msg_origin", "") or "")
-            mid = getattr(getattr(event, "message_obj", None), "message_id", None)
-            if not umo or not isinstance(mid, str) or not mid.strip():
-                return False  # 豁免：无稳定 id，宁漏 dedup 不误杀
-            key = umo + "\x00" + mid
+            key = EmotionalStatePlugin._canonical_inbound_duplicate_key(event)
+            if key is None:
+                return False  # 身份或稳定 delivery id 缺失：宁漏 dedup 不跨 Bot 误杀
             # check-then-set：中间无 await，单线程协作式原子；外层框架 per-session
             # 锁（internal.py:209）再对同 umo 的重复 pass 做一层串行化保障。
             if key in self._inbound_seen:

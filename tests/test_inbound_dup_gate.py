@@ -1,8 +1,8 @@
 """v2.5.0 入站消息级幂等闸（issue43-repeat v2 修复）回归测试。
 
 覆盖 main.py 新增电路：
-  - `EmotionalStatePlugin._inbound_dup_gate`：以 (unified_msg_origin,
-    message_obj.message_id) 为键的 check-then-set 去重判定。
+  - `EmotionalStatePlugin._inbound_dup_gate`：以 receiving Bot identity +
+    (unified_msg_origin, message_obj.message_id) 为键的 check-then-set 去重判定。
   - `_on_scope_ready_llm_request` 请求尾段接线：命中重复 ->
     `event.stop_event()` + 早退，
     不委托给 `_llm_request_pipeline._on_llm_request_inner`（即不再触发
@@ -40,10 +40,25 @@ class _MsgObj:
 class _Event:
     """真事件桩：只提供闸 + scope-ready 请求尾段需要的最小面。"""
 
-    def __init__(self, umo=UMO, message_id=None):
+    def __init__(
+        self,
+        umo=UMO,
+        message_id=None,
+        *,
+        platform_id="aiocqhttp",
+        self_id="10001",
+    ):
         self.unified_msg_origin = umo
         self.message_obj = _MsgObj(message_id)
+        self.platform_id = platform_id
+        self.self_id = self_id
         self._stopped = False
+
+    def get_platform_id(self):
+        return self.platform_id
+
+    def get_self_id(self):
+        return self.self_id
 
     def stop_event(self):
         self._stopped = True
@@ -58,6 +73,12 @@ class _EventNoMessageObj:
     def __init__(self, umo=UMO):
         self.unified_msg_origin = umo
         self._stopped = False
+
+    def get_platform_id(self):
+        return "aiocqhttp"
+
+    def get_self_id(self):
+        return "10001"
 
     def stop_event(self):
         self._stopped = True
@@ -195,6 +216,28 @@ def test_different_umo_same_mid_not_flagged_duplicate() -> None:
     assert p._inbound_dup_gate(e2) is False
 
 
+@pytest.mark.parametrize(
+    ("platform_id", "self_id"),
+    [("", "10001"), ("aiocqhttp", "")],
+)
+def test_missing_receiving_bot_identity_always_fails_open(
+    platform_id: str,
+    self_id: str,
+) -> None:
+    p = _gate_only_plugin()
+    events = [
+        _Event(
+            message_id="same-delivery",
+            platform_id=platform_id,
+            self_id=self_id,
+        )
+        for _ in range(2)
+    ]
+
+    assert [p._inbound_dup_gate(event) for event in events] == [False, False]
+    assert len(p._inbound_seen) == 0
+
+
 # ---------------------------------------------------------------------------
 # 组 2：scope-ready 请求尾段 —— 命中即 stop_event + 不委托下游
 # ---------------------------------------------------------------------------
@@ -246,7 +289,7 @@ async def test_silent_round_message_id_still_registered_before_early_return() ->
     e2 = _Event(message_id=mid)  # 平台重投同一条消息
 
     await p._on_scope_ready_llm_request(e1, request=SimpleNamespace())
-    key = UMO + "\x00" + mid
+    key = ("aiocqhttp", "10001", UMO, mid)
     assert key in p._inbound_seen, "SILENT 轮的 message_id 必须已被登记"
 
     await p._on_scope_ready_llm_request(e2, request=SimpleNamespace())
@@ -279,6 +322,12 @@ async def test_gate_survives_event_missing_stop_event_method() -> None:
         def __init__(self, umo=UMO, message_id=None):
             self.unified_msg_origin = umo
             self.message_obj = _MsgObj(message_id)
+
+        def get_platform_id(self):
+            return "aiocqhttp"
+
+        def get_self_id(self):
+            return "10001"
 
     p = _req_pipeline_plugin()
     e1 = _NoStopEvent(message_id="444444")
