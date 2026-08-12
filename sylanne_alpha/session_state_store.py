@@ -126,6 +126,7 @@ class SessionStateStore:
     def __init__(self) -> None:
         # 登记表：所有需按 session_key 清理的 SessionMap（register 自动追加）
         self._maps: list[SessionMap] = []
+        self._task_cleanup_waiters: set[asyncio.Task[Any]] = set()
 
         # ---- 业务核心（真语义）----
         self.hosts: SessionMap = self._reg("hosts", BoundedDict(maxsize=200))
@@ -136,7 +137,10 @@ class SessionStateStore:
         self.unfinished_replies: SessionMap = self._reg("unfinished_replies", BoundedDict(maxsize=200))
         self.stream_buffers: SessionMap = self._reg("stream_buffers", BoundedDict(maxsize=200))
         self.stream_first_sent: SessionMap = self._reg("stream_first_sent", BoundedDict(maxsize=200))
-        self.segmented_tasks: SessionMap = self._reg("segmented_tasks", BoundedDict(maxsize=200))
+        self.segmented_tasks: SessionMap = self._reg(
+            "segmented_tasks",
+            BoundedDict(maxsize=200, on_evict=self._cancel_and_drain_tasks),
+        )
         # 当前实时回复的逐段送达回执。模型全文只是意图；只有该账本中成功
         # send_message 的前缀才允许进入 AstrBot history / conversation buffer。
         self.segmented_delivery_turns: SessionMap = self._reg(
@@ -176,7 +180,7 @@ class SessionStateStore:
         # Pipeline 创建的短任务按 session 归属；release/aclose 会先 cancel 再清容器。
         self.background_tasks: SessionMap = self._reg(
             "background_tasks",
-            BoundedDict(maxsize=200, on_evict=self._cancel_task_collection),
+            BoundedDict(maxsize=200, on_evict=self._cancel_and_drain_tasks),
         )
 
         # ---- 主动发言 / outreach ----
@@ -280,6 +284,47 @@ class SessionStateStore:
                 except Exception:
                     pass
 
+    def _cancel_and_drain_tasks(self, key: str, value: Any) -> None:
+        """Cancel tasks and arrange exception-safe draining for sync eviction."""
+
+        tasks = value if isinstance(value, (set, list, tuple)) else (value,)
+        pending: list[Any] = []
+        for task in tuple(tasks):
+            if task is None or bool(getattr(task, "done", lambda: True)()):
+                continue
+            cancel = getattr(task, "cancel", None)
+            if not callable(cancel):
+                continue
+            try:
+                cancel()
+                pending.append(task)
+            except Exception:
+                continue
+        if not pending:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            for task in pending:
+                add_done_callback = getattr(task, "add_done_callback", None)
+                if callable(add_done_callback):
+                    add_done_callback(self._consume_task_result)
+            return
+
+        async def _drain() -> None:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        waiter = loop.create_task(_drain(), name=f"sylanne-owner-drain:{key}")
+        self._task_cleanup_waiters.add(waiter)
+        waiter.add_done_callback(self._task_cleanup_waiters.discard)
+
+    @staticmethod
+    def _consume_task_result(task: Any) -> None:
+        try:
+            task.exception()
+        except (asyncio.CancelledError, Exception):
+            pass
+
     # ------------------------------------------------------------------
     # 统一清理收口（替代 state_persistence._SESSION_KEYED_CONTAINERS 反射遍历）
     # ------------------------------------------------------------------
@@ -287,19 +332,14 @@ class SessionStateStore:
         """释放某会话在所有已登记 SessionMap 中的态。漏登记 = 容器不在 = 立即暴露。"""
         fragment = self.fragment_buffers.get(session_key)
         self._cancel_fragment_buffer(session_key, fragment)
-        self._cancel_task_collection(
+        self._cancel_and_drain_tasks(
             session_key, self.background_tasks.get(session_key, set())
         )
-        self._cancel_task_collection(
+        self._cancel_and_drain_tasks(
             session_key, self.segmented_tasks.get(session_key)
         )
         checkpoint_task = self.background_post_checkpoint_tasks.get(session_key)
-        cancel = getattr(checkpoint_task, "cancel", None)
-        if callable(cancel):
-            try:
-                cancel()
-            except Exception:
-                pass
+        self._cancel_and_drain_tasks(session_key, checkpoint_task)
         conv_sync_umo = self._conv_sync_session_umos.pop(session_key, None)
         for m in self._maps:
             m.pop(session_key, None)
@@ -328,10 +368,17 @@ class SessionStateStore:
         """Cancel/await all owner tasks, then release every registered session state."""
 
         tasks: list[Any] = []
-        for _session_key, owned in self.background_tasks.snapshot_items():
-            collection = owned if isinstance(owned, (set, list, tuple)) else (owned,)
-            for task in tuple(collection):
-                if task is not None and not bool(getattr(task, "done", lambda: True)()):
+        task_maps = (
+            self.background_tasks,
+            self.segmented_tasks,
+            self.background_post_checkpoint_tasks,
+        )
+        for task_map in task_maps:
+            for _session_key, owned in task_map.snapshot_items():
+                collection = owned if isinstance(owned, (set, list, tuple)) else (owned,)
+                for task in tuple(collection):
+                    if task is None or bool(getattr(task, "done", lambda: True)()):
+                        continue
                     try:
                         task.cancel()
                     except Exception:
@@ -339,6 +386,9 @@ class SessionStateStore:
                     tasks.append(task)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        cleanup_waiters = tuple(self._task_cleanup_waiters)
+        if cleanup_waiters:
+            await asyncio.gather(*cleanup_waiters, return_exceptions=True)
         for _session_key, fragment in self.fragment_buffers.snapshot_items():
             self._cancel_fragment_buffer(_session_key, fragment)
         self.reset_all()
@@ -346,7 +396,7 @@ class SessionStateStore:
     def reset_all(self) -> None:
         """整体清空所有会话态（供 state_persistence 的全局 reset 用）。"""
         for _session_key, tasks in self.background_tasks.snapshot_items():
-            self._cancel_task_collection(_session_key, tasks)
+            self._cancel_and_drain_tasks(_session_key, tasks)
         for _session_key, fragment in self.fragment_buffers.snapshot_items():
             self._cancel_fragment_buffer(_session_key, fragment)
         for m in self._maps:

@@ -957,6 +957,14 @@ class LLMRequestPipeline:
     def _authenticated_identity(self, session_key: str) -> dict[str, str] | None:
         services = self._service_bundle()
         callback = getattr(services, "authenticated_identity_fn", None)
+        if not getattr(self, "_services_explicit", False):
+            try:
+                store = getattr(self._p, "_store", None)
+                dynamic_callback = getattr(store, "get_authenticated_identity", None)
+            except Exception:
+                dynamic_callback = None
+            if callable(dynamic_callback):
+                callback = dynamic_callback
         if not callable(callback):
             return None
         try:
@@ -1043,11 +1051,12 @@ class LLMRequestPipeline:
         """Return injected social authority, with legacy-fixture compatibility."""
 
         services = self._service_bundle()
-        if services is not None:
-            return services.social_field
         if getattr(self, "_services_explicit", False):
-            return None
-        return getattr(self._p, "_social_field", None)
+            return getattr(services, "social_field", None)
+        try:
+            return getattr(self._p, "_social_field")
+        except Exception:
+            return getattr(services, "social_field", None)
 
     def _service_config(self) -> Mapping[str, Any]:
         """Return config from the same authority as the selected service mode."""
@@ -1469,7 +1478,8 @@ class LLMRequestPipeline:
 
         # 调用多模态 LLM 转述
         try:
-            context = self._services.context
+            services = self._service_bundle()
+            context = getattr(services, "context", None)
             if context is None or not hasattr(context, "llm_generate"):
                 return f"[用户发送了{len(image_urls)}张图片]"
 
@@ -1516,7 +1526,8 @@ class LLMRequestPipeline:
         """通过中央路由选择图片转述 provider，保留既有能力检测口径。"""
 
         config = self._service_config()
-        context = self._services.context
+        services = self._service_bundle()
+        context = getattr(services, "context", None)
         if context is None:
             return ""
 
@@ -3845,7 +3856,8 @@ class LLMRequestPipeline:
         config = self._service_config()
         if not bool(config.get("sylanne_alpha_embedding_memory_enabled")):
             return None
-        context = self._services.context
+        services = self._service_bundle()
+        context = getattr(services, "context", None)
         if context is None:
             return None
         try:
@@ -3882,7 +3894,8 @@ class LLMRequestPipeline:
             LLM 返回的文本，失败返回空字符串。
         """
         config = self._service_config()
-        context = self._services.context
+        services = self._service_bundle()
+        context = getattr(services, "context", None)
         if context is None:
             return ""
 
@@ -4007,7 +4020,8 @@ class LLMRequestPipeline:
         告警（首次 + 每 N 次重发），让故障可见。返回契约不变：失败仍返回空串。
         """
         config = self._service_config()
-        context = self._services.context
+        services = self._service_bundle()
+        context = getattr(services, "context", None)
         if context is None:
             self._life_sim_warn(
                 "no_provider_api", "运行环境无 provider context，生活模拟 LLM 调用降级为空"

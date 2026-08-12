@@ -1476,6 +1476,12 @@ def test_legacy_aclose_preserves_shared_store_and_foreign_task() -> None:
         plugin._store.last_user_texts.set("same", "must survive")
         foreign = asyncio.create_task(asyncio.Event().wait())
         plugin._store.track_background_task("same", foreign)
+        foreign_segmented = asyncio.create_task(asyncio.Event().wait())
+        plugin._store.segmented_tasks.set("same", foreign_segmented)
+        foreign_checkpoint = asyncio.create_task(asyncio.Event().wait())
+        plugin._store.background_post_checkpoint_tasks.set(
+            "same", foreign_checkpoint
+        )
         owned = asyncio.create_task(asyncio.Event().wait())
         pipe._track_runtime_task("same", owned)
 
@@ -1484,8 +1490,161 @@ def test_legacy_aclose_preserves_shared_store_and_foreign_task() -> None:
 
         assert plugin._store.last_user_texts.get("same") == "must survive"
         assert foreign.done() is False
+        assert foreign_segmented.done() is False
+        assert foreign_checkpoint.done() is False
         assert owned.cancelled()
-        foreign.cancel()
-        await asyncio.gather(foreign, return_exceptions=True)
+        for task in (foreign, foreign_segmented, foreign_checkpoint):
+            task.cancel()
+        await asyncio.gather(
+            foreign,
+            foreign_segmented,
+            foreign_checkpoint,
+            return_exceptions=True,
+        )
 
     asyncio.run(_exercise())
+
+
+def test_explicit_new_only_missing_services_fails_every_context_path_closed() -> None:
+    async def _exercise() -> None:
+        pipe = object.__new__(LLMRequestPipeline)
+        pipe._services_explicit = True
+        pipe._p = _RuntimeStorePoisonPlugin()
+        pipe._plugin = pipe._p
+
+        assert await pipe._generic_llm_call("prompt", ["provider"]) == ""
+        assert await pipe._detect_multimodal_provider() == ""
+
+        pipe._service_config = lambda: {  # type: ignore[method-assign]
+            "sylanne_alpha_embedding_memory_enabled": True,
+            "sylanne_alpha_transcription_enabled": True,
+        }
+        assert await pipe._embedding_provider_if_enabled() is None
+        assert await pipe._life_sim_llm_call("prompt") == ""
+
+        async def _provider_id(_event: Any) -> str:
+            return "provider"
+
+        pipe._detect_multimodal_provider = _provider_id  # type: ignore[method-assign]
+        event = SimpleNamespace(
+            message_obj=SimpleNamespace(
+                message=[SimpleNamespace(type="image", url="image://unit")]
+            )
+        )
+        assert await pipe._transcribe_non_text(event, "") == "[用户发送了1张图片]"
+
+    asyncio.run(_exercise())
+
+
+def test_runtime_owner_aclose_awaits_segmented_and_checkpoint_tasks() -> None:
+    async def _exercise() -> None:
+        owner = SessionStateStore()
+        finalized: list[str] = []
+
+        async def _wait(label: str) -> None:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                finalized.append(label)
+
+        segmented = asyncio.create_task(_wait("segmented"))
+        checkpoint = asyncio.create_task(_wait("checkpoint"))
+        owner.segmented_tasks.set("same", segmented)
+        owner.background_post_checkpoint_tasks.set("same", checkpoint)
+        await asyncio.sleep(0)
+
+        await owner.aclose()
+
+        assert segmented.cancelled()
+        assert checkpoint.cancelled()
+        assert set(finalized) == {"segmented", "checkpoint"}
+
+    asyncio.run(_exercise())
+
+
+def test_segmented_task_lru_eviction_cancels_and_drains_evicted_task() -> None:
+    async def _exercise() -> None:
+        owner = SessionStateStore()
+        finalized: list[str] = []
+        tasks: list[asyncio.Task[None]] = []
+
+        async def _wait(label: str) -> None:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                finalized.append(label)
+
+        try:
+            for index in range(201):
+                task = asyncio.create_task(_wait(str(index)))
+                tasks.append(task)
+                owner.segmented_tasks.set(str(index), task)
+                if index == 0:
+                    await asyncio.sleep(0)
+            cleanup_waiters = tuple(owner._task_cleanup_waiters)
+            assert cleanup_waiters
+            await asyncio.gather(*cleanup_waiters, return_exceptions=True)
+
+            assert tasks[0].cancelled()
+            assert "0" in finalized
+            assert len(owner.segmented_tasks) == 200
+        finally:
+            await owner.aclose()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(_exercise())
+
+
+class _LateBoundCompatPlugin:
+    def __init__(self) -> None:
+        self.config: dict[str, Any] = {}
+        self._cached_system_prompts: dict[str, str] = {}
+        self.bound_store: SessionStateStore | None = None
+        self.bound_social_field: Any = None
+
+    @property
+    def _store(self) -> SessionStateStore:
+        if self.bound_store is None:
+            raise RuntimeError("scope is not bound yet")
+        return self.bound_store
+
+    @property
+    def _social_field(self) -> Any:
+        if self.bound_social_field is None:
+            raise RuntimeError("scope is not bound yet")
+        return self.bound_social_field
+
+
+def test_default_pipeline_resolves_late_bound_scope_callbacks_dynamically() -> None:
+    plugin = _LateBoundCompatPlugin()
+    pipe = LLMRequestPipeline(plugin)  # type: ignore[arg-type]
+    assert pipe._services.social_field is None
+    assert pipe._services.authenticated_identity_fn is None
+
+    store_a = SessionStateStore()
+    store_a.set_authenticated_identity(
+        "same", sender_id="person-a", platform="unit"
+    )
+    social_a = object()
+    plugin.bound_store = store_a
+    plugin.bound_social_field = social_a
+    assert pipe._service_social_field() is social_a
+    assert pipe._authenticated_identity("same") == {
+        "sender_id": "person-a",
+        "platform": "unit",
+        "origin_scope": "private",
+        "origin_id": "",
+    }
+
+    store_b = SessionStateStore()
+    store_b.set_authenticated_identity(
+        "same", sender_id="person-b", platform="unit"
+    )
+    social_b = object()
+    plugin.bound_store = store_b
+    plugin.bound_social_field = social_b
+    assert pipe._service_social_field() is social_b
+    assert pipe._authenticated_identity("same")["sender_id"] == "person-b"
