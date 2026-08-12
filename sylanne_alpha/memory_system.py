@@ -753,22 +753,42 @@ def _tokenize(text: str) -> set[str]:
         return set()
     if _jieba is not None:
         return set(
-            w
+            word
             for w in _jieba.cut(text)
-            if len(w.strip()) >= 1 and w.strip() not in _STOPWORDS
+            if len(word := w.strip()) >= 1 and word not in _STOPWORDS
         )
     # Fallback: 空格分词（英文）+ 字符 bigram（中文）
     tokens: set[str] = set()
     for word in text.split():
-        if len(word) >= 2:
+        if len(word) >= 2 and not any("一" <= char <= "鿿" for char in word):
             tokens.add(word)
-    # 中文字符 bigram
-    chars = [c for c in text if "一" <= c <= "鿿"]
-    for i in range(len(chars) - 1):
-        tokens.add(chars[i] + chars[i + 1])
-    # 单字也加入（短查询时有用）
-    for c in chars:
-        tokens.add(c)
+
+    # 多字 stopword 必须作为一个边界整体跳过，不能只丢掉完整词后仍保留
+    # 它的单字/bigram 片段，也不能把 stopword 两侧的实词拼成新 bigram。
+    cjk_runs: list[list[str]] = [[]]
+    multi_stopwords = sorted(_STOPWORDS_MULTI, key=len, reverse=True)
+    index = 0
+    while index < len(text):
+        stopword = next((word for word in multi_stopwords if text.startswith(word, index)), None)
+        if stopword is not None:
+            if cjk_runs[-1]:
+                cjk_runs.append([])
+            index += len(stopword)
+            continue
+        char = text[index]
+        if "一" <= char <= "鿿":
+            if char in _STOPWORDS:
+                if cjk_runs[-1]:
+                    cjk_runs.append([])
+            else:
+                cjk_runs[-1].append(char)
+        index += 1
+
+    # 中文字符 bigram；保留原有单字 + bigram 召回语义。
+    for chars in cjk_runs:
+        for i in range(len(chars) - 1):
+            tokens.add(chars[i] + chars[i + 1])
+        tokens.update(chars)
     return tokens
 
 

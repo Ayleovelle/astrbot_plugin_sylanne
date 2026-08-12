@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 
+import sylanne_alpha.memory_system as memory_system
 from sylanne_alpha.memory_system import _STOPWORDS_MULTI, _tokenize
 from sylanne_alpha.v2core.integration import peek_percept_recalled_texts
 
@@ -36,6 +37,30 @@ def test_tokenize_keeps_substantive_words():
     tokens = _tokenize("我们去日本旅行，吃了拉面")
     assert "日本" in tokens or "旅行" in tokens
     assert "拉面" in tokens
+
+
+def test_tokenize_has_the_same_safe_contract_with_or_without_jieba(monkeypatch):
+    """无 jieba 的降级路径不应泄漏整段中文或让多字虚词重新进入索引。"""
+    text = "如果你觉得这样也可以，日本旅行吃拉面"
+
+    class _FakeJieba:
+        @staticmethod
+        def cut(_text):
+            assert _text == text
+            return ("如果", "你", "觉得", "这样", "也", "可以", "日本", "旅行", "吃", "拉面")
+
+    monkeypatch.setattr(memory_system, "_jieba", _FakeJieba())
+    with_jieba = memory_system._tokenize(text)
+    monkeypatch.setattr(memory_system, "_jieba", None)
+    fallback = memory_system._tokenize(text)
+
+    for tokens in (with_jieba, fallback):
+        assert {"日本", "旅行", "拉面"} <= tokens
+        assert text not in tokens
+        assert not ({"如果", "觉得", "这样", "可以"} & tokens)
+
+    # fallback 仍提供原有 CJK 单字/bigram 召回语义，而非退化成整段文本一个 token。
+    assert {"日", "本旅", "旅行", "拉面"} <= fallback
 
 
 # ---------------------------------------------------------------------------
