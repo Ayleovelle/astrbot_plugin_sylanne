@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 from sylanne_alpha.scope_contracts import (
@@ -41,7 +42,7 @@ def _relation(scope: SessionScope) -> RelationScope:
     )
 
 
-def _runtime_fenced_claim_stack(tmp_path):
+def _runtime_fenced_claim_stack(tmp_path, *, lock_timeout_seconds: float = 2.0):
     """Build real copy services around a SessionCatalog-shaped turn lookup."""
 
     from sylanne_alpha.legacy_claim_api import LegacyClaimApi
@@ -56,7 +57,10 @@ def _runtime_fenced_claim_stack(tmp_path):
     )
     from sylanne_alpha.session_catalog import ProtectedDeliveryBinding, SessionCatalog
 
-    repository = ScopeRepository(tmp_path)
+    repository = ScopeRepository(
+        tmp_path,
+        lock_timeout_seconds=lock_timeout_seconds,
+    )
     catalog = SessionCatalog(repository)
     binding_generation = catalog.binding_generation(
         "private-platform-id",
@@ -362,23 +366,39 @@ def _assert_claim_failure_left_no_artifacts(
 
 def test_stale_scope_from_claim_memory_returns_redacted_conflict_without_retry(
     tmp_path,
+    monkeypatch,
 ) -> None:
     from sylanne_alpha.legacy_claim_api import LegacyClaimApiError
     from sylanne_alpha.scope_repository import StaleScopeWrite
 
     stack = _runtime_fenced_claim_stack(tmp_path)
     before = _repository_file_snapshot(stack.repository)
-    calls = {"claim": 0}
+    before_manifest = json.loads(
+        stack.repository.legacy_unscoped_manifest_path.read_text(encoding="utf-8")
+    )
+    target = stack.repository.component_path(stack.scope, "memory")
+    original_write = stack.repository._write_snapshot_locked
+    calls = {"target": 0}
 
-    def stale_claim(*_args, **_kwargs):
-        calls["claim"] += 1
-        raise StaleScopeWrite(
-            stack.scope.scope_generation,
-            stack.scope.scope_generation + 1,
-            code="scope_generation_stale_sensitive_detail",
+    def stale_target_write(path, *, expected_generation, payload):
+        if path == target:
+            calls["target"] += 1
+            raise StaleScopeWrite(
+                stack.scope.scope_generation,
+                stack.scope.scope_generation + 1,
+                code="scope_generation_stale_sensitive_detail",
+            )
+        return original_write(
+            path,
+            expected_generation=expected_generation,
+            payload=payload,
         )
 
-    stack.api.claims.claim_memory = stale_claim
+    monkeypatch.setattr(
+        stack.repository,
+        "_write_snapshot_locked",
+        stale_target_write,
+    )
     result = stack.api.claim_after_authorization(
         stack.intent,
         principal=stack.principal,
@@ -392,24 +412,35 @@ def test_stale_scope_from_claim_memory_returns_redacted_conflict_without_retry(
     assert isinstance(result, LegacyClaimApiError)
     assert result.public_payload() == {"error": "scope_stale"}
     assert (result.status, result.code) == (409, "scope_stale")
-    assert calls == {"claim": 1}
-    _assert_claim_failure_left_no_artifacts(stack, before)
+    assert calls == {"target": 1}
+    after = _repository_file_snapshot(stack.repository)
+    after_manifest = json.loads(
+        stack.repository.legacy_unscoped_manifest_path.read_text(encoding="utf-8")
+    )
+    assert set(after) == set(before)
+    assert after_manifest["inventory"] == before_manifest["inventory"]
+    assert after_manifest["claims"] == before_manifest["claims"] == {}
+    assert after_manifest["generation"] == before_manifest["generation"] + 2
+    assert not target.exists()
+    staging = stack.repository.legacy_unscoped_root / "staging"
+    if staging.exists():
+        assert tuple(staging.glob("*.stage")) == ()
+    assert not (stack.repository.legacy_unscoped_root / "quarantine").exists()
 
 
 def test_claim_lock_failure_returns_redacted_unavailable_without_retry(tmp_path) -> None:
-    import portalocker
-
     from sylanne_alpha.legacy_claim_api import LegacyClaimApiError
 
-    stack = _runtime_fenced_claim_stack(tmp_path)
+    stack = _runtime_fenced_claim_stack(tmp_path, lock_timeout_seconds=0.0)
     before = _repository_file_snapshot(stack.repository)
     calls = {"claim": 0}
+    original_claim = stack.api.claims.claim_memory
+    competing = ScopeRepository(stack.repository.root)
 
-    def locked_claim(*_args, **_kwargs):
+    def locked_claim(*args, **kwargs):
         calls["claim"] += 1
-        raise portalocker.exceptions.LockException(
-            "sensitive repository path and process identity"
-        )
+        with competing.transaction():
+            return original_claim(*args, **kwargs)
 
     stack.api.claims.claim_memory = locked_claim
     result = stack.api.claim_after_authorization(

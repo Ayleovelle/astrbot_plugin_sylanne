@@ -268,6 +268,42 @@ class _ObservationStore:
             },
         }
 
+    def query_nowait(
+        self,
+        scope: object,
+        *,
+        group: str,
+        from_ms: int | None,
+        to_ms: int | None,
+        max_points: int,
+    ) -> dict:
+        self.calls.append(
+            {
+                "scope": scope,
+                "group": group,
+                "from_ms": from_ms,
+                "to_ms": to_ms,
+                "max_points": max_points,
+            }
+        )
+        return {
+            "schema_version": "sylanne.observation.history.v1",
+            "session": getattr(scope, "storage_token", None),
+            "group": group,
+            "points": [],
+            "sample_count": 0,
+            "downsampled": False,
+            "partial": False,
+            "storage": {
+                "used_bytes": 17,
+                "limit_bytes": 0,
+                "oldest_ms": None,
+                "segment_count": 0,
+                "cleanup_active": False,
+                "budget_unsatisfiable": True,
+            },
+        }
+
 
 def _observation_plugin(store: _ObservationStore | None = None) -> SimpleNamespace:
     return SimpleNamespace(
@@ -281,9 +317,10 @@ def test_scoped_observation_history_projects_capacity_flags_without_private_fiel
     from sylanne_alpha.webui_routes import _scoped_history_payload
 
     store = _ObservationStore()
+    scope = SimpleNamespace(storage_token="scope_v1_public")
     payload = _scoped_history_payload(
         _observation_plugin(store),
-        SimpleNamespace(scope=SimpleNamespace(storage_token="scope_v1_public")),
+        SimpleNamespace(scope=scope),
     )
 
     assert payload["storage"] == {
@@ -293,6 +330,15 @@ def test_scoped_observation_history_projects_capacity_flags_without_private_fiel
         "cleanup_active": False,
         "budget_unsatisfiable": True,
     }
+    assert store.calls == [
+        {
+            "scope": scope,
+            "group": "emotion",
+            "from_ms": None,
+            "to_ms": None,
+            "max_points": 240,
+        }
+    ]
 
 
 def test_scoped_state_embeds_only_the_delivery_diagnostics_dto() -> None:

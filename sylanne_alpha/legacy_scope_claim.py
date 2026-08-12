@@ -846,6 +846,52 @@ class LegacyScopeClaimService:
             recovered=True,
         )
 
+    def _rollback_created_pending_claim(
+        self,
+        *,
+        source: LegacyInventorySource,
+        scope: SessionScope,
+        stage: Any,
+    ) -> None:
+        """Remove only this attempt's exact pending record and private stage."""
+
+        expected = self._claim_record(
+            source=source,
+            scope=scope,
+            state="pending",
+            target_generation=None,
+        )
+        if stage is not None:
+            expected_parent = self._repository.legacy_unscoped_root / "staging"
+            prefix = f"{source.source_fingerprint}."
+            suffix = ".stage"
+            name = stage.name
+            nonce = name[len(prefix) : -len(suffix)] if (
+                stage.parent == expected_parent
+                and name.startswith(prefix)
+                and name.endswith(suffix)
+            ) else ""
+            if (
+                len(nonce) != 24
+                or nonce != nonce.lower()
+                or any(character not in "0123456789abcdef" for character in nonce)
+            ):
+                raise RepositoryCorruptionError("legacy staging path is invalid")
+        with self._repository.transaction():
+            manifest = self._repository._read_legacy_unscoped_manifest_locked()
+            claims = manifest["claims"]
+            if type(claims) is not dict:
+                raise RepositoryCorruptionError("legacy claims index is invalid")
+            if claims.get(source.source_fingerprint) != expected:
+                return
+            next_claims = dict(claims)
+            next_claims.pop(source.source_fingerprint)
+            self._repository._write_legacy_unscoped_manifest_locked(
+                self._next_manifest(manifest, claims=next_claims)
+            )
+            if stage is not None:
+                stage.unlink(missing_ok=True)
+
     def claim_memory(
         self,
         destination: LegacyDestinationCapability,
@@ -974,22 +1020,26 @@ class LegacyScopeClaimService:
                     recovered=resumed_pending,
                 )
         except LegacyClaimAuthorizationDenied:
-            if stage is not None:
-                stage.unlink(missing_ok=True)
             if created_pending:
-                with self._repository.transaction():
-                    manifest = self._repository._read_legacy_unscoped_manifest_locked()
-                    claims = manifest["claims"]
-                    if type(claims) is dict and claims.get(source.source_fingerprint) is not None:
-                        next_claims = dict(claims)
-                        next_claims.pop(source.source_fingerprint, None)
-                        self._repository._write_legacy_unscoped_manifest_locked(
-                            self._next_manifest(manifest, claims=next_claims)
-                        )
+                self._rollback_created_pending_claim(
+                    source=source,
+                    scope=destination.scope,
+                    stage=stage,
+                )
+            elif stage is not None:
+                # Preserve resumed-pending cleanup: this attempt owns its
+                # nonce-scoped stage even though it did not create the claim.
+                stage.unlink(missing_ok=True)
             raise
         except StaleScopeWrite:
             # Lifecycle fences are expected failures, not a reason to mutate a
             # target or reinterpret the source under a later scope generation.
+            if created_pending:
+                self._rollback_created_pending_claim(
+                    source=source,
+                    scope=destination.scope,
+                    stage=stage,
+                )
             raise
         except LegacyScopeClaimError:
             with self._repository.transaction():

@@ -263,6 +263,71 @@ def test_stale_destination_capability_never_creates_a_memory_component(
     assert repository.read_component(replacement, "memory") is None
 
 
+def test_stale_target_publish_rolls_back_only_its_pending_claim_and_stage(
+    tmp_path,
+    scopes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An expected lifecycle race leaves no resumable claim or staged bytes."""
+
+    from sylanne_alpha.legacy_scope_claim import LegacyScopeClaimService
+    from sylanne_alpha.scope_repository import StaleScopeWrite
+
+    repository = ScopeRepository(tmp_path / "scope-v1")
+    scope = repository.create_scope(scopes.bot_a_persona_a, expected_absent=True)
+    service = LegacyScopeClaimService(repository)
+    source = service.inventory_memory(
+        actor_id="operator-a",
+        source_id="manual-export-001",
+        payload=_memory_payload(),
+    )
+    before = repository._read_json(
+        repository.legacy_unscoped_manifest_path,
+        error_label="legacy test manifest",
+    )[1]
+    quarantine = repository.legacy_unscoped_root / "quarantine"
+    quarantine_before = tuple(quarantine.glob("*.json")) if quarantine.exists() else ()
+    target = repository.component_path(scope, "memory")
+    original_write = repository._write_snapshot_locked
+    calls = {"target": 0}
+
+    def stale_target_write(path, *, expected_generation, payload):
+        if path == target:
+            calls["target"] += 1
+            raise StaleScopeWrite(
+                scope.scope_generation,
+                scope.scope_generation + 1,
+                code="scope_generation_stale",
+            )
+        return original_write(
+            path,
+            expected_generation=expected_generation,
+            payload=payload,
+        )
+
+    monkeypatch.setattr(repository, "_write_snapshot_locked", stale_target_write)
+    with pytest.raises(StaleScopeWrite, match="scope_generation_stale"):
+        service.claim_memory(
+            service.issue_destination(scope, actor_id="operator-a"),
+            source,
+        )
+
+    after = repository._read_json(
+        repository.legacy_unscoped_manifest_path,
+        error_label="legacy test manifest",
+    )[1]
+    assert calls == {"target": 1}
+    assert after["inventory"] == before["inventory"]
+    assert after["claims"] == before["claims"] == {}
+    assert after["generation"] == before["generation"] + 2
+    assert not target.exists()
+    staging = repository.legacy_unscoped_root / "staging"
+    if staging.exists():
+        assert tuple(staging.glob("*.stage")) == ()
+    quarantine_after = tuple(quarantine.glob("*.json")) if quarantine.exists() else ()
+    assert quarantine_after == quarantine_before
+
+
 def test_authorization_guard_denial_never_quarantines_or_writes_target(
     tmp_path,
     scopes,

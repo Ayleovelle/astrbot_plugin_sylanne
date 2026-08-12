@@ -543,12 +543,12 @@ def _scoped_delivery_diagnostics(value: object) -> dict[str, int | str]:
 
 def _scoped_history_payload(plugin: object, authorization: ScopedApiAuthorization) -> dict[str, object]:
     store = getattr(getattr(plugin, "_session_ctx", None), "observation_history_store", None)
-    query = getattr(store, "query", None)
+    query = getattr(store, "query_nowait", None)
     if not callable(query):
         return {"sample_count": 0, "points": [], "storage": {}}
     try:
         source = query(
-            authorization.scope.storage_token,
+            authorization.scope,
             group="emotion",
             from_ms=None,
             to_ms=None,

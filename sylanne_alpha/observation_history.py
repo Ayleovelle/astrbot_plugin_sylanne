@@ -1542,6 +1542,36 @@ class ObservationHistoryStore:
                 "storage": storage,
             }
 
+    def query_nowait(
+        self,
+        scope: Any,
+        *,
+        group: str,
+        from_ms: int | None = None,
+        to_ms: int | None = None,
+        max_points: int | None = None,
+    ) -> dict[str, Any]:
+        """Read one exact scoped history without waiting for either owner lock."""
+
+        if not self._scoped:
+            raise RuntimeError("query_nowait requires a scoped history store")
+        scope = self._require_scope(scope)
+        repository = self._scope_repository
+        if not self._lock.acquire(blocking=False):
+            raise RuntimeError("scoped observation history is busy")
+        try:
+            with repository._repository_lock_nowait():
+                repository._validate_session_scope_locked(scope)
+                return self._query_scoped_locked(
+                    scope,
+                    group=group,
+                    from_ms=from_ms,
+                    to_ms=to_ms,
+                    max_points=max_points,
+                )
+        finally:
+            self._lock.release()
+
     def _query_scoped(
         self,
         scope: Any,
@@ -1552,52 +1582,71 @@ class ObservationHistoryStore:
         max_points: int | None,
     ) -> dict[str, Any]:
         scope = self._require_scope(scope)
+        repository = self._scope_repository
+        with self._lock, repository.transaction():
+            repository._validate_session_scope_locked(scope)
+            return self._query_scoped_locked(
+                scope,
+                group=group,
+                from_ms=from_ms,
+                to_ms=to_ms,
+                max_points=max_points,
+            )
+
+    def _query_scoped_locked(
+        self,
+        scope: Any,
+        *,
+        group: str,
+        from_ms: int | None,
+        to_ms: int | None,
+        max_points: int | None,
+    ) -> dict[str, Any]:
+        """Build one scoped DTO while both store and repository locks are held."""
+
         resolved_max_points = 240 if max_points is None else int(max_points)
         resolved_max_points = max(1, min(1000, resolved_max_points))
         requested_group = str(group)
         stored_group = "route" if requested_group == "routing" else requested_group
-        repository = self._scope_repository
-        with self._lock, repository.transaction():
-            repository._validate_session_scope_locked(scope)
-            self._refresh_scoped_manifest_locked()
-            metadata = self._manifest["scopes"].get(scope.storage_token)
-            samples: list[tuple[int, dict[str, int | float]]] = []
-            partial = False
-            if isinstance(metadata, dict):
-                for segment in metadata.get("segments", []):
-                    path = self._scoped_segment_path(scope.storage_token, segment["path"])
-                    if not path.is_file():
-                        partial = True
+        self._refresh_scoped_manifest_locked()
+        metadata = self._manifest["scopes"].get(scope.storage_token)
+        samples: list[tuple[int, dict[str, int | float]]] = []
+        partial = False
+        if isinstance(metadata, dict):
+            for segment in metadata.get("segments", []):
+                path = self._scoped_segment_path(scope.storage_token, segment["path"])
+                if not path.is_file():
+                    partial = True
+                    continue
+                rows, segment_partial = self._read_segment(
+                    path,
+                    expected_session=scope.storage_token,
+                )
+                partial = partial or segment_partial
+                for row in rows:
+                    captured = int(row["captured_at_ms"])
+                    if from_ms is not None and captured < int(from_ms):
                         continue
-                    rows, segment_partial = self._read_segment(
-                        path,
-                        expected_session=scope.storage_token,
+                    if to_ms is not None and captured > int(to_ms):
+                        continue
+                    values = self._numeric_group_values(
+                        stored_group,
+                        _dict(_dict(row.get("groups")).get(stored_group)),
                     )
-                    partial = partial or segment_partial
-                    for row in rows:
-                        captured = int(row["captured_at_ms"])
-                        if from_ms is not None and captured < int(from_ms):
-                            continue
-                        if to_ms is not None and captured > int(to_ms):
-                            continue
-                        values = self._numeric_group_values(
-                            stored_group,
-                            _dict(_dict(row.get("groups")).get(stored_group)),
-                        )
-                        if values:
-                            samples.append((captured, values))
-            samples.sort(key=lambda sample: sample[0])
-            points = self._bucket_samples(samples, resolved_max_points)
-            return {
-                "schema_version": HISTORY_SCHEMA_VERSION,
-                "session": scope.storage_token,
-                "group": requested_group,
-                "points": points,
-                "sample_count": len(samples),
-                "downsampled": len(samples) > resolved_max_points,
-                "partial": partial,
-                "storage": self._scoped_storage_metadata(),
-            }
+                    if values:
+                        samples.append((captured, values))
+        samples.sort(key=lambda sample: sample[0])
+        points = self._bucket_samples(samples, resolved_max_points)
+        return {
+            "schema_version": HISTORY_SCHEMA_VERSION,
+            "session": scope.storage_token,
+            "group": requested_group,
+            "points": points,
+            "sample_count": len(samples),
+            "downsampled": len(samples) > resolved_max_points,
+            "partial": partial,
+            "storage": self._scoped_storage_metadata(),
+        }
 
     @staticmethod
     def _numeric_group_values(

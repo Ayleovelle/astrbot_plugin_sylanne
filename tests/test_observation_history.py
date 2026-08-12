@@ -4,11 +4,14 @@ import hashlib
 import importlib
 import json
 import logging
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+pytest_plugins = ("tests.scope_fixtures",)
 
 
 def _history_module() -> Any:
@@ -199,6 +202,52 @@ def test_projection_is_explicit_finite_allow_list() -> None:
     ):
         assert forbidden not in serialized
     assert len(row["digest"]) == 64
+
+
+def test_scoped_web_history_requires_exact_scope_and_fails_fast_on_repository_lock(
+    tmp_path: Path,
+    scopes: Any,
+) -> None:
+    from sylanne_alpha.observation_history import ObservationHistoryStore
+    from sylanne_alpha.scope_repository import ScopeRepository
+    from sylanne_alpha.webui_routes import _scoped_history_payload
+
+    root = tmp_path / "scope-v1"
+    repository = ScopeRepository(root)
+    scope = repository.create_scope(scopes.bot_a_persona_a, expected_absent=True)
+    store = ObservationHistoryStore.from_scope_repository(repository, limit_bytes=0)
+    assert store.append(scope, _snapshot(0.4), captured_at_ms=100)
+
+    unlocked = store.query_nowait(
+        scope,
+        group="emotion",
+        from_ms=None,
+        to_ms=None,
+        max_points=240,
+    )
+    assert unlocked["sample_count"] == 1
+    assert unlocked["storage"]["cleanup_active"] is False
+    assert unlocked["storage"]["budget_unsatisfiable"] is False
+    with pytest.raises(ValueError, match="frozen SessionScope"):
+        store.query_nowait(
+            scope.storage_token,
+            group="emotion",
+            from_ms=None,
+            to_ms=None,
+            max_points=240,
+        )
+
+    plugin = SimpleNamespace(
+        _session_ctx=SimpleNamespace(observation_history_store=store)
+    )
+    competing = ScopeRepository(root)
+    with competing.transaction():
+        started = time.perf_counter()
+        locked = _scoped_history_payload(plugin, SimpleNamespace(scope=scope))
+        elapsed = time.perf_counter() - started
+
+    assert elapsed < 0.25
+    assert locked == {"sample_count": 0, "points": [], "storage": {}}
 
 
 def test_resonance_spine_snapshot_projects_latest_real_timings_in_ms() -> None:
