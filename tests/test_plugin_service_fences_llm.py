@@ -135,6 +135,12 @@ class _PoisonPlugin:
         raise AttributeError(name)
 
 
+class _CachePoisonPlugin:
+    @property
+    def _cached_system_prompts(self) -> dict[str, str]:
+        raise AssertionError("explicit cache must not touch plugin storage")
+
+
 def test_explicit_services_are_the_only_provider_authority_per_instance() -> None:
     plugin_a = _PoisonPlugin()
     plugin_b = _PoisonPlugin()
@@ -276,6 +282,16 @@ def test_explicit_same_plugin_same_session_prompt_caches_are_instance_local() ->
     assert plugin._cached_system_prompts == {"same": "plugin-poison"}
 
 
+def test_explicit_prompt_cache_does_not_evaluate_plugin_fallback_property() -> None:
+    pipe = LLMRequestPipeline(  # type: ignore[arg-type]
+        _CachePoisonPlugin(),
+        services=PluginServices(config={}),
+    )
+    pipe._cached_system_prompts["same"] = "service-owned"
+
+    assert pipe._life_sim_persona_getter("same") == "service-owned"
+
+
 def test_explicit_services_never_consume_plugin_amnesia_or_scan_recent_hosts() -> None:
     plugin = _PoisonPlugin()
     tracked_hosts = _TrackedHosts()
@@ -379,6 +395,125 @@ def test_explicit_missing_observed_clock_fails_closed_without_plugin_fallback() 
     assert host.events == []
 
 
+class _BudgetWrites:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Any]] = []
+
+    def set(self, session_key: str, value: Any) -> None:
+        self.calls.append((session_key, value))
+
+
+def _gap_host(last_now: float) -> SimpleNamespace:
+    return SimpleNamespace(kernel=SimpleNamespace(last_event={"now": last_now}))
+
+
+def test_explicit_compute_budget_uses_service_clock_and_host_without_plugin_helpers() -> None:
+    plugin = _PoisonPlugin()
+    budget_writes = _BudgetWrites()
+    plugin._store = SimpleNamespace(last_request_budgets=budget_writes)
+    plugin_calls: list[str] = []
+    plugin._state_injection_budget_for_request = (
+        lambda _sk, _request: plugin_calls.append("budget") or "plugin-budget"
+    )
+    plugin._time_context_fragment = (
+        lambda _sk: plugin_calls.append("time") or "plugin-time"
+    )
+    pipe_a = LLMRequestPipeline(  # type: ignore[arg-type]
+        plugin,
+        services=PluginServices(
+            config={"state_injection_max_added_chars": 111},
+            host_fn=lambda _sk: _gap_host(90.0),
+            observed_now_fn=lambda: 100.0,
+        ),
+    )
+    pipe_b = LLMRequestPipeline(  # type: ignore[arg-type]
+        plugin,
+        services=PluginServices(
+            config={"state_injection_max_added_chars": 222},
+            host_fn=lambda _sk: _gap_host(200.0),
+            observed_now_fn=lambda: 250.0,
+        ),
+    )
+
+    budget_a, gap_a, prompt_a, time_a = asyncio.run(
+        pipe_a._compute_token_budget(SimpleNamespace(prompt="a"), "same")
+    )
+    budget_b, gap_b, prompt_b, time_b = asyncio.run(
+        pipe_b._compute_token_budget(SimpleNamespace(prompt="b"), "same")
+    )
+
+    assert (budget_a, gap_a, prompt_a, time_a) == (None, 10.0, "a", "")
+    assert (budget_b, gap_b, prompt_b, time_b) == (None, 50.0, "b", "")
+    assert plugin_calls == []
+    assert budget_writes.calls == []
+
+
+class _BodyCapture:
+    def __init__(self) -> None:
+        self.deltas: list[dict[str, float]] = []
+
+    def apply_vector_delta(self, delta: dict[str, float]) -> None:
+        self.deltas.append(delta)
+
+
+def _life_host(warmth: float) -> SimpleNamespace:
+    return SimpleNamespace(
+        kernel=SimpleNamespace(
+            computation=SimpleNamespace(
+                engine=SimpleNamespace(observe=lambda: {"warmth": warmth})
+            ),
+            body=_BodyCapture(),
+        )
+    )
+
+
+class _TrackedHostMap:
+    def __init__(self, ambient_host: Any) -> None:
+        self.ambient_host = ambient_host
+        self.get_calls: list[str] = []
+
+    def get(self, session_key: str) -> Any:
+        self.get_calls.append(session_key)
+        return self.ambient_host
+
+
+def test_explicit_scoped_life_callbacks_use_each_service_host_only() -> None:
+    scope = SimpleNamespace(storage_token="same")
+    ambient_host = _life_host(-1.0)
+    tracked_hosts = _TrackedHostMap(ambient_host)
+    plugin = SimpleNamespace(
+        _scope_runtime_registry=object(),
+        _bound_runtime=lambda: SimpleNamespace(scope=scope),
+        _store=SimpleNamespace(hosts=tracked_hosts),
+    )
+    host_a = _life_host(0.1)
+    host_b = _life_host(0.9)
+    pipe_a = LLMRequestPipeline(  # type: ignore[arg-type]
+        plugin,
+        services=PluginServices(config={}, host_fn=lambda _sk: host_a),
+    )
+    pipe_b = LLMRequestPipeline(  # type: ignore[arg-type]
+        plugin,
+        services=PluginServices(config={}, host_fn=lambda _sk: host_b),
+    )
+
+    assert pipe_a._life_sim_emotion() == {"warmth": 0.1}
+    assert pipe_b._life_sim_emotion() == {"warmth": 0.9}
+    pipe_a._life_sim_body_delta({"valence": 1.0, "arousal": 1.0})
+
+    assert host_a.kernel.body.deltas == [
+        {
+            "bloodflow.warmth": 0.03,
+            "temperature.warmth": 0.02,
+            "nerve.sensitivity": 0.02,
+            "muscle.readiness": 0.015,
+        }
+    ]
+    assert host_b.kernel.body.deltas == []
+    assert ambient_host.kernel.body.deltas == []
+    assert tracked_hosts.get_calls == []
+
+
 class _ShelfHost:
     class _Engine:
         def observe(self) -> dict[str, float]:
@@ -402,6 +537,8 @@ class _ShelfRuntimePlugin:
         self._host_obj = _ShelfHost()
         self.plugin_kv: dict[str, Any] = {}
         self.plugin_kv_calls: list[tuple[str, str]] = []
+        self.plugin_config_calls: list[str] = []
+        self.plugin_persist_calls: list[tuple[str, str]] = []
 
     async def get_kv_data(self, key: str, default: Any = None) -> Any:
         self.plugin_kv_calls.append(("get", key))
@@ -416,6 +553,7 @@ class _ShelfRuntimePlugin:
         self.plugin_kv.pop(key, None)
 
     def _cfg(self, key: str, default: str = "") -> str:
+        self.plugin_config_calls.append(key)
         values = {
             "sylanne_alpha_cross_session_mode": "on",
             "sylanne_alpha_cross_session_scope": "all",
@@ -424,6 +562,7 @@ class _ShelfRuntimePlugin:
         return values.get(key, default)
 
     def _cfg_bool(self, key: str, default: bool = False) -> bool:
+        self.plugin_config_calls.append(key)
         if key == "sylanne_alpha_cross_dialogue":
             return True
         return default
@@ -435,11 +574,13 @@ class _ShelfRuntimePlugin:
         return self._memory_systems.setdefault(session_key, MemorySystem())
 
     async def _persist_kernel(self, _session_key: str, _host: Any) -> None:
+        self.plugin_persist_calls.append(("kernel", _session_key))
         return None
 
     async def _save_sylanne_memory_state(
         self, _session_key: str, _memory_system: MemorySystem
     ) -> None:
+        self.plugin_persist_calls.append(("memory", _session_key))
         return None
 
 
@@ -447,6 +588,9 @@ def _explicit_shelf_services(
     plugin: _ShelfRuntimePlugin,
     backend: dict[str, Any],
     observed_now: float,
+    *,
+    config: dict[str, Any] | None = None,
+    save_state_fn: Any = None,
 ) -> PluginServices:
     async def _get(key: str, default: Any = None) -> Any:
         return backend.get(key, default)
@@ -457,14 +601,24 @@ def _explicit_shelf_services(
     async def _delete(key: str) -> None:
         backend.pop(key, None)
 
+    service_config = {
+        "sylanne_alpha_cross_session_mode": "on",
+        "sylanne_alpha_cross_session_scope": "all",
+        "sylanne_alpha_cross_visibility_tier": "same_group",
+        "sylanne_alpha_cross_dialogue": True,
+    }
+    if config is not None:
+        service_config = config
+
     return PluginServices(
-        config={},
+        config=service_config,
         social_field=_PrivateSocial(),
         get_kv_data=_get,
         put_kv_data=_put,
         delete_kv_data=_delete,
         host_fn=plugin._host,
         observed_now_fn=lambda: observed_now,
+        save_state_fn=save_state_fn,
         state_persistence=SimpleNamespace(
             _safe_session_key=lambda session_key: session_key
         ),
@@ -528,6 +682,61 @@ def test_explicit_same_plugin_shelf_recall_reads_only_each_service_backend() -> 
     assert plugin.plugin_kv_calls == []
 
 
+def test_explicit_same_plugin_shelf_recall_uses_each_service_config_only() -> None:
+    plugin = _ShelfRuntimePlugin()
+    backend_a: dict[str, Any] = {}
+    backend_b: dict[str, Any] = {}
+    services_a = _explicit_shelf_services(plugin, backend_a, 101.0)
+    services_b = _explicit_shelf_services(plugin, backend_b, 202.0, config={})
+    asyncio.run(
+        save_person_shelf(
+            services_a,
+            "unit",
+            "person",
+            PersonShelfBucket(
+                items=[ShelfItem("from-a", "private", "same", 101.0, 1.0)]
+            ),
+        )
+    )
+    asyncio.run(
+        save_person_shelf(
+            services_b,
+            "unit",
+            "person",
+            PersonShelfBucket(
+                items=[ShelfItem("from-b", "private", "same", 202.0, 1.0)]
+            ),
+        )
+    )
+    pipe_a = LLMRequestPipeline(plugin, services=services_a)  # type: ignore[arg-type]
+    pipe_b = LLMRequestPipeline(plugin, services=services_b)  # type: ignore[arg-type]
+
+    fragment_a = asyncio.run(
+        pipe_a._prepare_memory_context(
+            "same",
+            "hello",
+            gap_seconds=200.0,
+            realtime_enabled=False,
+            history_depth=2,
+            event=_PrivateShelfEvent(),
+        )
+    )[2]
+    fragment_b = asyncio.run(
+        pipe_b._prepare_memory_context(
+            "same",
+            "hello",
+            gap_seconds=200.0,
+            realtime_enabled=False,
+            history_depth=2,
+            event=_PrivateShelfEvent(),
+        )
+    )[2]
+
+    assert "from-a" in fragment_a
+    assert "from-b" not in fragment_b
+    assert plugin.plugin_config_calls == []
+
+
 def _seed_shelf_buffer(plugin: _ShelfRuntimePlugin) -> None:
     buf = plugin._store.conversation_buffers.get_or_create(
         "same", lambda: ConversationBuffer(session_key="same")
@@ -569,3 +778,75 @@ def test_explicit_same_plugin_shelf_writes_use_service_backend_and_clock() -> No
     assert backend_a == snapshot_a
     assert plugin.plugin_kv == {}
     assert plugin.plugin_kv_calls == []
+
+
+def test_explicit_same_plugin_shelf_write_uses_each_service_config_only() -> None:
+    plugin = _ShelfRuntimePlugin()
+    plugin._store.set_authenticated_identity(
+        "same",
+        sender_id="person",
+        platform="unit",
+        origin_scope="private",
+        origin_id="same",
+    )
+    backend_a: dict[str, Any] = {}
+    backend_b: dict[str, Any] = {}
+    pipe_a = LLMRequestPipeline(  # type: ignore[arg-type]
+        plugin,
+        services=_explicit_shelf_services(plugin, backend_a, 101.0),
+    )
+    pipe_b = LLMRequestPipeline(  # type: ignore[arg-type]
+        plugin,
+        services=_explicit_shelf_services(plugin, backend_b, 202.0, config={}),
+    )
+
+    async def _summary(_prompt: str) -> str:
+        return "service-owned summary"
+
+    pipe_a._summarizer_llm_call = _summary
+    pipe_b._summarizer_llm_call = _summary
+    _seed_shelf_buffer(plugin)
+    asyncio.run(pipe_a._flush_conversation_to_l1("same"))
+    _seed_shelf_buffer(plugin)
+    asyncio.run(pipe_b._flush_conversation_to_l1("same"))
+
+    shelf_key = person_shelf_kv_key("unit", "person")
+    assert shelf_key in backend_a
+    assert shelf_key not in backend_b
+    assert plugin.plugin_config_calls == []
+
+
+def test_explicit_persistence_uses_service_callback_and_missing_is_safe_noop() -> None:
+    plugin = _ShelfRuntimePlugin()
+    callback_calls: list[str] = []
+
+    async def _save_state(session_key: str) -> None:
+        callback_calls.append(session_key)
+
+    pipe_with_callback = LLMRequestPipeline(  # type: ignore[arg-type]
+        plugin,
+        services=_explicit_shelf_services(
+            plugin,
+            {},
+            101.0,
+            config={},
+            save_state_fn=_save_state,
+        ),
+    )
+    pipe_without_callback = LLMRequestPipeline(  # type: ignore[arg-type]
+        plugin,
+        services=_explicit_shelf_services(plugin, {}, 202.0, config={}),
+    )
+
+    async def _summary(_prompt: str) -> str:
+        return "service-owned summary"
+
+    pipe_with_callback._summarizer_llm_call = _summary
+    pipe_without_callback._summarizer_llm_call = _summary
+    _seed_shelf_buffer(plugin)
+    asyncio.run(pipe_with_callback._flush_conversation_to_l1("same"))
+    _seed_shelf_buffer(plugin)
+    asyncio.run(pipe_without_callback._flush_conversation_to_l1("same"))
+
+    assert callback_calls == ["same"]
+    assert plugin.plugin_persist_calls == []

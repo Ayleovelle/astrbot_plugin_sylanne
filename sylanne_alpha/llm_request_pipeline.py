@@ -910,6 +910,72 @@ class LLMRequestPipeline:
             config = getattr(self._p, "_config", None)
         return config if isinstance(config, Mapping) else {}
 
+    def _cross_session_settings(self) -> Any:
+        """Resolve shelf switches without crossing the explicit service fence."""
+
+        from sylanne_alpha.cross_session_config import (
+            CrossSessionSettings,
+            cross_session_settings,
+        )
+
+        if not getattr(self, "_services_explicit", False):
+            return cross_session_settings(self._p)
+
+        config = self._service_config()
+
+        def _enum(key: str, default: str, legal: tuple[str, ...]) -> str:
+            raw = config.get(key, default)
+            value = str(raw) if raw is not None else default
+            return value if value in legal else default
+
+        def _bool(key: str) -> bool:
+            return config.get(key) is True
+
+        return CrossSessionSettings(
+            mode=_enum(
+                "sylanne_alpha_cross_session_mode",
+                "off",
+                ("off", "shadow", "on"),
+            ),
+            scope=_enum(
+                "sylanne_alpha_cross_session_scope",
+                "owner",
+                ("owner", "all"),
+            ),
+            cross_dialogue=_bool("sylanne_alpha_cross_dialogue"),
+            cross_relationship=_bool("sylanne_alpha_cross_relationship"),
+            cross_personality=_bool("sylanne_alpha_cross_personality"),
+            visibility_tier=_enum(
+                "sylanne_alpha_cross_visibility_tier",
+                "same_group",
+                ("same_group", "cross_group", "strict"),
+            ),
+        )
+
+    async def _persist_pipeline_state(
+        self,
+        session_key: str,
+        *,
+        host: Any | None = None,
+        memory_system: Any | None = None,
+        save_memory: bool = False,
+    ) -> None:
+        """Persist through the selected authority; missing explicit caps are a no-op."""
+
+        if getattr(self, "_services_explicit", False):
+            save_state = self._services.save_state_fn
+            if not callable(save_state):
+                return
+            result = save_state(session_key)
+            if inspect.isawaitable(result):
+                await result
+            return
+
+        if host is not None:
+            await self._p._persist_kernel(session_key, host)
+        if save_memory and memory_system is not None:
+            await self._p._save_sylanne_memory_state(session_key, memory_system)
+
     def _service_session_key(self, event: Any) -> str:
         """Resolve an event key only through the injected callback capability."""
 
@@ -1085,13 +1151,20 @@ class LLMRequestPipeline:
                 if active_scope is None:
                     return ""
                 sk = active_scope.storage_token
-                host = p._store.hosts.get(sk)
+                host = (
+                    self._service_host(sk)
+                    if getattr(self, "_services_explicit", False)
+                    else p._store.hosts.get(sk)
+                )
                 if host is None:
                     return ""
                 from sylanne_alpha import relationship_layer as _rl
 
                 sf = self._service_social_field()
                 if sf is None or sf.is_group_context_by_key(sk):
+                    return ""
+                if getattr(self, "_services_explicit", False):
+                    # PluginServices has no relationship authority.
                     return ""
                 return sk if _rl.is_romantic(p, sk) else ""
             if getattr(self, "_services_explicit", False):
@@ -1159,11 +1232,13 @@ class LLMRequestPipeline:
         if locked:
             return locked[:500]
 
-        cached_prompts = getattr(
-            self,
-            "_cached_system_prompts",
-            getattr(self._p, "_cached_system_prompts", {}),
-        )
+        cached_prompts = getattr(self, "_cached_system_prompts", None)
+        if cached_prompts is None:
+            cached_prompts = (
+                {}
+                if getattr(self, "_services_explicit", False)
+                else getattr(self._p, "_cached_system_prompts", {})
+            )
         if session_key:
             cached = str(cached_prompts.get(session_key, "") or "").strip()
         else:
@@ -2035,11 +2110,15 @@ class LLMRequestPipeline:
         """
         p = self._plugin
 
-        budget = p._state_injection_budget_for_request(session_key, request)
-        p._store.last_request_budgets.set(session_key, budget)
-
-        # 注入时间上下文
-        time_fragment = p._time_context_fragment(session_key)
+        if getattr(self, "_services_explicit", False):
+            # PluginServices exposes neither the legacy budget object nor a
+            # trusted time-fragment renderer, so both projections fail closed.
+            budget = None
+            time_fragment = ""
+        else:
+            budget = p._state_injection_budget_for_request(session_key, request)
+            p._store.last_request_budgets.set(session_key, budget)
+            time_fragment = p._time_context_fragment(session_key)
         current_prompt = str(getattr(request, "prompt", "") or "")
 
         # 计算 gap_seconds 用于控制注入强度
@@ -2121,7 +2200,7 @@ class LLMRequestPipeline:
                     text="", flags=["unfinished_reply"], kind="interruption"
                 )
                 mark_dirty("session")
-                await p._persist_kernel(session_key, host)
+                await self._persist_pipeline_state(session_key, host=host)
 
         # 消费待发送的生命事件上下文
         outreach_fragment = ""
@@ -2287,7 +2366,7 @@ class LLMRequestPipeline:
         #
         # 完全独立于上面主记忆召回，自包 try/except——任何异常都不冒泡、不影响
         # 已经算好的主 memory_fragment。default（cross_session_mode=off）时
-        # cross_session_settings(p).enabled 为 False，本支路第一行判断后整体
+        # resolved shelf settings 的 enabled 为 False 时，本支路第一行判断后整体
         # 短路，不构造任何货架变量、不查 KV，保证与改前字节级一致。
         # 与主召回复用同一 recall_allowed 节流条件
         # （design 未强制独立节流，复用更省资源、且偏保守方向不会多召回）。
@@ -2301,9 +2380,7 @@ class LLMRequestPipeline:
         # -----------------------------------------------------------------
         if recall_allowed and _history_anchored:
             try:
-                from sylanne_alpha.cross_session_config import cross_session_settings
-
-                shelf_settings = cross_session_settings(p)
+                shelf_settings = self._cross_session_settings()
                 if shelf_settings.enabled and shelf_settings.cross_dialogue and event is not None:
                     shelf_block = await self._recall_person_shelf_fragment(
                         event, session_key, shelf_settings,
@@ -2939,9 +3016,12 @@ class LLMRequestPipeline:
             # _persist_kernel 保留（flush 本请求其余脏 kernel 分区）；周期 KV save 保留。
             # 诚实标注：load 第 4 级回退（读 body.memory["_memory_system"] 的进程内残值）
             # 随之退化为"仅旧 kernel 文件残档可达"，1/2/3/5 级 + .alpha.json 救援全保留。
-            await p._persist_kernel(session_key, host)
-            if memory_system._tick % 10 == 0:
-                await p._save_sylanne_memory_state(session_key, memory_system)
+            await self._persist_pipeline_state(
+                session_key,
+                host=host,
+                memory_system=memory_system,
+                save_memory=memory_system._tick % 10 == 0,
+            )
         except Exception as e:
             # 兜底：评估失败时仍然执行基本观测
             logger.warning(f"Sylanne memory maintenance: {e}", exc_info=True)
@@ -3000,8 +3080,12 @@ class LLMRequestPipeline:
                             return
                         # MEM-03 PR-5：删死写 body._memory_system（白名单丢弃、从未幸存）；
                         # _persist_kernel + KV save 保留。
-                        await p._persist_kernel(session_key, host)
-                        await p._save_sylanne_memory_state(session_key, memory_system)
+                        await self._persist_pipeline_state(
+                            session_key,
+                            host=host,
+                            memory_system=memory_system,
+                            save_memory=True,
+                        )
         except Exception as e:
             logger.error(
                 f"Memory compression failed for {session_key}: {e}", exc_info=True
@@ -3107,9 +3191,7 @@ class LLMRequestPipeline:
             # 字节级一致。
             # -----------------------------------------------------------------
             try:
-                from sylanne_alpha.cross_session_config import cross_session_settings
-
-                settings = cross_session_settings(p)
+                settings = self._cross_session_settings()
                 if settings.enabled:
                     # B1 红线（design §8 BLOCKER B1，slice-1b 全矩阵扎实版修正）：
                     # 读不到已认证身份记录（共享桶/认不出发言人/OTHER_MESSAGE/
@@ -3320,8 +3402,12 @@ class LLMRequestPipeline:
                     logger.debug(f"Sylanne skip: {e}")
 
             # MEM-03 PR-5：删死写 body._memory_system；_persist_kernel + KV save 保留。
-            await p._persist_kernel(session_key, host)
-            await p._save_sylanne_memory_state(session_key, memory_system)
+            await self._persist_pipeline_state(
+                session_key,
+                host=host,
+                memory_system=memory_system,
+                save_memory=True,
+            )
         except Exception as e:
             logger.warning(f"Sylanne compress memories: {e}", exc_info=True)
 
@@ -3357,7 +3443,7 @@ class LLMRequestPipeline:
 
     async def _consolidation_loop(self) -> None:
         """每5分钟检查是否需要执行整理（6:00/18:00 或 L1 满 60 条）。"""
-        p = self._plugin
+        p = self._p
         try:
             while True:
                 await asyncio.sleep(300)
@@ -3395,7 +3481,7 @@ class LLMRequestPipeline:
         Returns:
             评估是否产出了结构有效的选择结果。False 时调度器保留重试机会。
         """
-        p = self._plugin
+        p = self._p
         try:
             l1_items = list(memory_system._l1)
             if not l1_items:
@@ -3476,8 +3562,12 @@ class LLMRequestPipeline:
             if host is None:
                 return False
             # MEM-03 PR-5：删死写 body._memory_system；_persist_kernel + KV save 保留。
-            await p._persist_kernel(session_key, host)
-            await p._save_sylanne_memory_state(session_key, memory_system)
+            await self._persist_pipeline_state(
+                session_key,
+                host=host,
+                memory_system=memory_system,
+                save_memory=True,
+            )
             return True
         except Exception as e:
             logger.error(
@@ -4229,7 +4319,11 @@ class LLMRequestPipeline:
         if scope is None:
             return {}
         try:
-            host = p._store.hosts.get(scope.storage_token)
+            host = (
+                self._service_host(scope.storage_token)
+                if getattr(self, "_services_explicit", False)
+                else p._store.hosts.get(scope.storage_token)
+            )
             if host is None:
                 return {}
             return host.kernel.computation.engine.observe()
@@ -4259,7 +4353,11 @@ class LLMRequestPipeline:
         if scope is None:
             return
         try:
-            host = p._store.hosts.get(scope.storage_token)
+            host = (
+                self._service_host(scope.storage_token)
+                if getattr(self, "_services_explicit", False)
+                else p._store.hosts.get(scope.storage_token)
+            )
             if host is None:
                 return
             body = host.kernel.body
