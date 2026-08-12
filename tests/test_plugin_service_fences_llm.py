@@ -632,6 +632,7 @@ def _explicit_shelf_services(
         host_fn=plugin._host,
         observed_now_fn=lambda: observed_now,
         save_state_fn=save_state_fn,
+        authenticated_identity_fn=plugin._store.get_authenticated_identity,
         state_persistence=SimpleNamespace(
             _safe_session_key=lambda session_key: session_key
         ),
@@ -1113,3 +1114,378 @@ def test_explicit_new_only_missing_services_fails_closed_without_plugin_fallback
 
     assert fragment == ""
     assert plugin.accesses == []
+
+
+class _RuntimeStorePoisonPlugin:
+    """An explicit-services host with no ambient runtime capabilities."""
+
+    @property
+    def _store(self) -> Any:
+        raise AssertionError("explicit runtime must not read plugin._store")
+
+    @property
+    def _background_tasks(self) -> Any:
+        raise AssertionError("explicit runtime must not read plugin._background_tasks")
+
+    def _session_lock(self, _session_key: str) -> Any:
+        raise AssertionError("explicit runtime must not call plugin._session_lock")
+
+    def _extract_first_sentence(self, _text: str) -> str:
+        raise AssertionError("explicit runtime must not extract through plugin")
+
+    async def _send_first_sentence(self, _origin: str, _text: str) -> None:
+        raise AssertionError("explicit runtime must not send through plugin")
+
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(f"explicit runtime plugin probe forbidden: {name}")
+
+
+class _RuntimeSocial:
+    def is_group_context(self, _event: Any) -> bool:
+        return False
+
+    def is_group_context_by_key(self, _session_key: str) -> bool:
+        return False
+
+
+class _RuntimeEvent:
+    def __init__(self, text: str = "hello") -> None:
+        self.message_str = text
+        self.unified_msg_origin = "unit:private:person"
+        self.stopped = False
+        self.sent_chunks: list[Any] = []
+
+    def stop_event(self) -> None:
+        self.stopped = True
+
+    async def send_streaming(self, generator: Any, use_fallback: bool = False) -> None:
+        del use_fallback
+        async for chunk in generator:
+            self.sent_chunks.append(chunk)
+
+
+def _runtime_services(
+    owner: SessionStateStore,
+    *,
+    config: dict[str, Any] | None = None,
+    backend: dict[str, Any] | None = None,
+    host: Any = None,
+    sent: list[tuple[str, str]] | None = None,
+) -> PluginServices:
+    shelf = backend if backend is not None else {}
+
+    async def _get(key: str, default: Any = None) -> Any:
+        return shelf.get(key, default)
+
+    async def _put(key: str, value: Any) -> None:
+        shelf[key] = value
+
+    async def _send(origin: str, text: str) -> None:
+        if sent is not None:
+            sent.append((origin, text))
+
+    return PluginServices(
+        config=config or {},
+        social_field=_RuntimeSocial(),
+        get_kv_data=_get,
+        put_kv_data=_put,
+        session_key_fn=lambda _event: "same",
+        host_fn=lambda _session_key: host,
+        observed_now_fn=lambda: 101.0,
+        state_persistence=SimpleNamespace(
+            _safe_session_key=lambda session_key: session_key
+        ),
+        runtime_state=owner,
+        authenticated_identity_fn=owner.get_authenticated_identity,
+        extract_first_sentence_fn=lambda text: text.split("。", 1)[0] + "。"
+        if "。" in text
+        else "",
+        send_first_sentence_fn=_send,
+    )
+
+
+def test_runtime_owner_caps_release_and_aclose_cancel_owned_tasks() -> None:
+    async def _exercise() -> None:
+        owner = SessionStateStore()
+        first_fragment = {
+            "texts": ["first"],
+            "start_time": 1.0,
+            "latest_seq": 1,
+        }
+        owner.fragment_buffers.set("fragment-0", first_fragment)
+        for index in range(1, 201):
+            owner.fragment_buffers.set(
+                f"fragment-{index}",
+                {"texts": [str(index)], "start_time": 1.0, "latest_seq": 1},
+            )
+        assert len(owner.fragment_buffers) == 200
+        assert first_fragment["cancelled"] is True
+
+        for index in range(101):
+            owner.conversation_buffers.set(str(index), object())
+            owner.memory_systems.set(str(index), object())
+        for index in range(201):
+            key = str(index)
+            owner.stream_buffers.set(key, "stream")
+            owner.segmented_tasks.set(key, None)
+            owner.last_user_texts.set(key, "text")
+            owner.last_injected_states.set(key, {})
+        for index in range(51):
+            owner.pending_outreach_context.set(str(index), {})
+        assert len(owner.conversation_buffers) == 100
+        assert len(owner.memory_systems) == 100
+        assert len(owner.stream_buffers) == 200
+        assert len(owner.segmented_tasks) == 200
+        assert len(owner.last_user_texts) == 200
+        assert len(owner.last_injected_states) == 200
+        assert len(owner.pending_outreach_context) == 50
+
+        pending = asyncio.create_task(asyncio.Event().wait())
+        segmented = asyncio.create_task(asyncio.Event().wait())
+        owner.track_background_task("owned", pending)
+        owner.segmented_tasks.set("owned", segmented)
+        owner.stream_buffers.set("owned", "buffer")
+        owner.release_session("owned")
+        await asyncio.sleep(0)
+        assert pending.cancelled()
+        assert segmented.cancelled()
+        assert owner.stream_buffers.get("owned") is None
+
+        pending_close = asyncio.create_task(asyncio.Event().wait())
+        owner.track_background_task("close", pending_close)
+        owner.last_user_texts.set("close", "secret")
+        await owner.aclose()
+        assert pending_close.cancelled()
+        assert owner.last_user_texts.snapshot_items() == []
+
+    asyncio.run(_exercise())
+
+
+def test_explicit_main_entry_uses_only_injected_runtime_owner() -> None:
+    owner = SessionStateStore()
+    pipe = LLMRequestPipeline(  # type: ignore[arg-type]
+        _RuntimeStorePoisonPlugin(),
+        services=_runtime_services(owner),
+    )
+    event = _RuntimeEvent("owner-only")
+    seen: list[tuple[str, str]] = []
+
+    async def _final(
+        _event: Any,
+        _request: Any,
+        message_text: str,
+        session_key: str,
+        _realtime_enabled: bool,
+        _intercept: bool,
+    ) -> None:
+        seen.append((session_key, message_text))
+
+    pipe._process_llm_request_final = _final  # type: ignore[method-assign]
+    asyncio.run(pipe._on_llm_request_inner(event, SimpleNamespace(prompt="hello")))
+
+    assert seen == [("same", "owner-only")]
+    assert owner.session_origins.get("same") == "unit:private:person"
+    assert owner.last_user_texts.get("same") == "owner-only"
+    assert pipe._runtime_state is owner
+
+
+def test_explicit_realtime_release_cancels_fragment_cas_without_plugin_state() -> None:
+    async def _exercise() -> None:
+        owner = SessionStateStore()
+        config = {
+            "sylanne_alpha_realtime_chat_enabled": True,
+            "sylanne_alpha_realtime_intercept_llm_response": True,
+            "realtime_input_completion_probe_delay_seconds": 0.05,
+            "realtime_input_completion_max_wait_seconds": 0.2,
+        }
+        pipe = LLMRequestPipeline(  # type: ignore[arg-type]
+            _RuntimeStorePoisonPlugin(),
+            services=_runtime_services(owner, config=config),
+        )
+        event = _RuntimeEvent("fragment")
+        completed: list[str] = []
+
+        async def _final(*_args: Any, **_kwargs: Any) -> None:
+            completed.append("final")
+
+        pipe._process_llm_request_final = _final  # type: ignore[method-assign]
+        request_task = asyncio.create_task(
+            pipe._on_llm_request_inner(event, SimpleNamespace(prompt="fragment"))
+        )
+        await asyncio.sleep(0)
+        assert owner.fragment_buffers.has("same")
+        pipe.release_session("same")
+        await request_task
+
+        assert event.stopped is True
+        assert completed == []
+        assert owner.fragment_buffers.get("same") is None
+
+    asyncio.run(_exercise())
+
+
+def test_explicit_stream_lock_task_and_first_sentence_use_owner_services() -> None:
+    async def _exercise() -> None:
+        owner = SessionStateStore()
+        sent: list[tuple[str, str]] = []
+        pipe = LLMRequestPipeline(  # type: ignore[arg-type]
+            _RuntimeStorePoisonPlugin(),
+            services=_runtime_services(
+                owner,
+                config={"sylanne_alpha_stream_first_sentence_enabled": True},
+                sent=sent,
+            ),
+        )
+        observed: list[tuple[str, str]] = []
+
+        async def _observe(session_key: str, text: str) -> None:
+            observed.append((session_key, text))
+
+        pipe._background_observe_request = _observe  # type: ignore[method-assign]
+        owner.stream_buffers.set("same", "stale")
+        event = _RuntimeEvent()
+        await pipe._clean_incoming_message(
+            event,
+            SimpleNamespace(),
+            "hello",
+            "same",
+            True,
+            True,
+        )
+
+        async def _chunks() -> Any:
+            yield "第一句。第二句"
+
+        await event.send_streaming(_chunks())
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert observed == [("same", "hello")]
+        assert owner.stream_buffers.get("same") is None
+        assert owner.stream_first_sent.get("same") == "第一句。"
+        assert sent == [("unit:private:person", "第一句。")]
+        assert owner.background_tasks.get("same") in (None, set())
+
+    asyncio.run(_exercise())
+
+
+def test_explicit_pending_and_shelf_identity_are_service_owned() -> None:
+    owner = SessionStateStore()
+    owner.pending_outreach_context.set(
+        "same",
+        {
+            "reason": "owner-pending",
+            "mood": "calm",
+            "event_id": "",
+            "expires_at": 0.0,
+        },
+    )
+    owner.set_authenticated_identity(
+        "same",
+        sender_id="person",
+        platform="unit",
+        origin_scope="private",
+        origin_id="same",
+    )
+    backend: dict[str, Any] = {}
+    config = {
+        "sylanne_alpha_cross_session_mode": "on",
+        "sylanne_alpha_cross_session_scope": "all",
+        "sylanne_alpha_cross_visibility_tier": "same_group",
+        "sylanne_alpha_cross_dialogue": True,
+    }
+    pipe = LLMRequestPipeline(  # type: ignore[arg-type]
+        _RuntimeStorePoisonPlugin(),
+        services=_runtime_services(
+            owner,
+            config=config,
+            backend=backend,
+            host=_ShelfHost(),
+        ),
+    )
+    memory_fragment = asyncio.run(
+        pipe._prepare_memory_context(
+            "same",
+            "hello",
+            gap_seconds=200.0,
+            realtime_enabled=False,
+            history_depth=2,
+            event=_PrivateShelfEvent(),
+        )
+    )
+    assert "owner-pending" in memory_fragment[1]
+
+    async def _summary(_prompt: str) -> str:
+        return "owner shelf summary"
+
+    pipe._summarizer_llm_call = _summary  # type: ignore[method-assign]
+    _seed_shelf_buffer(pipe)
+    asyncio.run(pipe._flush_conversation_to_l1("same"))
+    assert backend[person_shelf_kv_key("unit", "person")]["items"][0][
+        "text"
+    ] == "owner shelf summary"
+
+
+def test_missing_explicit_identity_capability_fails_shelf_write_closed() -> None:
+    owner = SessionStateStore()
+    owner.set_authenticated_identity(
+        "same",
+        sender_id="person",
+        platform="unit",
+    )
+    backend: dict[str, Any] = {}
+    services = _runtime_services(
+        owner,
+        config={
+            "sylanne_alpha_cross_session_mode": "on",
+            "sylanne_alpha_cross_session_scope": "all",
+            "sylanne_alpha_cross_visibility_tier": "same_group",
+            "sylanne_alpha_cross_dialogue": True,
+        },
+        backend=backend,
+        host=_ShelfHost(),
+    )
+    services.authenticated_identity_fn = None
+    pipe = LLMRequestPipeline(  # type: ignore[arg-type]
+        _RuntimeStorePoisonPlugin(),
+        services=services,
+    )
+
+    async def _summary(_prompt: str) -> str:
+        return "must not persist"
+
+    pipe._summarizer_llm_call = _summary  # type: ignore[method-assign]
+    _seed_shelf_buffer(pipe)
+    asyncio.run(pipe._flush_conversation_to_l1("same"))
+    assert backend == {}
+
+
+def test_default_runtime_owner_is_exact_plugin_store_alias() -> None:
+    plugin = _ShelfRuntimePlugin()
+    pipe = LLMRequestPipeline(plugin)  # type: ignore[arg-type]
+
+    assert pipe._runtime_state is plugin._store
+    assert pipe._conversation_buffer_for_session(
+        "legacy", lambda: ConversationBuffer(session_key="legacy")
+    ) is plugin._store.conversation_buffers.get("legacy")
+
+
+def test_legacy_aclose_preserves_shared_store_and_foreign_task() -> None:
+    async def _exercise() -> None:
+        plugin = _ShelfRuntimePlugin()
+        pipe = LLMRequestPipeline(plugin)  # type: ignore[arg-type]
+        plugin._store.last_user_texts.set("same", "must survive")
+        foreign = asyncio.create_task(asyncio.Event().wait())
+        plugin._store.track_background_task("same", foreign)
+        owned = asyncio.create_task(asyncio.Event().wait())
+        pipe._track_runtime_task("same", owned)
+
+        await pipe.aclose()
+        await asyncio.sleep(0)
+
+        assert plugin._store.last_user_texts.get("same") == "must survive"
+        assert foreign.done() is False
+        assert owned.cancelled()
+        foreign.cancel()
+        await asyncio.gather(foreign, return_exceptions=True)
+
+    asyncio.run(_exercise())

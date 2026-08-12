@@ -4803,7 +4803,16 @@ class EmotionalStatePlugin(Star):
         """Forward an already-frozen lifecycle scope without raw-key selection."""
 
         release = getattr(self._state_persistence, "release_scoped_session", None)
-        return bool(release(scope)) if callable(release) else False
+        released = bool(release(scope)) if callable(release) else False
+        if not released:
+            return False
+        token = getattr(scope, "storage_token", "")
+        release_pipeline = getattr(
+            getattr(self, "_llm_request_pipeline", None), "release_session", None
+        )
+        if isinstance(token, str) and token and callable(release_pipeline):
+            release_pipeline(token)
+        return True
 
     async def _maybe_takeover_segments(self, event: Any) -> bool:
         """若 event 对应的 origin 被桥接登记为待接管分段：
@@ -6716,6 +6725,11 @@ class EmotionalStatePlugin(Star):
             await asyncio.wait_for(self._state_persistence.terminate(), timeout=15)
         except asyncio.TimeoutError:
             logger.warning("Sylanne state persistence terminate timed out (15s)")
+        close_pipeline = getattr(
+            getattr(self, "_llm_request_pipeline", None), "aclose", None
+        )
+        if callable(close_pipeline):
+            await close_pipeline()
 
     async def _send_realtime_chat_plan(
         self,

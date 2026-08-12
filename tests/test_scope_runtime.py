@@ -95,6 +95,7 @@ def _persona_plugin() -> EmotionalStatePlugin:
         _life_sim_persona_getter=noop,
         _life_sim_memory_summary=noop,
         _qzone_candidate_handler=noop,
+        aclose=AsyncMock(),
     )
     def session_runtime_factory(scope, persona_runtime, persistence):
         life_simulator = SimpleNamespace(
@@ -402,6 +403,7 @@ async def test_terminate_drains_and_consolidates_every_persona_autonomy_owner(
     left_consolidate.assert_awaited_once_with(left_scope.storage_token, ANY)
     right_consolidate.assert_awaited_once_with(right_scope.storage_token, ANY)
     plugin._state_persistence.terminate.assert_awaited_once()
+    plugin._llm_request_pipeline.aclose.assert_awaited_once()
     stop_webui.assert_awaited_once()
 
 

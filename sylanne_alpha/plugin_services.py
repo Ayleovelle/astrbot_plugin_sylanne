@@ -37,6 +37,7 @@ class PluginServices:
         observe_response_fn: 观测 bot 回复的回调（async）。
         astrbot_message_fn: 构建 AstrBot 消息对象的回调。
         observed_now_fn: 获取当前观测时间的回调（支持模拟时间）。
+        runtime_state: 会话运行态的显式 owner；未注入时由显式 pipeline 独占创建。
     """
 
     config: dict = field(default_factory=dict)
@@ -59,4 +60,8 @@ class PluginServices:
     assess_emotion_fn: Optional[Callable[..., Any]] = None
     save_state_fn: Optional[Callable[..., Any]] = None
     state_persistence: Any = None
+    runtime_state: Any = None
+    authenticated_identity_fn: Optional[Callable[[str], Any]] = None
+    extract_first_sentence_fn: Optional[Callable[[str], str]] = None
+    send_first_sentence_fn: Optional[Callable[[str, str], Any]] = None
     max_hosts: int = 20

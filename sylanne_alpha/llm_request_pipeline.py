@@ -44,6 +44,7 @@ from sylanne_alpha.semantic_segmentation import (
 )
 from sylanne_alpha.state_persistence import mark_dirty
 from sylanne_alpha.scope_contracts import SessionScope
+from sylanne_alpha.session_state_store import SessionStateStore
 from sylanne_alpha.utils import safe_ensure_future
 
 if TYPE_CHECKING:
@@ -767,13 +768,23 @@ class LLMRequestPipeline:
             self._services = self._build_compat_services(plugin)
         if self._services_explicit:
             self._cached_system_prompts: dict[str, str] = {}
-            self._pipeline_conversation_buffers: dict[str, Any] = {}
-            self._pipeline_memory_systems: dict[str, Any] = {}
-            self._pipeline_last_injected_states: dict[str, dict[str, float]] = {}
+            selected_owner = getattr(self._services, "runtime_state", None)
+            self._runtime_state = (
+                selected_owner
+                if isinstance(selected_owner, SessionStateStore)
+                else SessionStateStore()
+            )
         else:
             if not hasattr(self._p, "_cached_system_prompts"):
                 self._p._cached_system_prompts = {}
             self._cached_system_prompts = self._p._cached_system_prompts
+            selected_owner = getattr(self._services, "runtime_state", None)
+            self._runtime_state = (
+                selected_owner
+                if isinstance(selected_owner, SessionStateStore)
+                else None
+            )
+        self._owned_runtime_tasks: set[Any] = set()
 
     @staticmethod
     def _build_compat_services(plugin: Any) -> PluginServices:
@@ -814,6 +825,12 @@ class LLMRequestPipeline:
             assess_emotion_fn=_compat_capability("_assess_emotion"),
             save_state_fn=_compat_capability("_save_state"),
             state_persistence=_compat_capability("_state_persistence"),
+            runtime_state=_compat_capability("_store"),
+            authenticated_identity_fn=getattr(
+                _compat_capability("_store"), "get_authenticated_identity", None
+            ),
+            extract_first_sentence_fn=_compat_capability("_extract_first_sentence"),
+            send_first_sentence_fn=_compat_capability("_send_first_sentence"),
         )
 
     def _service_bundle(self) -> PluginServices | None:
@@ -838,24 +855,13 @@ class LLMRequestPipeline:
     ) -> Any | None:
         """Resolve the buffer from the selected per-instance state owner."""
 
-        if getattr(self, "_services_explicit", False):
-            buffers = getattr(self, "_pipeline_conversation_buffers", None)
-            if buffers is None:
-                buffers = {}
-                self._pipeline_conversation_buffers = buffers
-            if session_key not in buffers and callable(factory):
-                buffers[session_key] = factory()
-            return buffers.get(session_key)
-        buffers = self._p._store.conversation_buffers
+        buffers = self._runtime_owner().conversation_buffers
         if callable(factory):
             return buffers.get_or_create(session_key, factory)
         return buffers.get(session_key)
 
     def _conversation_buffer_items(self) -> list[tuple[str, Any]]:
-        if getattr(self, "_services_explicit", False):
-            buffers = getattr(self, "_pipeline_conversation_buffers", {})
-            return list(buffers.items())
-        return self._p._store.conversation_buffers.snapshot_items()
+        return self._runtime_owner().conversation_buffers.snapshot_items()
 
     def _memory_system_for_session(
         self,
@@ -866,14 +872,11 @@ class LLMRequestPipeline:
         """Resolve memory from the pipeline owner in explicit-services mode."""
 
         if getattr(self, "_services_explicit", False):
-            systems = getattr(self, "_pipeline_memory_systems", None)
-            if systems is None:
-                systems = {}
-                self._pipeline_memory_systems = systems
-            if session_key not in systems and create:
+            systems = self._runtime_owner().memory_systems
+            if create:
                 from sylanne_alpha.memory_system import MemorySystem
 
-                systems[session_key] = MemorySystem()
+                return systems.get_or_create(session_key, MemorySystem)
             return systems.get(session_key)
         if not create:
             memory_map = getattr(getattr(self._p, "_store", None), "memory_systems", None)
@@ -883,32 +886,84 @@ class LLMRequestPipeline:
 
     def _memory_system_items(self) -> list[tuple[str, Any]]:
         if getattr(self, "_services_explicit", False):
-            systems = getattr(self, "_pipeline_memory_systems", {})
-            return list(systems.items())
+            return self._runtime_owner().memory_systems.snapshot_items()
         return self._p._store.memory_systems.snapshot_items()
 
     def _last_injected_state(self, session_key: str) -> dict[str, float]:
-        if getattr(self, "_services_explicit", False):
-            states = getattr(self, "_pipeline_last_injected_states", None)
-            if states is None:
-                states = {}
-                self._pipeline_last_injected_states = states
-            return dict(states.get(session_key) or {})
-        return dict(self._p._store.last_injected_states.get(session_key) or {})
+        return dict(
+            self._runtime_owner().last_injected_states.get(session_key) or {}
+        )
 
     def _set_last_injected_state(
         self,
         session_key: str,
         state: dict[str, float],
     ) -> None:
-        if getattr(self, "_services_explicit", False):
-            states = getattr(self, "_pipeline_last_injected_states", None)
-            if states is None:
-                states = {}
-                self._pipeline_last_injected_states = states
-            states[session_key] = dict(state)
+        self._runtime_owner().last_injected_states.set(session_key, dict(state))
+
+    def _runtime_owner(self) -> SessionStateStore:
+        """Return the one runtime owner selected at construction time."""
+
+        if not getattr(self, "_services_explicit", False):
+            owner = self._p._store
+            self._runtime_state = owner
+            return owner
+        owner = getattr(self, "_runtime_state", None)
+        if isinstance(owner, SessionStateStore):
+            return owner
+        owner = SessionStateStore()
+        self._runtime_state = owner
+        return owner
+
+    def release_session(self, session_key: str) -> None:
+        """Release one exact storage token from this pipeline's runtime owner."""
+
+        if not isinstance(session_key, str) or not session_key:
             return
-        self._p._store.last_injected_states.set(session_key, state)
+        if not getattr(self, "_services_explicit", False):
+            # The legacy owner is the exact scoped plugin store.  Its registry
+            # lifecycle already performs the release; resolving ``plugin._store``
+            # after that scope is retired would cross the frozen-scope fence.
+            return
+        self._runtime_owner().release_session(session_key)
+
+    async def aclose(self) -> None:
+        """Close the selected runtime owner and cancel its pipeline tasks."""
+
+        if getattr(self, "_services_explicit", False):
+            await self._runtime_owner().aclose()
+            return
+        tasks = tuple(getattr(self, "_owned_runtime_tasks", ()))
+        for task in tasks:
+            if not bool(getattr(task, "done", lambda: True)()):
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._owned_runtime_tasks.clear()
+
+    def _track_runtime_task(self, session_key: str, task: Any) -> Any:
+        if getattr(self, "_services_explicit", False):
+            return self._runtime_owner().track_background_task(session_key, task)
+        self._runtime_owner().track_background_task(session_key, task)
+        owned = getattr(self, "_owned_runtime_tasks", None)
+        if not isinstance(owned, set):
+            owned = self._owned_runtime_tasks = set()
+        owned.add(task)
+        add_done_callback = getattr(task, "add_done_callback", None)
+        if callable(add_done_callback):
+            add_done_callback(lambda done: owned.discard(done))
+        return task
+
+    def _authenticated_identity(self, session_key: str) -> dict[str, str] | None:
+        services = self._service_bundle()
+        callback = getattr(services, "authenticated_identity_fn", None)
+        if not callable(callback):
+            return None
+        try:
+            identity = callback(session_key)
+        except Exception:
+            return None
+        return identity if isinstance(identity, dict) else None
 
     def _now(self) -> float | None:
         """Return the authoritative observed time for this services instance.
@@ -1586,16 +1641,17 @@ class LLMRequestPipeline:
         session_key = self._service_session_key(event)
         if not session_key:
             return
+        runtime = self._runtime_owner()
         # 维护 session_key → unified_msg_origin 映射，供主动发送时使用（已在 __init__ 预初始化）
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         if umo:
-            p._store.session_origins.set(session_key, umo)
+            runtime.session_origins.set(session_key, umo)
         message_text = str(getattr(event, "message_str", "") or "")
         # 非文本消息转述：图片/语音等内容转为文本描述
         if not message_text.strip():
             message_text = await self._transcribe_non_text(event, message_text)
         if message_text:
-            p._store.last_user_texts.set(session_key, message_text[:120])
+            runtime.last_user_texts.set(session_key, message_text[:120])
         # 次要修复②：两侧口径统一走 realtime_flags（正规键 OR 旧别名），不再
         # 各自维护一份不对称的判定（此前请求侧只认正规键，响应侧额外兼容别名，
         # 若用户只设别名键会导致请求侧误判两开关都关，M4a 强制关流因此漏触发）。
@@ -1669,7 +1725,7 @@ class LLMRequestPipeline:
             getattr(event, "_is_follow_up", False)
             or getattr(event, "order_seq", None) is not None
         )
-        _seg_task = p._store.segmented_tasks.get(session_key)
+        _seg_task = runtime.segmented_tasks.get(session_key)
         active_reply = _seg_task is not None and not _seg_task.done()
         if realtime_enabled and message_text and not is_follow_up and not active_reply:
             observed_start = self._now()
@@ -1701,12 +1757,17 @@ class LLMRequestPipeline:
             except Exception:
                 median_gap = None
             max_wait = self._adaptive_max_wait(max_wait, median_gap)
-            buffers = p._store.fragment_buffers
+            buffers = runtime.fragment_buffers
 
             # ---- 同步段A：领号 + 入缓冲（无 await，单线程原子）----
             buf = buffers.get(session_key)
             if buf is None:
-                buf = {"texts": [], "start_time": observed_start, "latest_seq": 0}
+                buf = {
+                    "texts": [],
+                    "start_time": observed_start,
+                    "latest_seq": 0,
+                    "cancelled": False,
+                }
                 buffers.set(session_key, buf)
             buf["latest_seq"] += 1
             my_seq = buf["latest_seq"]
@@ -1739,7 +1800,7 @@ class LLMRequestPipeline:
             # 含义是"本会话碎片已被某 winner pop 并合并"——本条内容已含在那次合并里，
             # 直接作废即可，不会丢消息（旧 BoundedDict 实现下驱逐也返回 None，无法区分）。
             cur = buffers.get(session_key)
-            if cur is None:
+            if cur is None or cur.get("cancelled"):
                 event.stop_event()
                 return
 
@@ -1753,7 +1814,7 @@ class LLMRequestPipeline:
             if is_latest or elapsed >= max_wait:
                 # 自然最新 或 超时兜底：尝试领取（pop 为唯一移除点，CAS）
                 claimed = buffers.pop(session_key)
-                if claimed is None:
+                if claimed is None or claimed.get("cancelled"):
                     # 竞争失败（被并发兜底者先 pop）→ loser
                     event.stop_event()
                     return
@@ -2090,28 +2151,23 @@ class LLMRequestPipeline:
         intercept: bool,
     ) -> None:
         """清理流式状态并启动后台观测任务；请求历史在此保持只读。"""
-        p = self._p
+        runtime = self._runtime_owner()
 
         # 清理该会话的流式状态
-        p._store.stream_buffers.pop(session_key, None)
-        p._store.stream_first_sent.pop(session_key, None)
+        runtime.stream_buffers.pop(session_key, None)
+        runtime.stream_first_sent.pop(session_key, None)
 
         # 启动后台观测任务（按会话串行化避免竞态）
         if message_text:
 
             async def _locked_observe(sk=session_key, txt=message_text):
-                async with p._session_lock(sk):
+                async with runtime.get_session_lock(sk):
                     await self._background_observe_request(sk, txt)
 
             _observe_task = safe_ensure_future(
                 _locked_observe(), name="locked_observe"
             )
-            if not isinstance(getattr(p, "_background_tasks", None), list):
-                p._background_tasks = []
-            p._background_tasks.append(_observe_task)
-            _observe_task.add_done_callback(
-                lambda t: p._background_tasks.discard(t)
-            )
+            self._track_runtime_task(session_key, _observe_task)
             # 等待最多 200ms，让 spine tick 完成后再读取状态
             _observe_wait_ms = int(
                 self._service_config().get("state_injection_observe_wait_ms", 200)
@@ -2126,7 +2182,7 @@ class LLMRequestPipeline:
                     pass
 
         # 取消该会话过期的分段回复任务
-        stale_task = p._store.segmented_tasks.pop(session_key, None)
+        stale_task = runtime.segmented_tasks.pop(session_key, None)
         if stale_task and not stale_task.done():
             stale_task.cancel()
 
@@ -2173,22 +2229,30 @@ class LLMRequestPipeline:
                             # 原始 str 分片（部分 provider/流式路径会产出）也要喂首句缓冲，否则首句抢发静默失效。
                             elif isinstance(emitted, str):
                                 buffer += emitted
-                            first_sentence = p._extract_first_sentence(buffer)
+                            services = self._service_bundle()
+                            extract_first = getattr(
+                                services, "extract_first_sentence_fn", None
+                            )
+                            first_sentence = (
+                                extract_first(buffer)
+                                if callable(extract_first)
+                                else ""
+                            )
                             if first_sentence:
+                                send_first = getattr(
+                                    services, "send_first_sentence_fn", None
+                                )
+                                if not callable(send_first):
+                                    continue
                                 first_sent = True
-                                p._store.stream_first_sent.set(session_key, first_sentence)
+                                runtime.stream_first_sent.set(
+                                    session_key, first_sentence
+                                )
                                 t = safe_ensure_future(
-                                    p._send_first_sentence(origin, first_sentence),
+                                    send_first(origin, first_sentence),
                                     name="stream_send_first_sentence",
                                 )
-                                if not isinstance(
-                                    getattr(p, "_background_tasks", None), list
-                                ):
-                                    p._background_tasks = []
-                                p._background_tasks.append(t)
-                                t.add_done_callback(
-                                    lambda tt: p._background_tasks.discard(tt)
-                                )
+                                self._track_runtime_task(session_key, t)
                     # 流结束：补发被 hold 的残留可见文本（半截标签误判时）
                     tail = tfilter.flush()
                     if tail:
@@ -2280,6 +2344,7 @@ class LLMRequestPipeline:
             (unfinished_fragment, outreach_fragment, memory_fragment)
         """
         p = self._p
+        runtime = self._runtime_owner()
         # leg-2(a)：历史锚是否充分。None（未知）按在场处理；≥阈值为在场。
         _history_anchored = (
             history_depth is None or history_depth >= _MIN_HISTORY_TURNS_FOR_ANCHOR
@@ -2301,7 +2366,7 @@ class LLMRequestPipeline:
         # 未发送文本不是对话事实。旧实现把被取消分段的 tail 以“上一轮回复
         # 没有说完”注回 prompt，模型会据此坚信自己已经说过用户从未看见的话。
         # 现在只保留“发生过中断”这一身体信号，并丢弃私有草稿本身。
-        unfinished = p._store.unfinished_replies.pop(session_key, "")
+        unfinished = runtime.unfinished_replies.pop(session_key, "")
         unfinished_fragment = ""
         if unfinished:
             host = self._service_host(session_key)
@@ -2318,7 +2383,7 @@ class LLMRequestPipeline:
         # 避免刚写入的近期记忆被同轮 temporal_proximity 兜底召回，与 outreach_fragment
         # 重复注入同一 life_event_id。None=本轮无待写；否则为 (clean_reason, event_id)。
         _deferred_life_sim_write: tuple[str, str] | None = None
-        outreach_ctx = p._store.pending_outreach_context.pop(session_key, None)
+        outreach_ctx = runtime.pending_outreach_context.pop(session_key, None)
         if outreach_ctx:
             # PR-B/C review HIGH2：消费前查 expires_at，过期则 drop
             # （与 fallback 路径过期语义一致：不注入 prompt、不写 memory、不标 consumed）
@@ -2327,7 +2392,7 @@ class LLMRequestPipeline:
             if expires_at and observed_now is None:
                 # Without an authoritative clock an explicit pipeline may not
                 # consume or expire a pending outreach item.
-                p._store.pending_outreach_context.set(session_key, outreach_ctx)
+                runtime.pending_outreach_context.set(session_key, outreach_ctx)
             elif expires_at and observed_now > expires_at:
                 self._mark_life_outcome(
                     outreach_ctx.get("event_id", ""), "dropped", session_key
@@ -2342,7 +2407,7 @@ class LLMRequestPipeline:
                 # 不消费、不标 consumed、不写 memory：原样放回 pending（未过期不丢），
                 # 留到之后有历史锚的正常轮再顺嘴带。生活事件由设计即离题，故按"有没有锚"
                 # 而非"话题相不相关"门控，既保住主动分享、又断掉无锚跳话题。
-                p._store.pending_outreach_context.set(session_key, outreach_ctx)
+                runtime.pending_outreach_context.set(session_key, outreach_ctx)
                 logger.debug(
                     "Sylanne life_sim outreach deferred (thin history, depth=%s): "
                     "session=%s",
@@ -3121,7 +3186,7 @@ class LLMRequestPipeline:
                     else:
                         buf.inject_context(shadow_entries)
             buf.append("user", text)
-            p._store.last_user_texts.set(session_key, text[:120])
+            self._runtime_owner().last_user_texts.set(session_key, text[:120])
             self._schedule_buffer_persist(session_key)
 
             # leg-3：AstrBot ConversationManager 的用户轮同步已上移到本方法顶部
@@ -3132,10 +3197,11 @@ class LLMRequestPipeline:
             # 30 天 L2→L3 压缩检查（将过期记忆提取为知识图谱三元组）
             to_compress = memory_system.compress_check()
             if to_compress:
-                safe_ensure_future(
+                task = safe_ensure_future(
                     self._compress_memories(session_key, to_compress),
                     name="compress_memories",
                 )
+                self._track_runtime_task(session_key, task)
 
             # 定期持久化记忆状态（每 10 个 tick）
             # MEM-03 PR-5（存储解耦）：删掉写 body.memory["_memory_system"] 的死重——
@@ -3332,7 +3398,7 @@ class LLMRequestPipeline:
                     # `platform_from_umo(session_key)` / `is_group_context_by_key
                     # (session_key)` / `extract_group_id_from_key(session_key)`
                     # 在生产裸 session_key 上全部失效，与 sender 哑火同源）。
-                    shelf_identity = p._store.get_authenticated_identity(session_key)
+                    shelf_identity = self._authenticated_identity(session_key)
                     shelf_sender_id = (
                         str(shelf_identity.get("sender_id", "") or "")
                         if shelf_identity else ""
@@ -4299,6 +4365,7 @@ class LLMRequestPipeline:
             _fallback_direct_send(best_key, pending_ctx),
             name="life_sim_outreach_fallback",
         )
+        self._track_runtime_task(best_key, task)
         if not isinstance(getattr(p, "_background_tasks", None), list):
             logger.warning(
                 "Sylanne: _background_tasks type mismatch (expected list, got %s), rebuilding",

@@ -147,12 +147,12 @@ class SessionStateStore:
         # 经 _reg 登记，自动纳入 release_session / reset_all 统一清理；
         # 取代旧 plugin._fragment_buffers / _fragment_timers 上帝对象裸 dict（漏清理风险）。
         #
-        # 用普通 dict 而非 BoundedDict：LRU 驱逐与 winner pop 都返回 None，二者无法在
-        # 段B 区分——一旦因 >maxsize 并发会话被驱逐，该会话碎片会被误判为 loser 而
-        # stop_event() 静默丢失用户消息。改普通 dict 后 `get→None` 唯一含义是
-        # "已被 winner pop"，loser 语义无歧义。buf 生命周期极短（≤max_wait，winner pop
-        # 即清），孤儿仅在 winner 协程被取消时短暂残留，由 release_session 兜底清理。
-        self.fragment_buffers: SessionMap = self._reg("fragment_buffers", {})
+        # 容量与流式运行态一致。驱逐/释放会给原 buffer 写入 cancelled 标记；等待中的
+        # CAS 可据此区分“赢家已领取”与“owner 生命周期终止”，两种情况都安全作废。
+        self.fragment_buffers: SessionMap = self._reg(
+            "fragment_buffers",
+            BoundedDict(maxsize=200, on_evict=self._cancel_fragment_buffer),
+        )
 
         # ---- 请求/响应诊断缓存 ----
         self.last_request_budgets: SessionMap = self._reg("last_request_budgets", BoundedDict(maxsize=200))
@@ -173,6 +173,11 @@ class SessionStateStore:
         self.background_post_active: SessionMap = self._reg("background_post_active", BoundedDict(maxsize=200))
         self.background_post_worker_state: SessionMap = self._reg("background_post_worker_state", BoundedDict(maxsize=200))
         self.background_post_checkpoint_tasks: SessionMap = self._reg("background_post_checkpoint_tasks", {})
+        # Pipeline 创建的短任务按 session 归属；release/aclose 会先 cancel 再清容器。
+        self.background_tasks: SessionMap = self._reg(
+            "background_tasks",
+            BoundedDict(maxsize=200, on_evict=self._cancel_task_collection),
+        )
 
         # ---- 主动发言 / outreach ----
         self.pending_outreach_context: SessionMap = self._reg("pending_outreach_context", BoundedDict(maxsize=50))
@@ -259,11 +264,35 @@ class SessionStateStore:
         self._maps.append(m)
         return m
 
+    @staticmethod
+    def _cancel_fragment_buffer(_key: str, value: Any) -> None:
+        if isinstance(value, dict):
+            value["cancelled"] = True
+
+    @staticmethod
+    def _cancel_task_collection(_key: str, value: Any) -> None:
+        tasks = value if isinstance(value, (set, list, tuple)) else (value,)
+        for task in tuple(tasks):
+            cancel = getattr(task, "cancel", None)
+            if callable(cancel) and not bool(getattr(task, "done", lambda: False)()):
+                try:
+                    cancel()
+                except Exception:
+                    pass
+
     # ------------------------------------------------------------------
     # 统一清理收口（替代 state_persistence._SESSION_KEYED_CONTAINERS 反射遍历）
     # ------------------------------------------------------------------
     def release_session(self, session_key: str) -> None:
         """释放某会话在所有已登记 SessionMap 中的态。漏登记 = 容器不在 = 立即暴露。"""
+        fragment = self.fragment_buffers.get(session_key)
+        self._cancel_fragment_buffer(session_key, fragment)
+        self._cancel_task_collection(
+            session_key, self.background_tasks.get(session_key, set())
+        )
+        self._cancel_task_collection(
+            session_key, self.segmented_tasks.get(session_key)
+        )
         checkpoint_task = self.background_post_checkpoint_tasks.get(session_key)
         cancel = getattr(checkpoint_task, "cancel", None)
         if callable(cancel):
@@ -277,8 +306,49 @@ class SessionStateStore:
         if conv_sync_umo is not None:
             self._release_unused_conv_sync_lock(conv_sync_umo)
 
+    def track_background_task(self, session_key: str, task: Any) -> Any:
+        """登记 pipeline 短任务，并在完成后自动解除 owner 引用。"""
+
+        tasks = self.background_tasks.get_or_create(session_key, set)
+        tasks.add(task)
+
+        def _discard(done: Any) -> None:
+            current = self.background_tasks.get(session_key)
+            if isinstance(current, set):
+                current.discard(done)
+                if not current:
+                    self.background_tasks.pop(session_key, None)
+
+        add_done_callback = getattr(task, "add_done_callback", None)
+        if callable(add_done_callback):
+            add_done_callback(_discard)
+        return task
+
+    async def aclose(self) -> None:
+        """Cancel/await all owner tasks, then release every registered session state."""
+
+        tasks: list[Any] = []
+        for _session_key, owned in self.background_tasks.snapshot_items():
+            collection = owned if isinstance(owned, (set, list, tuple)) else (owned,)
+            for task in tuple(collection):
+                if task is not None and not bool(getattr(task, "done", lambda: True)()):
+                    try:
+                        task.cancel()
+                    except Exception:
+                        continue
+                    tasks.append(task)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        for _session_key, fragment in self.fragment_buffers.snapshot_items():
+            self._cancel_fragment_buffer(_session_key, fragment)
+        self.reset_all()
+
     def reset_all(self) -> None:
         """整体清空所有会话态（供 state_persistence 的全局 reset 用）。"""
+        for _session_key, tasks in self.background_tasks.snapshot_items():
+            self._cancel_task_collection(_session_key, tasks)
+        for _session_key, fragment in self.fragment_buffers.snapshot_items():
+            self._cancel_fragment_buffer(_session_key, fragment)
         for m in self._maps:
             m.clear()
         self._conv_sync_session_umos.clear()

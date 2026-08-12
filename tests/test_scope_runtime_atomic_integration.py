@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -268,9 +269,14 @@ def test_scoped_lifecycle_release_requires_exact_frozen_scope(tmp_path, scopes) 
     registry.exact_session(right)
     persistence = object.__new__(StatePersistence)
     persistence._p = SimpleNamespace(_scope_runtime_registry=registry)
-    plugin = SimpleNamespace(_state_persistence=persistence)
+    release_pipeline = Mock()
+    plugin = SimpleNamespace(
+        _state_persistence=persistence,
+        _llm_request_pipeline=SimpleNamespace(release_session=release_pipeline),
+    )
 
     assert EmotionalStatePlugin._release_scoped_session(plugin, left) is True
+    release_pipeline.assert_called_once_with(left.storage_token)
     assert registry.is_live_session(left) is False
     assert registry.is_live_session(right) is True
     assert EmotionalStatePlugin._release_scoped_session(plugin, left) is False
