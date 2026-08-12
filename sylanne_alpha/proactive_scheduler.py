@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import collections
 import inspect
 import time
@@ -60,6 +61,7 @@ class ProactiveScheduler:
         plugin: PluginHost,
         *,
         persistence: ScopedPersistenceGateway | None = None,
+        services: PluginServices | None = None,
     ) -> None:
         """Create the legacy scheduler or a capability-bound scoped scheduler.
 
@@ -69,6 +71,27 @@ class ProactiveScheduler:
         """
 
         self._p = plugin
+        self._plugin = plugin
+        self._services_explicit = services is not None
+        if services is not None:
+            self._services = services
+        else:
+            plugin_config = getattr(plugin, "config", None)
+            if plugin_config is None:
+                plugin_config = getattr(plugin, "_config", {})
+            if plugin_config is None:
+                plugin_config = {}
+            plugin_context = getattr(plugin, "context", None)
+            if plugin_context is None:
+                plugin_context = getattr(plugin, "_context", None)
+            self._services = PluginServices(
+                config=plugin_config,
+                context=plugin_context,
+                host_fn=getattr(plugin, "_host", None),
+                session_key_fn=getattr(plugin, "_session_key", None),
+                observed_now_fn=getattr(plugin, "_observed_now", None),
+            )
+        self._session_state = getattr(plugin, "_session_state", None)
         # 仪式注册表：session_key → {ritual_name: (start_hour, end_hour)}
         # 初始为空，后续可通过对话学习填充
         self._ritual_registry: dict[str, dict[str, tuple[int, int]]] = {}
@@ -81,6 +104,42 @@ class ProactiveScheduler:
         )
         if self._scoped_components is not None:
             self._restore_scoped_state()
+
+    def _host(self, session_key: str) -> Any:
+        host_fn = self._services.host_fn
+        if not callable(host_fn):
+            raise RuntimeError("host service is unavailable")
+        return host_fn(session_key)
+
+    def _session_key(self, event: Any = None, session_key: str = "") -> str:
+        session_key_fn = self._services.session_key_fn
+        if callable(session_key_fn):
+            if self._services_explicit:
+                return str(session_key_fn(event, session_key) or "").strip()
+            try:
+                resolved = session_key_fn(event, session_key)
+            except TypeError:
+                resolved = session_key_fn(event)
+            if resolved:
+                return str(resolved).strip()
+        if self._services_explicit or getattr(
+            self._plugin, "_scope_runtime_registry", None
+        ) is not None:
+            return ""
+        return str(
+            session_key
+            or getattr(event, "unified_msg_origin", "")
+            or getattr(event, "session_id", "")
+            or ""
+        ).strip()
+
+    def _observed_now(self) -> float:
+        observed_now_fn = self._services.observed_now_fn
+        if callable(observed_now_fn):
+            return float(observed_now_fn())
+        if not self._services_explicit and observed_now_fn is not None:
+            return float(observed_now_fn)
+        return time.time()
 
     def _require_legacy_session_api(self) -> None:
         if self._scoped_components is not None:
@@ -131,7 +190,7 @@ class ProactiveScheduler:
         维持 * 0.0（M8 单一惩罚通道——scheduler gate 独占，不与 intent 侧双罚）。
         """
         self._require_legacy_session_api()
-        cfg = self._p.config or {}
+        cfg = self._services.config or {}
         cooldown = float(cfg.get("proactive_speech_dispatch_cooldown_seconds", 1800.0))
         scoped_runtime_required = (
             getattr(self._p, "_scope_runtime_registry", None) is not None
@@ -218,7 +277,7 @@ class ProactiveScheduler:
             "session_key": session_key,
             "timestamp": timestamp,
             "rating": rating,
-            "recorded_at": time.time(),
+            "recorded_at": self._observed_now(),
         })
 
     def should_exit_after_idle(self, session_key: str = "", **kwargs: Any) -> bool:
@@ -248,7 +307,7 @@ class ProactiveScheduler:
             调度请求字典，包含 message_text、quiet_gate、realtime_chat_plan。
         """
         self._require_legacy_session_api()
-        cfg = self._p.config or {}
+        cfg = self._services.config or {}
         topic_judgement = {}
         if isinstance(decision, dict):
             topic_judgement = decision.get("topic_judgement", {})
@@ -268,6 +327,7 @@ class ProactiveScheduler:
         dispatch: Any = None,
         *,
         event_or_session: Any = None,
+        session_key: str = "",
         dry_run: bool = False,
         force: bool = False,
         **kwargs: Any,
@@ -288,15 +348,9 @@ class ProactiveScheduler:
         cfg = self._services.config or {}
         if not cfg.get("enable_proactive_speech_dispatch"):
             return "dispatch_disabled"
-        now = (
-            self._services.observed_now_fn()
-            if self._services.observed_now_fn
-            else time.time()
-        )
+        now = self._observed_now()
         candidates = self._p._store.proactive_candidate_sessions
-        sk = ""
-        if event_or_session is not None:
-            sk = str(getattr(event_or_session, "unified_msg_origin", "") or "")
+        sk = self._session_key(event_or_session, session_key)
         candidate = candidates.get(sk, {})
         last_seen = candidate.get("last_seen_at", 0.0)
         min_idle = float(
@@ -312,7 +366,12 @@ class ProactiveScheduler:
             )
         cooldown = float(cfg.get("proactive_speech_dispatch_cooldown_seconds", 1800.0))
         # 人格驱动硬下限：expression_drive 高→下限低（最低60s），低→下限高（最高300s）
-        host = self._p._store.hosts.get(sk)
+        host = None
+        if callable(self._services.host_fn):
+            try:
+                host = self._host(sk)
+            except Exception:
+                host = None
         _expression_drive = 0.5
         if host and hasattr(host.kernel, "_personality"):
             _p = host.kernel._personality() if callable(getattr(host.kernel, "_personality", None)) else {}
@@ -342,7 +401,9 @@ class ProactiveScheduler:
             return False, "no_session_key"
         synth_session = type("_S", (), {"unified_msg_origin": session_key})()
         dispatch_req = {"quiet_gate": {"min_idle_seconds": float(
-            (self._p.config or {}).get("proactive_speech_min_idle_seconds", 300.0)
+            (self._services.config or {}).get(
+                "proactive_speech_min_idle_seconds", 300.0
+            )
         )}}
         try:
             block = self.dispatch_blocked_reason(
@@ -409,18 +470,12 @@ class ProactiveScheduler:
             决策字典，包含 should_speak、reason 等字段。
         """
         self._require_legacy_session_api()
-        sk = (
-            session_key
-            or (
-                str(getattr(event_or_session, "unified_msg_origin", ""))
-                if event_or_session
-                else ""
-            )
-            or "default"
-        )
+        sk = self._session_key(event_or_session, session_key)
+        if not sk:
+            return {"should_speak": False, "reason": "no_session_key"}
         from sylanne_alpha.diagnostics_surface import proactive_decision
 
-        host = self._p._host(sk)
+        host = self._host(sk)
         surface = host.diagnostics()
         decision = proactive_decision(surface)
         # v2core 空闲触达咨询：沉默积累（你的节律超期 + 她憋着的话）让 reach 胜出时，
@@ -551,15 +606,10 @@ class ProactiveScheduler:
         event_or_session = args[0] if args else kwargs.get("event_or_session")
         dry_run = bool(kwargs.get("dry_run", False))
         force = bool(kwargs.get("force", False))
-        sk = str(
-            kwargs.get("session_key", "")
-            or (
-                getattr(event_or_session, "unified_msg_origin", "")
-                if event_or_session is not None
-                else ""
-            )
-            or ""
-        ).strip()
+        sk = self._session_key(
+            event_or_session,
+            str(kwargs.get("session_key", "") or ""),
+        )
         if not sk:
             return {"dispatched": False, "reason": "no_session_key", "dry_run": dry_run}
 
@@ -577,6 +627,7 @@ class ProactiveScheduler:
         block = self.dispatch_blocked_reason(
             dispatch=dispatch_req,
             event_or_session=event_or_session,
+            session_key=sk,
             dry_run=dry_run,
             force=force,
         )
@@ -610,7 +661,7 @@ class ProactiveScheduler:
                 "dry_run": True,
             }
 
-        cfg = self._p.config or {}
+        cfg = self._services.config or {}
         bridge = getattr(self._p, "_proactive_bridge", None)
         bridge_on = bool(cfg.get("sylanne_alpha_proactive_bridge_enabled", False))
         if bridge is None or not bridge_on or not bridge.available():
@@ -630,7 +681,7 @@ class ProactiveScheduler:
                 "decision": decision,
             }
 
-        host = self._p._host(sk)
+        host = self._host(sk)
         surface = host.diagnostics()
         reason_code = await bridge.infer_reason_code(sk, surface=surface)
         mood = ""
@@ -656,11 +707,7 @@ class ProactiveScheduler:
             if not isinstance(last_sent, dict):
                 last_sent = {}
                 self._p._proactive_dispatch_last_sent = last_sent
-            now = (
-                self._p._observed_now()
-                if callable(self._p._observed_now)
-                else self._p._observed_now
-            )
+            now = self._observed_now()
             last_sent[sk] = float(now)
             # Wave 4（review learning-loop high）：主动消息也是真出站回复，刷新 reflex 续聊锚点。
             # 否则她主动 ping、用户秒回，下一轮 reflex_learn 仍拿很久前的反应式回复时刻当锚，
@@ -739,7 +786,7 @@ class ProactiveScheduler:
             ts: 时间戳，默认为当前时间。
         """
         self._require_legacy_session_api()
-        when = ts if ts is not None else time.time()
+        when = ts if ts is not None else self._observed_now()
         self._last_message_times[session_key] = when
         store = getattr(self._p, "_store", None)
         if store is not None:
@@ -762,7 +809,7 @@ class ProactiveScheduler:
         if self._scoped_components is not None and not session_key.startswith("relation_v1_"):
             raise ValueError("scoped scheduler accepts only an opaque relation token")
         if now is None:
-            now = time.time()
+            now = self._observed_now()
 
         rituals = self._ritual_registry.get(session_key)
         if not rituals:
@@ -805,7 +852,7 @@ class ProactiveScheduler:
             {
                 "timestamp": float(timestamp),
                 "rating": str(rating),
-                "recorded_at": time.time(),
+                "recorded_at": self._observed_now(),
             }
         )
 
@@ -814,7 +861,9 @@ class ProactiveScheduler:
 
         if self._scoped_components is None:
             raise ValueError("scoped persistence is not configured")
-        self._last_message_times["_scoped"] = time.time() if ts is None else float(ts)
+        self._last_message_times["_scoped"] = (
+            self._observed_now() if ts is None else float(ts)
+        )
 
     def scoped_last_message_time(self) -> float:
         if self._scoped_components is None:
@@ -837,7 +886,7 @@ class ProactiveScheduler:
         if self._scoped_components is None:
             raise ValueError("scoped persistence is not configured")
         if now is None:
-            now = time.time()
+            now = self._observed_now()
         rituals = self._ritual_registry.get("_scoped")
         if not rituals:
             return None

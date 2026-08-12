@@ -47,6 +47,7 @@ from sylanne_alpha.provider_routing import (
     resolve_embedding_provider,
     resolve_text_provider,
 )
+from sylanne_alpha.plugin_services import PluginServices
 from sylanne_alpha.scope_contracts import SessionScope
 from sylanne_alpha.scope_runtime import RelationRuntime, ScopedSessionRuntime
 
@@ -160,17 +161,72 @@ class PublicAPI:
         "group_atmosphere": "get_group_atmosphere_snapshot",
     }
 
-    def __init__(self, plugin: PluginHost) -> None:
+    def __init__(
+        self,
+        plugin: PluginHost,
+        *,
+        services: PluginServices | None = None,
+    ) -> None:
         self._p = plugin
+        self._plugin = plugin
+        self._services_explicit = services is not None
+        if services is not None:
+            self._services = services
+        else:
+            plugin_config = getattr(plugin, "config", None)
+            if plugin_config is None:
+                plugin_config = getattr(plugin, "_config", {})
+            if plugin_config is None:
+                plugin_config = {}
+            plugin_context = getattr(plugin, "context", None)
+            if plugin_context is None:
+                plugin_context = getattr(plugin, "_context", None)
+            self._services = PluginServices(
+                config=plugin_config,
+                context=plugin_context,
+                host_fn=getattr(plugin, "_host", None),
+                session_key_fn=getattr(plugin, "_session_key", None),
+                observed_now_fn=getattr(plugin, "_observed_now", None),
+            )
 
     # ------------------------------------------------------------------
     # Helper accessors
     # ------------------------------------------------------------------
     def _host(self, session_key: str) -> Any:
-        return self._services.host_fn(session_key)
+        host_fn = self._services.host_fn
+        if not callable(host_fn):
+            raise RuntimeError("host service is unavailable")
+        return host_fn(session_key)
 
     def _session_key(self, event: Any = None, session_key: str = "") -> str:
-        return self._services.session_key_fn(event, session_key)
+        session_key_fn = self._services.session_key_fn
+        if callable(session_key_fn):
+            if self._services_explicit:
+                return str(session_key_fn(event, session_key) or "").strip()
+            try:
+                resolved = session_key_fn(event, session_key)
+            except TypeError:
+                resolved = session_key_fn(event)
+            if resolved:
+                return str(resolved).strip()
+        if self._services_explicit or getattr(
+            self._plugin, "_scope_runtime_registry", None
+        ) is not None:
+            return ""
+        return str(
+            session_key
+            or getattr(event, "unified_msg_origin", "")
+            or getattr(event, "session_id", "")
+            or ""
+        ).strip()
+
+    def _observed_now(self) -> float:
+        observed_now_fn = self._services.observed_now_fn
+        if callable(observed_now_fn):
+            return float(observed_now_fn())
+        if not self._services_explicit and observed_now_fn is not None:
+            return float(observed_now_fn)
+        return time.time()
 
     def _bound_webui_session_key(self) -> str | None:
         """Return the exact session named by an already-bound private scope.
@@ -458,7 +514,7 @@ class PublicAPI:
             warnings=[],
         )
         budget = p._store.last_request_budgets.get(session_key, default_budget)
-        cfg = p.config or {}
+        cfg = self._services.config or {}
         result: dict[str, Any] = {
             "state_injection": {
                 "compat_mode": budget.compat_mode,
@@ -513,7 +569,7 @@ class PublicAPI:
         )
         if include_sessions or has_bg_data:
             retrying = [j for j in queue if j.attempts > 0]
-            now = time.time()
+            now = self._observed_now()
             expired_lease = [
                 j
                 for j in active.values()
@@ -693,11 +749,9 @@ class PublicAPI:
         sender_id = str(
             getattr(event, "sender_id", "") or getattr(event, "user_id", "") or ""
         )
-        session_id = str(
-            getattr(event, "session_id", "")
-            or getattr(event, "unified_msg_origin", "")
-            or ""
-        )
+        session_id = self._session_key(event)
+        if not session_id:
+            return "unknown"
         return f"{session_id}::agent:{sender_id}" if sender_id else session_id
 
     async def get_agent_identity_profile(
@@ -725,17 +779,15 @@ class PublicAPI:
                 "conversation_id": scope.storage_token,
                 "speaker_track_id": relation_token,
                 "relation_ref": relation_token,
-                "updated_at": p._observed_now(),
+                "updated_at": self._observed_now(),
             }
         cache = getattr(p, "_agent_identity_profile_cache", None)
         if cache is None:
             p._agent_identity_profile_cache = {}
             cache = p._agent_identity_profile_cache
-        session_id = str(
-            getattr(event, "unified_msg_origin", "")
-            or getattr(event, "session_id", "")
-            or ""
-        )
+        session_id = self._session_key(event)
+        if not session_id:
+            return {"ok": False, "error": "session_unavailable"}
         sender_id = str(getattr(event, "sender_id", "") or "")
         if not sender_id and hasattr(event, "get_sender_id"):
             sender_id = str(event.get_sender_id() or "")
@@ -748,7 +800,7 @@ class PublicAPI:
         cfg = self._services.config or {}
         profile_limit = int(cfg.get("agent_identity_profile_limit", 256))
         ttl = float(cfg.get("agent_identity_ttl_seconds", 2592000.0))
-        now = p._observed_now()
+        now = self._observed_now()
         to_remove = []
         for key, entry in list(cache.items()):
             if key.startswith(f"{session_id}::speaker:") and key != speaker_track_id:
@@ -810,7 +862,9 @@ class PublicAPI:
         if cache is None:
             p._agent_trail_cache = {}
             cache = p._agent_trail_cache
-        session_id = str(getattr(event, "unified_msg_origin", "") or "")
+        session_id = self._session_key(event)
+        if not session_id:
+            return {"ok": False, "error": "session_unavailable"}
         items = cache.get(session_id, [])
         return {
             "schema_version": "astrbot.agent_trail.v1",
@@ -1065,7 +1119,7 @@ class PublicAPI:
         self, event: Any = None, detail: str = "summary", **kwargs: Any
     ) -> Any:
         detail = self._clamp_llm_tool_detail(detail)
-        cfg = self._p.config or {}
+        cfg = self._services.config or {}
         exposure = "internal" if detail == "full" else "plugin_safe"
         payload: dict[str, Any] = {
             "kind": "moral_repair_state",
@@ -1080,7 +1134,7 @@ class PublicAPI:
         self, event: Any = None, detail: str = "summary", **kwargs: Any
     ) -> Any:
         detail = self._clamp_llm_tool_detail(detail)
-        cfg = self._p.config or {}
+        cfg = self._services.config or {}
         exposure = "internal" if detail == "full" else "plugin_safe"
         payload: dict[str, Any] = {
             "kind": "fallibility_state",
@@ -1407,7 +1461,7 @@ class PublicAPI:
         """
         p = self._plugin
         host = self._host(session_key)
-        effective_now = now or time.time()
+        effective_now = now or self._observed_now()
         from sylanne_alpha.host import SylanneAlphaHostEvent
 
         event = SylanneAlphaHostEvent(
@@ -1415,7 +1469,7 @@ class PublicAPI:
             confidence=confidence,
             flags=list(flags or []),
             now=effective_now,
-            event_time=p._event_time(now),
+            event_time=p._event_time(effective_now),
         )
         # Feedback loop: trigger based on time since last bot expression
         last_expr_time = p._store.last_bot_expression_time.get(session_key, 0.0)
@@ -1452,7 +1506,7 @@ class PublicAPI:
         """
         p = self._plugin
         host = self._host(session_key)
-        effective_now = now or time.time()
+        effective_now = now or self._observed_now()
         from sylanne_alpha.host import SylanneAlphaHostEvent
 
         event = SylanneAlphaHostEvent(
@@ -1460,7 +1514,7 @@ class PublicAPI:
             confidence=confidence,
             flags=list(flags or []),
             now=effective_now,
-            event_time=p._event_time(now),
+            event_time=p._event_time(effective_now),
         )
         p._store.last_bot_expression_time.set(session_key, effective_now)
         return host.on_response(event)
@@ -1502,11 +1556,12 @@ class PublicAPI:
             ):
                 return {"ok": False, "error": "scope_unavailable"}
         else:
-            session_key = supplied_session_key
+            session_key = self._session_key(event, supplied_session_key)
+            if not session_key:
+                return {"ok": False, "error": "session_unavailable"}
         message_id = kwargs.get("message_id", "")
         reason = kwargs.get("reason", "")
-        if registry is None and event and not session_key:
-            session_key = str(getattr(event, "unified_msg_origin", "") or "")
+        if registry is None and event:
             raw = getattr(event, "raw_message", None) or {}
             if not raw:
                 msg_obj = getattr(event, "message_obj", None)
@@ -1597,15 +1652,9 @@ class PublicAPI:
         **kwargs: Any,
     ) -> dict[str, Any]:
         p = self._plugin
-        sk = (
-            session_key
-            or (
-                str(getattr(event_or_session, "unified_msg_origin", ""))
-                if event_or_session
-                else ""
-            )
-            or "default"
-        )
+        sk = self._session_key(event_or_session, session_key)
+        if not sk:
+            return {"ok": False, "error": "session_unavailable"}
         host = self._host(sk)
         memory_system = p._memory_system_for_session(sk)
         query_embedding = await self._resolve_query_embedding(query)
@@ -1656,11 +1705,10 @@ class PublicAPI:
     async def _resolve_query_embedding(self, query: str) -> list[float] | None:
         """在原 embedding 开关内，统一解析显式/单 provider 自动选择。"""
 
-        p = self._p
-        config = getattr(p, "config", None) or getattr(p, "_config", None) or {}
+        config = self._services.config or {}
         if not bool(config.get("sylanne_alpha_embedding_memory_enabled")) or not query:
             return None
-        context = getattr(p, "context", None) or getattr(p, "_context", None)
+        context = self._services.context
         if context is None:
             return None
         try:
@@ -1717,14 +1765,32 @@ class PublicAPI:
                 appraisal={"low_signal": True, "signal_kind": "short_ack"},
             )
         timeout = float(cfg.get("assessor_timeout_seconds", 0.0))
-        context = getattr(p, "context", None) or getattr(p, "_context", None)
+        context = self._services.context
         if context is not None:
             try:
+                umo = self._session_key(event, session_key)
+                if not umo:
+                    return SimpleNamespace(
+                        values={
+                            "valence": 0.0,
+                            "arousal": 0.0,
+                            "dominance": 0.0,
+                            "goal_congruence": 0.0,
+                            "certainty": 0.0,
+                            "control": 0.0,
+                            "affiliation": 0.0,
+                        },
+                        confidence=0.3,
+                        label="neutral",
+                        source="heuristic",
+                        reason="session service unavailable",
+                        appraisal={},
+                    )
                 resolve = resolve_text_provider(
                     feature=ProviderFeature.ASSESSOR,
                     config=cfg,
                     context=context,
-                    umo=str(getattr(event, "unified_msg_origin", "") or "") or None,
+                    umo=umo,
                 )
                 if timeout > 0:
                     resolved = await asyncio.wait_for(resolve, timeout=timeout)
@@ -1833,7 +1899,7 @@ class PublicAPI:
                 await cond.wait()
             p._internal_assessor_llm_inflight += 1
         try:
-            context = getattr(p, "context", None) or getattr(p, "_context", None)
+            context = self._services.context
             if hasattr(context, "llm_generate"):
                 result = await context.llm_generate(**kwargs)
                 return result
@@ -1858,7 +1924,6 @@ class PublicAPI:
     def _internal_assessor_llm_concurrency_decision(self) -> dict[str, Any]:
         """计算内部评估器 LLM 并发策略：基础 2 通道 + 极端积压时临时 burst 到 3。"""
         p = self._p
-        _cfg = p.config or {}
         total_queued = sum(len(q) for q in p._store.background_post_queues.values())
         base_limit = 2
         burst_limit = 3
@@ -1880,7 +1945,6 @@ class PublicAPI:
     # ------------------------------------------------------------------
 
     async def _sylanne_memory_settings_page_payload(self) -> dict[str, Any]:
-        p = self._plugin
         providers = []
         context = self._services.context
         if hasattr(context, "get_all_embedding_providers"):
@@ -1893,7 +1957,9 @@ class PublicAPI:
                         "dimensions": cfg.get("embedding_dimensions", 0),
                     }
                 )
-        current_id = str(p._config.get("sylanne_memory_embedding_provider_id") or "")
+        current_id = str(
+            self._services.config.get("sylanne_memory_embedding_provider_id") or ""
+        )
         return {
             "embedding_providers": providers,
             "current_embedding_provider_id": current_id,
@@ -1903,7 +1969,6 @@ class PublicAPI:
     async def _update_sylanne_memory_settings_from_page(
         self, body: dict[str, Any]
     ) -> dict[str, Any]:
-        p = self._plugin
         provider_id = str(body.get("embedding_provider_id") or "")
         context = self._services.context
         valid_ids = set()
@@ -1913,10 +1978,8 @@ class PublicAPI:
                 valid_ids.add(cfg.get("id", ""))
         if provider_id and provider_id not in valid_ids:
             return {"ok": False, "error": "unknown_embedding_provider"}
-        p._config["sylanne_memory_embedding_provider_id"] = provider_id
         config = self._services.config
-        if isinstance(config, dict):
-            config["sylanne_memory_embedding_provider_id"] = provider_id
+        config["sylanne_memory_embedding_provider_id"] = provider_id
         if hasattr(config, "save_config"):
             config.save_config()
         return {"ok": True}
@@ -1980,8 +2043,7 @@ class PublicAPI:
     ) -> dict[str, Any]:
         from sylanne_alpha.message_dispatch import realtime_plan
 
-        p = self._plugin
-        cfg = getattr(p, "config", None) or getattr(p, "_config", {}) or {}
+        cfg = self._services.config or {}
         max_part_chars = int(
             kwargs.pop("max_part_chars", cfg.get("realtime_chat_max_part_chars", 48))
         )
@@ -2051,12 +2113,13 @@ class PublicAPI:
 
         p = self._plugin
         host = self._host(session_key)
+        effective_now = now or self._observed_now()
         event = SylanneAlphaHostEvent(
             text="",
             confidence=0.5,
             flags=["proactive", "safe"],
-            now=now or time.time(),
-            event_time=p._event_time(now),
+            now=effective_now,
+            event_time=p._event_time(effective_now),
         )
         surface = host.on_proactive_check(event)
         decision_payload = proactive_decision(surface)
