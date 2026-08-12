@@ -302,9 +302,7 @@ class _FakePlugin:
 def _mk_pipeline(plugin: _FakePlugin):
     from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline
 
-    pipe = LLMRequestPipeline.__new__(LLMRequestPipeline)
-    pipe._p = plugin
-    return pipe
+    return LLMRequestPipeline(plugin)
 
 
 def _seed_shelf(plugin: _FakePlugin, platform: str, sender_id: str, items: list[ShelfItem]) -> None:

@@ -16,9 +16,11 @@ import asyncio
 import collections
 import inspect
 import json
+import math
 import random
 import time
 from collections.abc import Mapping
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from sylanne_alpha.content_sanitizer import (
@@ -56,6 +58,7 @@ except ImportError:
 
 # M8：每会话主动发言反馈 audit 保留最近条数（deque maxlen，防无界增长）。
 _DISPATCH_AUDIT_PER_SESSION = 20
+_CHINA_TZ = timezone(timedelta(hours=8))
 
 # leg-2(a) 历史锚阈值：req.contexts 里带非空文本的真实 user/assistant 轮数 < 此值
 # → 视为历史缺失/病态轮（/reset、空回吞轮把历史打空）。真模型证实"跳到不相干旧话题"
@@ -757,6 +760,7 @@ class LLMRequestPipeline:
     ) -> None:
         self._p = plugin
         self._plugin = plugin
+        self._services_explicit = services is not None
         if services is not None:
             self._services = services
         else:
@@ -796,19 +800,115 @@ class LLMRequestPipeline:
                 save_state_fn=_compat_capability("_save_state"),
                 state_persistence=_compat_capability("_state_persistence"),
             )
-        if not hasattr(self._p, "_cached_system_prompts"):
-            self._p._cached_system_prompts = {}
+        if self._services_explicit:
+            self._cached_system_prompts: dict[str, str] = {}
+        else:
+            if not hasattr(self._p, "_cached_system_prompts"):
+                self._p._cached_system_prompts = {}
+            self._cached_system_prompts = self._p._cached_system_prompts
+
+    def _now(self) -> float | None:
+        """Return the authoritative observed time for this services instance.
+
+        Explicit service injection is an authority boundary: without a valid
+        ``observed_now_fn`` there is no safe ambient clock fallback.  The
+        default constructor retains its historical wall-clock fallback.
+        """
+
+        services = getattr(self, "_services", None)
+        now_fn = getattr(services, "observed_now_fn", None)
+        if callable(now_fn):
+            try:
+                raw = now_fn()
+                if type(raw) is bool:
+                    raise ValueError("boolean is not an observed timestamp")
+                observed = float(raw)
+                if math.isfinite(observed):
+                    return observed
+            except Exception:
+                pass
+        if getattr(self, "_services_explicit", False):
+            return None
+        return time.time()
+
+    @staticmethod
+    def _event_time(now: float) -> dict[str, Any]:
+        """Project event metadata solely from the authoritative timestamp."""
+
+        ts = datetime.fromtimestamp(now, _CHINA_TZ)
+        return {
+            "local_datetime": ts.isoformat(),
+            "timezone": "Asia/Shanghai",
+            "epoch": now,
+        }
+
+    async def _observe_request_compat(
+        self,
+        session_key: str,
+        *,
+        text: str,
+        confidence: float,
+        flags: list[str],
+    ) -> None:
+        """Keep the legacy plugin observer only for default construction."""
+
+        if getattr(self, "_services_explicit", False):
+            return
+        observe = getattr(self._p, "observe_request", None)
+        now = self._now()
+        if not callable(observe) or now is None:
+            return
+        try:
+            await observe(
+                session_key,
+                text=text,
+                confidence=confidence,
+                flags=flags,
+                now=now,
+            )
+        except Exception as exc:
+            logger.debug("Sylanne skip: %s", exc)
 
     def _service_host(self, session_key: str) -> Any | None:
         """Resolve a host only through the injected callback capability."""
 
-        host_fn = self._services.host_fn
+        services = getattr(self, "_services", None)
+        host_fn = getattr(services, "host_fn", None)
+        if (
+            services is None
+            and not getattr(self, "_services_explicit", False)
+        ):
+            host_fn = getattr(self._p, "_host", None)
         if not callable(host_fn):
             return None
         try:
             return host_fn(session_key)
         except Exception:
             return None
+
+    def _service_social_field(self) -> Any | None:
+        """Return injected social authority, with legacy-fixture compatibility."""
+
+        services = getattr(self, "_services", None)
+        if services is not None:
+            return services.social_field
+        if getattr(self, "_services_explicit", False):
+            return None
+        return getattr(self._p, "_social_field", None)
+
+    def _service_config(self) -> Mapping[str, Any]:
+        """Return config from the same authority as the selected service mode."""
+
+        services = getattr(self, "_services", None)
+        if services is not None:
+            config = services.config
+            return config if isinstance(config, Mapping) else {}
+        if getattr(self, "_services_explicit", False):
+            return {}
+        config = getattr(self._p, "config", None)
+        if not isinstance(config, Mapping):
+            config = getattr(self._p, "_config", None)
+        return config if isinstance(config, Mapping) else {}
 
     def _service_session_key(self, event: Any) -> str:
         """Resolve an event key only through the injected callback capability."""
@@ -918,7 +1018,7 @@ class LLMRequestPipeline:
         commit boundary after every transient producer has run.
         """
 
-        config = self._services.config
+        config = self._service_config()
         if (
             not isinstance(config, Mapping)
             or config.get("sylanne_alpha_persona_genesis_enabled") is not True
@@ -960,6 +1060,8 @@ class LLMRequestPipeline:
             return bool(session_runtime.store.amnesia_pending.pop(session_key, False))
         if self._requires_scoped_runtime():
             return False
+        if getattr(self, "_services_explicit", False):
+            return False
         # Narrow registry-free compatibility for historical test doubles.
         amnesia_sessions = getattr(self._p, "_amnesia_sessions", set())
         if session_key not in amnesia_sessions:
@@ -988,12 +1090,14 @@ class LLMRequestPipeline:
                     return ""
                 from sylanne_alpha import relationship_layer as _rl
 
-                sf = self._services.social_field
+                sf = self._service_social_field()
                 if sf is None or sf.is_group_context_by_key(sk):
                     return ""
                 return sk if _rl.is_romantic(p, sk) else ""
+            if getattr(self, "_services_explicit", False):
+                return ""
             from sylanne_alpha import relationship_layer as _rl
-            sf = self._services.social_field
+            sf = self._service_social_field()
             if sf is None:
                 return ""
             best_key = ""
@@ -1028,7 +1132,7 @@ class LLMRequestPipeline:
         persona_source = getattr(resolved, "persona_source", None)
         system_prompt = str(getattr(persona_source, "prompt", "") or "").strip()
         if system_prompt:
-            self._p._cached_system_prompts[session_key] = system_prompt
+            self._cached_system_prompts[session_key] = system_prompt
 
     def _life_sim_persona_getter(self, session_key: str = "") -> str:
         """返回生命模拟器使用的人格描述。
@@ -1039,7 +1143,7 @@ class LLMRequestPipeline:
         - 开关开启：使用用户自定义的生命模拟专用人设文本，覆盖 AstrBot 默认人设。
           适用于想让"生活中的角色"和"对话中的角色"有差异的进阶玩法。
         """
-        config = self._services.config or {}
+        config = self._service_config()
         use_custom = config.get(
             "sylanne_alpha_life_simulation_use_custom_persona", False
         )
@@ -1055,7 +1159,11 @@ class LLMRequestPipeline:
         if locked:
             return locked[:500]
 
-        cached_prompts = self._p._cached_system_prompts
+        cached_prompts = getattr(
+            self,
+            "_cached_system_prompts",
+            getattr(self._p, "_cached_system_prompts", {}),
+        )
         if session_key:
             cached = str(cached_prompts.get(session_key, "") or "").strip()
         else:
@@ -1096,7 +1204,7 @@ class LLMRequestPipeline:
         if message_text.strip():
             return message_text
 
-        config = self._services.config or {}
+        config = self._service_config()
 
         # 检查消息是否包含非文本内容
         msg_obj = getattr(event, "message_obj", None)
@@ -1176,7 +1284,7 @@ class LLMRequestPipeline:
     async def _detect_multimodal_provider(self, event: Any | None = None) -> str:
         """通过中央路由选择图片转述 provider，保留既有能力检测口径。"""
 
-        config = self._services.config or {}
+        config = self._service_config()
         context = self._services.context
         if context is None:
             return ""
@@ -1311,7 +1419,7 @@ class LLMRequestPipeline:
         # 次要修复②：两侧口径统一走 realtime_flags（正规键 OR 旧别名），不再
         # 各自维护一份不对称的判定（此前请求侧只认正规键，响应侧额外兼容别名，
         # 若用户只设别名键会导致请求侧误判两开关都关，M4a 强制关流因此漏触发）。
-        realtime_enabled, intercept = realtime_flags(self._services.config or {})
+        realtime_enabled, intercept = realtime_flags(self._service_config())
         # ---- 群聊 SFPD（社交场域感知调度）----
         # 收集社交信号 → 传入计算栈 → L7 表达层决定是否响应
         social = self._services.social_field
@@ -1367,16 +1475,12 @@ class LLMRequestPipeline:
                 _should_respond = signals.is_at_bot or signals.name_mentioned
 
             if not _should_respond:
-                try:
-                    await p.observe_request(
-                        session_key,
-                        text=message_text[:200],
-                        confidence=0.3,
-                        flags=["safe", "group_silent"],
-                        now=time.time(),
-                    )
-                except Exception as e:
-                    logger.debug(f"Sylanne skip: {e}")
+                await self._observe_request_compat(
+                    session_key,
+                    text=message_text[:200],
+                    confidence=0.3,
+                    flags=["safe", "group_silent"],
+                )
                 return
 
         # ---- 碎片防抖：等待用户输入完成 ----
@@ -1388,13 +1492,18 @@ class LLMRequestPipeline:
         _seg_task = p._store.segmented_tasks.get(session_key)
         active_reply = _seg_task is not None and not _seg_task.done()
         if realtime_enabled and message_text and not is_follow_up and not active_reply:
+            observed_start = self._now()
+            if observed_start is None:
+                return
             probe_delay = float(
-                (self._services.config or {}).get(
+                self._service_config().get(
                     "realtime_input_completion_probe_delay_seconds", 1.5
                 )
             )
             max_wait = float(
-                (self._services.config or {}).get("realtime_input_completion_max_wait_seconds", 4.0)
+                self._service_config().get(
+                    "realtime_input_completion_max_wait_seconds", 4.0
+                )
             )
             # T2-04③：自适应合并窗口——慢打字/爱分段的人本该给更宽的等待，手速快的
             # 不必死等固定 4s。用 RhythmLearner 已学到的"连发内"消息间隔中位数
@@ -1416,7 +1525,7 @@ class LLMRequestPipeline:
             # ---- 同步段A：领号 + 入缓冲（无 await，单线程原子）----
             buf = buffers.get(session_key)
             if buf is None:
-                buf = {"texts": [], "start_time": time.time(), "latest_seq": 0}
+                buf = {"texts": [], "start_time": observed_start, "latest_seq": 0}
                 buffers.set(session_key, buf)
             buf["latest_seq"] += 1
             my_seq = buf["latest_seq"]
@@ -1453,7 +1562,11 @@ class LLMRequestPipeline:
                 event.stop_event()
                 return
 
-            elapsed = time.time() - start_time
+            observed_now = self._now()
+            if observed_now is None:
+                event.stop_event()
+                return
+            elapsed = observed_now - start_time
             is_latest = my_seq == cur["latest_seq"]
 
             if is_latest or elapsed >= max_wait:
@@ -1580,7 +1693,7 @@ class LLMRequestPipeline:
         )
         self._set_transient_context_budget(
             request,
-            _compute_injection_budget(gap_seconds, self._services.config or {}),
+            _compute_injection_budget(gap_seconds, self._service_config()),
         )
 
         # Priority 0 is the deliberate exception: admit the deliverable
@@ -1815,7 +1928,7 @@ class LLMRequestPipeline:
             )
             # 等待最多 200ms，让 spine tick 完成后再读取状态
             _observe_wait_ms = int(
-                (self._services.config or {}).get("state_injection_observe_wait_ms", 200)
+                self._service_config().get("state_injection_observe_wait_ms", 200)
             )
             if _observe_wait_ms > 0:
                 try:
@@ -1835,7 +1948,7 @@ class LLMRequestPipeline:
         # ResultDecorateStage，on_decorating_result 钩子够不着），并在启用
         # 首句快速发送时叠加首句抢发逻辑。
         stream_first = bool(
-            (self._services.config or {}).get(
+            self._service_config().get(
                 "sylanne_alpha_stream_first_sentence_enabled"
             )
         )
@@ -1937,7 +2050,12 @@ class LLMRequestPipeline:
         _has_prev = bool(_last_ev.get("now") or _last_ev.get("text"))
         if _has_prev:
             _last_now = float(_last_ev.get("now") or 0.0)
-            gap_seconds = max(0.0, time.time() - _last_now) if _last_now else 0.0
+            observed_now = self._now()
+            gap_seconds = (
+                max(0.0, observed_now - _last_now)
+                if _last_now and observed_now is not None
+                else 0.0
+            )
         else:
             gap_seconds = float("inf")
 
@@ -2016,7 +2134,12 @@ class LLMRequestPipeline:
             # PR-B/C review HIGH2：消费前查 expires_at，过期则 drop
             # （与 fallback 路径过期语义一致：不注入 prompt、不写 memory、不标 consumed）
             expires_at = float(outreach_ctx.get("expires_at", 0.0) or 0.0)
-            if expires_at and time.time() > expires_at:
+            observed_now = self._now() if expires_at else None
+            if expires_at and observed_now is None:
+                # Without an authoritative clock an explicit pipeline may not
+                # consume or expire a pending outreach item.
+                p._store.pending_outreach_context.set(session_key, outreach_ctx)
+            elif expires_at and observed_now > expires_at:
                 self._mark_life_outcome(
                     outreach_ctx.get("event_id", ""), "dropped", session_key
                 )
@@ -2073,7 +2196,7 @@ class LLMRequestPipeline:
             current_warmth = host.kernel.computation.engine.observe().get("warmth", 0.0)
             query_embedding = None
             enabled = bool(
-                (self._services.config or {}).get(
+                self._service_config().get(
                     "sylanne_alpha_embedding_memory_enabled"
                 )
             )
@@ -2284,7 +2407,7 @@ class LLMRequestPipeline:
 
         # ---- scope=owner 身份门控（与写侧同一形态，见 _flush_conversation_to_l1）----
         if settings.scope == "owner":
-            owner_cfg = self._services.config or {}
+            owner_cfg = self._service_config()
             owner_id = str(owner_cfg.get("sylanne_alpha_owner_id", "") or "")
             if not owner_id or sender_id != owner_id:
                 return ""
@@ -2370,7 +2493,7 @@ class LLMRequestPipeline:
 
         # ---- 查询阶段（R5 第一次闸）----
         try:
-            bucket = await load_person_shelf(p, platform, sender_id)
+            bucket = await load_person_shelf(self._services, platform, sender_id)
             if not bucket.items:
                 return ""
             candidates = [it for it in bucket.items if _visible(it)]
@@ -2538,7 +2661,7 @@ class LLMRequestPipeline:
             pass
 
         max_context_tokens = int(
-            (self._services.config or {}).get("max_context_tokens", 8000)
+            self._service_config().get("max_context_tokens", 8000)
         )
         if max_context_tokens > 0:
             estimated_chars = (
@@ -2564,7 +2687,7 @@ class LLMRequestPipeline:
             "unfinished": unfinished_fragment,
         }
 
-        total_budget = _compute_injection_budget(gap_seconds, self._services.config or {})
+        total_budget = _compute_injection_budget(gap_seconds, self._service_config())
         trimmed = _allocate_and_trim(raw_fragments, total_budget)
 
         admitted_slots: list[str] = []
@@ -2647,7 +2770,9 @@ class LLMRequestPipeline:
                     logger.debug("Sylanne restore evolution [%s]: %s", session_key, exc)
 
             # 将评估结果注入计算栈
-            now = time.time()
+            now = self._now()
+            if now is None:
+                return
             pre_assessment = assessment or None
             event_flags = ["safe"]
             event_confidence = 0.7
@@ -2681,7 +2806,7 @@ class LLMRequestPipeline:
                 flags=event_flags,
                 values=event_values,
                 now=now,
-                event_time=p._event_time(now),
+                event_time=self._event_time(now),
             )
             host.on_request(event, assessment=pre_assessment)
 
@@ -2736,7 +2861,7 @@ class LLMRequestPipeline:
                     },
                 )
                 log_entry = {
-                    "ts": time.time(),
+                    "ts": now,
                     "session": session_key,
                     "text": text[:60],
                     "route": comp_result.get("route", "?"),
@@ -2820,16 +2945,12 @@ class LLMRequestPipeline:
         except Exception as e:
             # 兜底：评估失败时仍然执行基本观测
             logger.warning(f"Sylanne memory maintenance: {e}", exc_info=True)
-            try:
-                await p.observe_request(
-                    session_key,
-                    text=text,
-                    confidence=0.7,
-                    flags=["safe"],
-                    now=time.time(),
-                )
-            except Exception as e2:
-                logger.debug(f"Sylanne skip: {e2}")
+            await self._observe_request_compat(
+                session_key,
+                text=text,
+                confidence=0.7,
+                flags=["safe"],
+            )
 
     # ------------------------------------------------------------------
     # _compress_memories
@@ -3021,7 +3142,7 @@ class LLMRequestPipeline:
                     if shelf_sender_id:
                         shelf_proceed = True
                         if settings.scope == "owner":
-                            owner_cfg = self._services.config or {}
+                            owner_cfg = self._service_config()
                             owner_id = str(
                                 owner_cfg.get("sylanne_alpha_owner_id", "") or ""
                             )
@@ -3136,9 +3257,14 @@ class LLMRequestPipeline:
                                         shelf_safe_sk = (
                                             state_persistence._safe_session_key(session_key)
                                         )
+                                        created_at = self._now()
+                                        if created_at is None:
+                                            raise RuntimeError(
+                                                "observed time capability unavailable"
+                                            )
                                         shelf_registered = (
                                             await register_person_shelf_origin(
-                                                p,
+                                                self._services,
                                                 shelf_safe_sk,
                                                 shelf_platform,
                                                 shelf_sender_id,
@@ -3147,19 +3273,21 @@ class LLMRequestPipeline:
                                         )
                                         if shelf_registered:
                                             shelf_bucket = await load_person_shelf(
-                                                p, shelf_platform, shelf_sender_id
+                                                self._services,
+                                                shelf_platform,
+                                                shelf_sender_id,
                                             )
                                             shelf_bucket.items.append(
                                                 ShelfItem(
                                                     text=shelf_summary,
                                                     origin_scope=shelf_origin_scope,
                                                     origin_id=shelf_origin_id,
-                                                    created_at=time.time(),
+                                                    created_at=created_at,
                                                     weight=1.0,
                                                 )
                                             )
                                             await save_person_shelf(
-                                                p,
+                                                self._services,
                                                 shelf_platform,
                                                 shelf_sender_id,
                                                 shelf_bucket,
@@ -3177,7 +3305,7 @@ class LLMRequestPipeline:
 
             # Embedding for memorable summaries
             embedding_enabled = bool(
-                (self._services.config or {}).get(
+                self._service_config().get(
                     "sylanne_alpha_embedding_memory_enabled"
                 )
             )
@@ -3319,7 +3447,7 @@ class LLMRequestPipeline:
 
             # Generate embeddings for confirmed items
             embedding_enabled = bool(
-                (self._services.config or {}).get(
+                self._service_config().get(
                     "sylanne_alpha_embedding_memory_enabled"
                 )
             )
@@ -3431,7 +3559,7 @@ class LLMRequestPipeline:
     async def _embedding_provider_if_enabled(self) -> Any | None:
         """Resolve embedding provider only after the existing memory gate is on."""
 
-        config = self._services.config or {}
+        config = self._service_config()
         if not bool(config.get("sylanne_alpha_embedding_memory_enabled")):
             return None
         context = self._services.context
@@ -3470,7 +3598,7 @@ class LLMRequestPipeline:
         Returns:
             LLM 返回的文本，失败返回空字符串。
         """
-        config = self._services.config or {}
+        config = self._service_config()
         context = self._services.context
         if context is None:
             return ""
@@ -3542,7 +3670,7 @@ class LLMRequestPipeline:
         （gemini PR#46：`or 1024` 对字符串 "0" 失效——非空串为真值会绕过默认值）。"""
         try:
             val = int(
-                (self._services.config or {}).get(
+                self._service_config().get(
                     "sylanne_alpha_assessor_max_tokens"
                 )
             )
@@ -3595,7 +3723,7 @@ class LLMRequestPipeline:
         + 主动消息复读」的源头之一（provider 没配/不可用时无声无息）。改为按 cause 节流
         告警（首次 + 每 N 次重发），让故障可见。返回契约不变：失败仍返回空串。
         """
-        config = self._services.config or {}
+        config = self._service_config()
         context = self._services.context
         if context is None:
             self._life_sim_warn(
@@ -3642,9 +3770,12 @@ class LLMRequestPipeline:
             warn_ts = self._life_sim_warn_ts = {}
         n = counts.get(cause, 0) + 1
         counts[cause] = n
-        now = time.time()
-        if n == 1 or now - warn_ts.get(cause, 0.0) >= 3600.0:
-            warn_ts[cause] = now
+        now = self._now()
+        if n == 1 or (
+            now is not None and now - warn_ts.get(cause, 0.0) >= 3600.0
+        ):
+            if now is not None:
+                warn_ts[cause] = now
             logger.warning("Sylanne life_sim LLM 失败[%s]（第%d次）：%s", cause, n, detail)
 
     def _life_sim_warn_reset(self) -> None:
@@ -3728,7 +3859,10 @@ class LLMRequestPipeline:
                 enqueue = getattr(p, "_enqueue_scoped_proactive_intent", None)
             if not callable(enqueue):
                 return
-            now_ms = time.time_ns() // 1_000_000
+            observed_now = self._now()
+            if observed_now is None:
+                return
+            now_ms = int(observed_now * 1_000)
             expires_at_ms = now_ms + 300_000
             raw_expiry = (intent or {}).get("expires_at")
             if type(raw_expiry) in (int, float) and raw_expiry > 0:
@@ -3748,6 +3882,10 @@ class LLMRequestPipeline:
                 pass
             return
         if scope is not None:
+            return
+        if getattr(self, "_services_explicit", False):
+            # PluginServices has no host-enumeration authority.  An explicit
+            # pipeline therefore cannot select a recent raw plugin session.
             return
         if not len(p._store.hosts):
             logger.info("Sylanne life_sim_outreach: no active hosts, skipping")
@@ -3778,9 +3916,12 @@ class LLMRequestPipeline:
                     pass
         delivery_mode = (intent or {}).get("delivery_mode", "next_reply")
         reason_code = (intent or {}).get("reason_code", "")
+        observed_now = self._now()
+        if observed_now is None:
+            return
         expires_at = float((intent or {}).get("expires_at", 0.0) or 0.0)
         if expires_at == 0.0:
-            expires_at = time.time() + 1800.0  # 默认 30min 过期
+            expires_at = observed_now + 1800.0  # 默认 30min 过期
 
         pending_ctx = {
             "reason": reason,
@@ -3791,7 +3932,7 @@ class LLMRequestPipeline:
             "reason_code": reason_code,
             "expires_at": expires_at,
             "target_session": best_key,
-            "queued_at": time.time(),
+            "queued_at": observed_now,
         }
         p._store.pending_outreach_context.set(best_key, pending_ctx)
         logger.info(
@@ -3807,7 +3948,10 @@ class LLMRequestPipeline:
             if not cur or cur.get("reason") != ctx["reason"]:
                 return  # 已被消费或被替换
             # 过期则丢弃（PR-C3：expires_at 生效）
-            if ctx["expires_at"] and time.time() > ctx["expires_at"]:
+            fallback_now = self._now()
+            if fallback_now is None:
+                return
+            if ctx["expires_at"] and fallback_now > ctx["expires_at"]:
                 pending.pop(session_key, None)
                 self._mark_life_outcome(ctx["event_id"], "dropped", session_key)
                 logger.info(f"Sylanne life_sim outreach expired: session={session_key}")
@@ -3831,7 +3975,7 @@ class LLMRequestPipeline:
             # ② 再过 Bridge gate（quiet_hours/min_interval）+ hesitation
             bridge = getattr(p, "_proactive_bridge", None)
             bridge_on = bool(
-                (self._services.config or {}).get(
+                self._service_config().get(
                     "sylanne_alpha_proactive_bridge_enabled", False
                 )
             )
@@ -3848,7 +3992,7 @@ class LLMRequestPipeline:
                     return
                 # 犹豫：发前迟疑 / 最后一刻收回 / 踌躇词试探
                 hesit_on = bool(
-                    (self._services.config or {}).get(
+                    self._service_config().get(
                         "sylanne_alpha_proactive_hesitation", False
                     )
                 )
@@ -3911,6 +4055,9 @@ class LLMRequestPipeline:
 
             # ③ 回退：大饼不可用/未启用/失败——素材存回 pending context，
             # 等下次 LLM 请求时由主模型自然表达。生活模拟输出永远只是素材。
+            fallback_now = self._now()
+            if fallback_now is None:
+                return
             p._store.pending_outreach_context.set(session_key, {
                 "reason": ctx["reason"],
                 "mood": ctx["mood"],
@@ -3920,7 +4067,7 @@ class LLMRequestPipeline:
                 "reason_code": ctx["reason_code"],
                 "expires_at": ctx["expires_at"],
                 "target_session": session_key,
-                "queued_at": time.time(),
+                "queued_at": fallback_now,
             })
             logger.info(
                 "Sylanne life_sim_outreach: bridge unavailable, "
@@ -3975,7 +4122,9 @@ class LLMRequestPipeline:
         if life_sim is None:
             return
         try:
-            now = time.time()
+            now = LLMRequestPipeline._now(self)
+            if now is None:
+                return
             if outcome == "dispatched":
                 life_sim.mark_outreach_dispatched(event_id, now)
             elif outcome == "consumed":
@@ -4030,9 +4179,12 @@ class LLMRequestPipeline:
                 if hist is None:
                     hist = collections.deque(maxlen=_DISPATCH_AUDIT_PER_SESSION)
                     audit[session_key] = hist
+            observed_now = LLMRequestPipeline._now(self)
+            if observed_now is None:
+                return
             entry = {
                 "feedback_status": status,
-                "ts": time.time(),
+                "ts": observed_now,
                 "event_id": event_id,
             }
             hist.append(entry)
