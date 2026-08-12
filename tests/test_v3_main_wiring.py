@@ -1281,8 +1281,10 @@ def test_disabled_v3_never_imports_or_scans_lexicon(
 ) -> None:
     from sylanne_alpha.v2core import integration, lexicon
 
-    async def no_v2_request(*_args: Any, **_kwargs: Any) -> None:
-        return None
+    async def no_v2_request(
+        *_args: Any, **_kwargs: Any
+    ) -> list[tuple[str, str, str, int]]:
+        return []
 
     def forbidden_read(_text: str) -> Any:
         raise AssertionError("disabled v3 must not scan text")

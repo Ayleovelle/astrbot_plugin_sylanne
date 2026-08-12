@@ -414,6 +414,11 @@ def test_stopped_turn_uses_restored_context_assistant_for_atomic_backfill() -> N
         ]
     )
     plugin = object.__new__(EmotionalStatePlugin)
+    # This is an intentionally registry-free narrow unit fixture.  The real
+    # plugin has a callable scope binder and must fail closed when the event has
+    # no frozen runtime; shadow it here so the test exercises only the history
+    # finalization body.
+    plugin._bind_runtime_for_event = None
 
     def restore_history(*_args: Any) -> None:
         calls.append("restore")
@@ -457,6 +462,7 @@ def test_terminal_direct_delivery_tool_finalizes_without_agent_done() -> None:
     persisted: list[tuple[str, str, str]] = []
     event = _Event(_request(contexts=[]))
     plugin = object.__new__(EmotionalStatePlugin)
+    plugin._bind_runtime_for_event = None
     plugin._has_conversation_manager = lambda: True
     plugin._agent_was_aborted = lambda _event: False
     plugin._agent_run_done = lambda _event: True
@@ -488,6 +494,7 @@ def test_tool_respond_does_not_finalize_nonterminal_or_non_delivery_tools() -> N
     persisted: list[tuple[str, str, str]] = []
     event = _Event(_request(contexts=[]))
     plugin = object.__new__(EmotionalStatePlugin)
+    plugin._bind_runtime_for_event = None
     plugin._has_conversation_manager = lambda: True
     plugin._agent_was_aborted = lambda _event: False
     plugin._agent_run_done = lambda _event: False
