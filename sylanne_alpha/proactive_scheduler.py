@@ -70,6 +70,10 @@ class ProactiveScheduler:
         separately wired outbox concern.
         """
 
+        if services is not None and persistence is not None:
+            raise ValueError(
+                "explicit services cannot be combined with scoped persistence"
+            )
         self._p = plugin
         self._plugin = plugin
         self._services_explicit = services is not None
@@ -154,6 +158,8 @@ class ProactiveScheduler:
     def _bound_session_runtime(self, session_key: str) -> Any | None:
         """Resolve only the session already authenticated by the active binding."""
 
+        if self._services_explicit:
+            return None
         getter = getattr(self._p, "_bound_runtime", None)
         if not callable(getter):
             return None
@@ -198,6 +204,15 @@ class ProactiveScheduler:
         self._require_legacy_session_api()
         cfg = self._services.config or {}
         cooldown = float(cfg.get("proactive_speech_dispatch_cooldown_seconds", 1800.0))
+        if self._services_explicit:
+            return {
+                "should_dispatch": bool(
+                    cfg.get("enable_proactive_speech_dispatch")
+                ),
+                "reason": "policy",
+                "cooldown_seconds": cooldown,
+                "feedback_pressure": 0.0,
+            }
         scoped_runtime_required = (
             getattr(self._p, "_scope_runtime_registry", None) is not None
         )

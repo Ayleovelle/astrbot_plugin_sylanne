@@ -534,3 +534,393 @@ def test_proactive_decision_without_a_service_session_never_uses_default_host() 
     assert result == {"should_speak": False, "reason": "no_session_key"}
     assert memory_result == {"ok": False, "error": "session_unavailable"}
     assert host_calls == []
+
+
+class _PoisonPlugin:
+    """Trap every ambient plugin path forbidden after explicit service injection."""
+
+    _TRAPPED = frozenset(
+        {
+            "config",
+            "_config",
+            "context",
+            "_context",
+            "_store",
+            "_scope_runtime_registry",
+            "_bound_runtime",
+            "_agent_identity_profile_cache",
+            "_agent_trail_cache",
+            "_conversation_event_ledger",
+            "_proactive_dispatch_audit",
+            "_life_simulator",
+            "_proactive_bridge",
+            "_proactive_dispatch_last_sent",
+            "_session_state",
+            "_self_core",
+            "_host",
+            "_session_key",
+            "_observed_now",
+            "_event_time",
+            "request_proactive_speech_dispatch",
+            "_call_internal_assessor_llm",
+            "_internal_assessor_llm_cond",
+            "_internal_assessor_llm_inflight",
+            "_memory_system_for_session",
+            "query_sylanne_memory",
+            "_memory_prompt_fragment",
+            "_add_transient_context",
+            "_load_state",
+            "_load_moral_repair_state",
+            "_load_psychological_state",
+            "_load_humanlike_state",
+            "_load_lifelike_learning_state",
+            "_load_personality_drift_state",
+            "_load_fallibility_state",
+            "_delete_state",
+            "_delete_humanlike_state",
+            "_delete_moral_repair_state",
+            "_delete_fallibility_state",
+            "_delete_lifelike_learning_state",
+            "_delete_personality_drift_state",
+            "_humanlike_reset_impl",
+        }
+    )
+
+    def __init__(self) -> None:
+        object.__setattr__(self, "ambient_accesses", [])
+
+    def __getattribute__(self, name: str) -> Any:
+        trapped = object.__getattribute__(self, "_TRAPPED")
+        if name in trapped:
+            accesses = object.__getattribute__(self, "ambient_accesses")
+            accesses.append(("get", name))
+            raise AssertionError(f"explicit services accessed ambient plugin attribute {name}")
+        return object.__getattribute__(self, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        trapped = object.__getattribute__(self, "_TRAPPED")
+        if name in trapped:
+            accesses = object.__getattribute__(self, "ambient_accesses")
+            accesses.append(("set", name))
+            raise AssertionError(f"explicit services mutated ambient plugin attribute {name}")
+        object.__setattr__(self, name, value)
+
+
+class _IsolatedHost:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.events: list[Any] = []
+        self.feedback: list[tuple[str, float]] = []
+        computation = SimpleNamespace(
+            feedback=lambda status, *, dt: self.feedback.append((status, dt))
+        )
+        self.kernel = SimpleNamespace(
+            computation=computation,
+            turns=0,
+            last_event={"text": ""},
+        )
+
+    def on_request(self, event: Any) -> dict[str, Any]:
+        self.events.append(event)
+        return {"host": self.name, "now": event.now}
+
+    def on_response(self, event: Any) -> dict[str, Any]:
+        self.events.append(event)
+        return {"host": self.name, "now": event.now}
+
+    def on_proactive_check(self, event: Any) -> dict[str, Any]:
+        self.events.append(event)
+        return {
+            "schema_version": "test.v1",
+            "session_key": "shared-session",
+            "decision": {"action": "wait"},
+            "guard": {"allowed": False},
+            "host_payload": {
+                "reason": f"service-{self.name}",
+                "reason_code": f"service_{self.name}",
+            },
+        }
+
+
+def _isolated_services(
+    *,
+    host: _IsolatedHost,
+    clock: list[float],
+    context: Any = None,
+    config: dict[str, Any] | None = None,
+) -> PluginServices:
+    return PluginServices(
+        config=dict(config or {}),
+        context=context,
+        host_fn=lambda _session_key: host,
+        session_key_fn=lambda _event=None, _explicit="": "shared-session",
+        observed_now_fn=lambda: clock[0],
+    )
+
+
+def test_same_plugin_same_session_explicit_public_apis_keep_state_isolated() -> None:
+    plugin = _PoisonPlugin()
+    clock_a = [1000.0]
+    clock_b = [2000.0]
+    host_a = _IsolatedHost("a")
+    host_b = _IsolatedHost("b")
+    api_a = PublicAPI(
+        plugin,
+        services=_isolated_services(host=host_a, clock=clock_a),
+    )
+    api_b = PublicAPI(
+        plugin,
+        services=_isolated_services(host=host_b, clock=clock_b),
+    )
+    alice = SimpleNamespace(sender_id="same-sender", sender_name="Alice")
+    bob = SimpleNamespace(sender_id="same-sender", sender_name="Bob")
+
+    async def exercise() -> None:
+        assert await api_a.observe_response("shared-session", now=1000.0) == {
+            "host": "a",
+            "now": 1000.0,
+        }
+        await api_a.observe_request("shared-session", now=1010.0)
+        await api_b.observe_request("shared-session", now=1010.0)
+
+        await api_a.get_agent_identity_profile(alice)
+        await api_b.get_agent_identity_profile(bob)
+        profile_a = await api_a.get_agent_identity_profile(alice)
+        profile_b = await api_b.get_agent_identity_profile(bob)
+        assert [item["name"] for item in profile_a["aliases"]] == ["Alice"]
+        assert [item["name"] for item in profile_b["aliases"]] == ["Bob"]
+        assert (await api_a.get_agent_trail(alice))["items"] == []
+        assert (await api_b.get_agent_trail(bob))["items"] == []
+
+    asyncio.run(exercise())
+    assert host_a.feedback == [("accepted", pytest.approx(10.0 / 60.0))]
+    assert host_b.feedback == []
+    assert plugin.ambient_accesses == []
+
+
+def test_explicit_public_api_unrepresentable_plugin_operations_fail_closed() -> None:
+    plugin = _PoisonPlugin()
+    host = _IsolatedHost("only")
+    services = _isolated_services(
+        host=host,
+        clock=[2718.0],
+        config={
+            "enable_shadow_diagnostics": True,
+            "enable_sylanne_memory": True,
+            "enable_moral_repair_state": True,
+            "enable_psychological_screening": True,
+            "enable_fallibility_state": True,
+            "allow_emotion_reset_backdoor": True,
+            "allow_humanlike_reset_backdoor": True,
+            "allow_moral_repair_reset_backdoor": True,
+            "allow_fallibility_reset_backdoor": True,
+            "allow_lifelike_learning_reset_backdoor": True,
+            "allow_personality_drift_reset_backdoor": True,
+        },
+    )
+    api = PublicAPI(plugin, services=services)
+    event = SimpleNamespace(sender_id="same-sender", sender_name="Alice")
+
+    async def collect(stream: Any) -> list[Any]:
+        return [item async for item in stream]
+
+    async def exercise() -> None:
+        assert await api._observatory_route_handler() == {
+            "ok": False,
+            "error": "scope_unavailable",
+        }
+        assert api._legacy_observatory_session_key() is None
+        assert api._lineage_observatory_route_payload() == {
+            "ok": False,
+            "error": "scope_unavailable",
+        }
+        assert api._sylanne_lineage_observatory_page_payload("shared-session") == {
+            "ok": False,
+            "error": "explicit_runtime_diagnostics_capability_required",
+        }
+        assert api._understanding_closed_loop_diagnostics("shared-session") == {
+            "ok": False,
+            "error": "explicit_runtime_diagnostics_capability_required",
+        }
+        assert await api.get_agent_runtime_diagnostics(event) == {
+            "ok": False,
+            "error": "explicit_runtime_diagnostics_capability_required",
+        }
+        shadow = await collect(api.shadow_diagnostics_status(event))
+        assert json.loads(shadow[0])["error"] == (
+            "explicit_runtime_diagnostics_capability_required"
+        )
+        assert api._agent_identity(event) == "shared-session::agent:same-sender"
+        assert (await api.query_agent_state(event, state="emotion"))["error"] == (
+            "explicit_state_read_capability_required"
+        )
+        assert (
+            await api._query_single_agent_state(
+                "emotion",
+                event,
+                session_key="shared-session",
+            )
+        )["error"] == "explicit_state_read_capability_required"
+        assert await api.observe_user_message_withdrawal(
+            event,
+            session_key="shared-session",
+        ) == {
+            "ok": False,
+            "error": "explicit_state_mutation_capability_required",
+        }
+        assert await api.get_emotion_state(session_key="shared-session") == {
+            "ok": False,
+            "error": "explicit_state_read_capability_required",
+        }
+        assert api.humanlike_reset(session_key="shared-session") == {
+            "ok": False,
+            "error": "explicit_state_mutation_capability_required",
+        }
+        assert await collect(api.sylanne_memory_status(event)) == [
+            "explicit_state_read_capability_required"
+        ]
+        assert await collect(api.humanlike_status(event)) == [
+            "explicit_state_read_capability_required"
+        ]
+        assert await collect(api.moral_repair_status(event)) == [
+            "explicit_state_read_capability_required"
+        ]
+        assert await collect(api.psychological_screening_status(event)) == [
+            "explicit_state_read_capability_required"
+        ]
+        assert await collect(api.lifelike_learning_status(event)) == [
+            "explicit_state_read_capability_required"
+        ]
+        assert await collect(api.personality_drift_status(event)) == [
+            "explicit_state_read_capability_required"
+        ]
+        assert await collect(api.fallibility_status(event)) == [
+            "explicit_state_read_capability_required"
+        ]
+        assert await collect(api.emotion_reset(event)) == [
+            "explicit_state_mutation_capability_required"
+        ]
+        assert await collect(api._humanlike_reset_command(event)) == [
+            "explicit_state_mutation_capability_required"
+        ]
+        assert await collect(api.moral_repair_reset(event)) == [
+            "explicit_state_mutation_capability_required"
+        ]
+        assert await collect(api.fallibility_reset(event)) == [
+            "explicit_state_mutation_capability_required"
+        ]
+        assert await collect(api.lifelike_learning_reset(event)) == [
+            "explicit_state_mutation_capability_required"
+        ]
+        assert await collect(api.personality_drift_reset(event)) == [
+            "explicit_state_mutation_capability_required"
+        ]
+        assert await api.build_emotion_memory_payload(event) == {
+            "ok": False,
+            "error": "explicit_state_read_capability_required",
+        }
+        assert await api.query_sylanne_memory(
+            session_key="shared-session",
+            query="hello",
+        ) == {
+            "schema_version": "sylanne.alpha.memory_system.v1",
+            "session_key": "shared-session",
+            "slice": "sylanne_memory",
+            "query": "hello",
+            "source": "explicit_state_read_capability_required",
+            "matches": [],
+            "count": 0,
+            "error": "explicit_state_read_capability_required",
+        }
+        request = SimpleNamespace(prompt="keep me unchanged")
+        assert await api.inject_emotion_context(event, request) == {
+            "prompt": "keep me unchanged",
+            "error": "explicit_state_read_capability_required",
+        }
+        proactive = await api.proactive_sylanne(session_key="shared-session")
+        assert proactive["decision"]["reason_code"] == "service_only"
+        assert "v2core_reach" not in proactive["decision"]
+
+    asyncio.run(exercise())
+    assert plugin.ambient_accesses == []
+
+
+def test_explicit_public_api_internal_assessor_state_is_instance_owned() -> None:
+    plugin = _PoisonPlugin()
+    calls_a: list[dict[str, Any]] = []
+    calls_b: list[dict[str, Any]] = []
+
+    async def llm_a(**kwargs: Any) -> Any:
+        calls_a.append(kwargs)
+        return SimpleNamespace(completion_text="a")
+
+    async def llm_b(**kwargs: Any) -> Any:
+        calls_b.append(kwargs)
+        return SimpleNamespace(completion_text="b")
+
+    api_a = PublicAPI(
+        plugin,
+        services=_isolated_services(
+            host=_IsolatedHost("a"),
+            clock=[1.0],
+            context=SimpleNamespace(llm_generate=llm_a),
+        ),
+    )
+    api_b = PublicAPI(
+        plugin,
+        services=_isolated_services(
+            host=_IsolatedHost("b"),
+            clock=[2.0],
+            context=SimpleNamespace(llm_generate=llm_b),
+        ),
+    )
+
+    async def exercise() -> None:
+        assert api_a._internal_assessor_llm_condition() is not (
+            api_b._internal_assessor_llm_condition()
+        )
+        assert (await api_a._call_internal_assessor_llm(prompt="one")).completion_text == "a"
+        assert (await api_b._call_internal_assessor_llm(prompt="two")).completion_text == "b"
+
+    asyncio.run(exercise())
+    assert calls_a == [{"prompt": "one"}]
+    assert calls_b == [{"prompt": "two"}]
+    assert api_a._internal_assessor_llm_concurrency_decision()["inflight"] == 0
+    assert api_b._internal_assessor_llm_concurrency_decision()["inflight"] == 0
+    assert plugin.ambient_accesses == []
+
+
+def test_explicit_scheduler_policy_never_reads_plugin_scope_or_audit() -> None:
+    plugin = _PoisonPlugin()
+    scheduler = ProactiveScheduler(
+        plugin,
+        services=_isolated_services(
+            host=_IsolatedHost("scheduler"),
+            clock=[2718.0],
+            config={
+                "enable_proactive_speech_dispatch": True,
+                "proactive_speech_dispatch_cooldown_seconds": 120.0,
+            },
+        ),
+    )
+
+    assert scheduler._bound_session_runtime("shared-session") is None
+    assert scheduler.derive_dispatch_policy(session_key="shared-session") == {
+        "should_dispatch": True,
+        "reason": "policy",
+        "cooldown_seconds": 120.0,
+        "feedback_pressure": 0.0,
+    }
+    assert plugin.ambient_accesses == []
+
+
+def test_scheduler_rejects_explicit_services_with_scoped_persistence() -> None:
+    with pytest.raises(
+        ValueError,
+        match="explicit services cannot be combined with scoped persistence",
+    ):
+        ProactiveScheduler(
+            _PoisonPlugin(),
+            services=PluginServices(),
+            persistence=object(),  # type: ignore[arg-type]
+        )

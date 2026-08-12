@@ -171,6 +171,11 @@ class PublicAPI:
         self._p = plugin
         self._plugin = plugin
         self._services_explicit = services is not None
+        self._explicit_last_bot_expression_time: dict[str, float] = {}
+        self._explicit_agent_identity_profile_cache: dict[str, dict[str, Any]] = {}
+        self._explicit_agent_trail_cache: dict[str, list[Any]] = {}
+        self._explicit_internal_assessor_llm_cond: asyncio.Condition | None = None
+        self._explicit_internal_assessor_llm_inflight = 0
         if services is not None:
             self._services = services
         else:
@@ -247,6 +252,8 @@ class PublicAPI:
         owner would cross the scope boundary.
         """
 
+        if self._services_explicit:
+            return None
         registry = getattr(self._p, "_scope_runtime_registry", None)
         if registry is None:
             return None
@@ -270,6 +277,8 @@ class PublicAPI:
         scoped runtime can at most inspect an already-existing legacy owner.
         """
 
+        if self._services_explicit:
+            return None
         try:
             store = self._p._store
             hosts = getattr(store, "hosts", {})
@@ -280,6 +289,8 @@ class PublicAPI:
     def _bound_scoped_identity(self) -> Any | None:
         """Return one live full-scope opaque identity binding, or fail closed."""
 
+        if self._services_explicit:
+            return None
         registry = getattr(self._p, "_scope_runtime_registry", None)
         if registry is None:
             return None
@@ -466,6 +477,11 @@ class PublicAPI:
     def _sylanne_lineage_observatory_page_payload(
         self, session_key: str
     ) -> dict[str, Any]:
+        if self._services_explicit:
+            return {
+                "ok": False,
+                "error": "explicit_runtime_diagnostics_capability_required",
+            }
         loop_data = self._p._store.last_understanding_closed_loop.get(session_key, {})
         observatory = loop_data.get("turning_point_lineage_observatory", {})
         lineage = observatory.get("lineage", {})
@@ -489,6 +505,11 @@ class PublicAPI:
     def _understanding_closed_loop_diagnostics(
         self, session_key: str
     ) -> dict[str, Any]:
+        if self._services_explicit:
+            return {
+                "ok": False,
+                "error": "explicit_runtime_diagnostics_capability_required",
+            }
         loop_data = dict(self._p._store.last_understanding_closed_loop.get(session_key, {}))
         if "turning_point_memory_replay" in loop_data:
             loop_data["turning_point_memory_replay"] = {}
@@ -510,6 +531,11 @@ class PublicAPI:
         Returns:
             诊断数据字典。
         """
+        if self._services_explicit:
+            return {
+                "ok": False,
+                "error": "explicit_runtime_diagnostics_capability_required",
+            }
         p = self._p
         registry = getattr(p, "_scope_runtime_registry", None)
         scoped_runtime = registry is not None
@@ -683,8 +709,18 @@ class PublicAPI:
         return result
 
     async def shadow_diagnostics_status(self, event: Any = None, **kwargs: Any) -> Any:
-        p = self._plugin
         cfg = self._services.config or {}
+        if self._services_explicit:
+            yield json.dumps(
+                {
+                    "kind": "shadow_diagnostics",
+                    "enabled": False,
+                    "error": "explicit_runtime_diagnostics_capability_required",
+                },
+                ensure_ascii=False,
+            )
+            return
+        p = self._plugin
         if not cfg.get("enable_shadow_diagnostics"):
             yield json.dumps(
                 {
@@ -756,7 +792,9 @@ class PublicAPI:
     # Agent identity group
     # ------------------------------------------------------------------
     def _agent_identity(self, event: Any = None) -> str:
-        if getattr(self._p, "_scope_runtime_registry", None) is not None:
+        if not self._services_explicit and getattr(
+            self._p, "_scope_runtime_registry", None
+        ) is not None:
             binding = self._bound_scoped_identity()
             relation = getattr(binding, "relation_runtime", None)
             return (
@@ -788,7 +826,9 @@ class PublicAPI:
             身份档案字典。
         """
         p = self._p
-        if getattr(p, "_scope_runtime_registry", None) is not None:
+        if not self._services_explicit and getattr(
+            p, "_scope_runtime_registry", None
+        ) is not None:
             binding = self._bound_scoped_identity()
             if binding is None:
                 return {"ok": False, "error": "scope_unavailable"}
@@ -801,10 +841,13 @@ class PublicAPI:
                 "relation_ref": relation_token,
                 "updated_at": self._observed_now(),
             }
-        cache = getattr(p, "_agent_identity_profile_cache", None)
-        if cache is None:
-            p._agent_identity_profile_cache = {}
-            cache = p._agent_identity_profile_cache
+        if self._services_explicit:
+            cache = self._explicit_agent_identity_profile_cache
+        else:
+            cache = getattr(p, "_agent_identity_profile_cache", None)
+            if cache is None:
+                p._agent_identity_profile_cache = {}
+                cache = p._agent_identity_profile_cache
         session_id = self._session_key(event)
         if not session_id:
             return {"ok": False, "error": "session_unavailable"}
@@ -868,7 +911,9 @@ class PublicAPI:
         self, event: Any = None, *, limit: int = 10, **kwargs: Any
     ) -> dict[str, Any]:
         p = self._p
-        if getattr(p, "_scope_runtime_registry", None) is not None:
+        if not self._services_explicit and getattr(
+            p, "_scope_runtime_registry", None
+        ) is not None:
             binding = self._bound_scoped_identity()
             if binding is None:
                 return {"ok": False, "error": "scope_unavailable"}
@@ -878,10 +923,13 @@ class PublicAPI:
                 "relation_ref": binding.relation_runtime.scope.relation_ref.token,
                 "items": [],
             }
-        cache = getattr(p, "_agent_trail_cache", None)
-        if cache is None:
-            p._agent_trail_cache = {}
-            cache = p._agent_trail_cache
+        if self._services_explicit:
+            cache = self._explicit_agent_trail_cache
+        else:
+            cache = getattr(p, "_agent_trail_cache", None)
+            if cache is None:
+                p._agent_trail_cache = {}
+                cache = p._agent_trail_cache
         session_id = self._session_key(event)
         if not session_id:
             return {"ok": False, "error": "session_unavailable"}
@@ -909,6 +957,15 @@ class PublicAPI:
         track: str = "conversation",
     ) -> dict[str, Any]:
         detail = self._clamp_llm_tool_detail(detail)
+        if self._services_explicit:
+            return {
+                "ok": False,
+                "error": "explicit_state_read_capability_required",
+                "kind": state_name,
+                "session_key": session_key or self._session_key(event),
+                "detail": detail,
+                "track": {"kind": track},
+            }
         p = self._p
         sk = session_key or self._session_key(event)
         snapshot_method_map = self._SNAPSHOT_METHOD_MAP
@@ -977,6 +1034,17 @@ class PublicAPI:
         **kwargs: Any,
     ) -> dict[str, Any]:
         detail = self._clamp_llm_tool_detail(detail)
+        if self._services_explicit:
+            return {
+                "ok": False,
+                "error": "explicit_state_read_capability_required",
+                "kind": "agent_state_query",
+                "state": state.replace("_state", "").replace("_self", ""),
+                "detail": detail,
+                "track": {"kind": track},
+                "runtime": {"enabled": include_runtime},
+                "snapshots": {},
+            }
         p = self._p
         sk = self._session_key(event)
         state_name = state.replace("_state", "").replace("_self", "")
@@ -1068,7 +1136,12 @@ class PublicAPI:
 
     async def query_agent_state_tool(self, event: Any = None, **kwargs: Any) -> str:
         payload = await self.query_agent_state(event, **kwargs)
-        cfg = self._services.config or {}
+        services = getattr(self, "_services", None)
+        cfg = (
+            services.config
+            if services is not None
+            else getattr(self._p, "config", {})
+        ) or {}
         max_chars = int(cfg.get("llm_tool_response_max_chars", 400))
         raw = self._tool_json(payload)
         if len(raw) <= max_chars:
@@ -1258,8 +1331,11 @@ class PublicAPI:
     async def sylanne_memory_status(
         self, event: Any = None, query: str = "", **kwargs: Any
     ) -> Any:
-        p = self._plugin
         cfg = self._services.config or {}
+        if self._services_explicit:
+            yield "explicit_state_read_capability_required"
+            return
+        p = self._plugin
         sk = self._session_key(event)
         if not cfg.get("enable_sylanne_memory", True):
             yield "Sylanne 记忆系统未启用。"
@@ -1287,8 +1363,11 @@ class PublicAPI:
             yield f"Sylanne 记忆状态: {len(records)} 条记录。"
 
     async def emotion_reset(self, event: Any = None, **kwargs: Any) -> Any:
-        p = self._plugin
         cfg = self._services.config or {}
+        if self._services_explicit:
+            yield "explicit_state_mutation_capability_required"
+            return
+        p = self._plugin
         sk = self._session_key(event)
         if not cfg.get("allow_emotion_reset_backdoor", False):
             yield "情绪重置后门已关闭，无法执行重置。"
@@ -1299,14 +1378,22 @@ class PublicAPI:
         yield f"已重置会话 {sk} 的情绪状态。"
 
     def humanlike_reset(self, event: Any = None, **kwargs: Any) -> Any:
+        if self._services_explicit:
+            return {
+                "ok": False,
+                "error": "explicit_state_mutation_capability_required",
+            }
         p = self._plugin
         if "session_key" in kwargs and event is None:
             return p._humanlike_reset_impl(kwargs["session_key"])
         return self._humanlike_reset_command(event, **kwargs)
 
     async def _humanlike_reset_command(self, event: Any = None, **kwargs: Any) -> Any:
-        p = self._plugin
         cfg = self._services.config or {}
+        if self._services_explicit:
+            yield "explicit_state_mutation_capability_required"
+            return
+        p = self._plugin
         sk = self._session_key(event)
         if not cfg.get("allow_humanlike_reset_backdoor", False):
             yield "humanlike 重置后门已关闭，无法执行重置。"
@@ -1317,8 +1404,11 @@ class PublicAPI:
         yield f"已重置会话 {sk} 的 humanlike 状态。"
 
     async def moral_repair_status(self, event: Any = None, **kwargs: Any) -> Any:
-        p = self._plugin
         cfg = self._services.config or {}
+        if self._services_explicit:
+            yield "explicit_state_read_capability_required"
+            return
+        p = self._plugin
         if not cfg.get("enable_moral_repair_state"):
             yield "道德修复状态未启用。"
             return
@@ -1333,8 +1423,11 @@ class PublicAPI:
     async def psychological_screening_status(
         self, event: Any = None, **kwargs: Any
     ) -> Any:
-        p = self._plugin
         cfg = self._services.config or {}
+        if self._services_explicit:
+            yield "explicit_state_read_capability_required"
+            return
+        p = self._plugin
         if not cfg.get("enable_psychological_screening"):
             yield "心理筛查状态未启用。"
             return
@@ -1347,6 +1440,9 @@ class PublicAPI:
             yield "心理筛查状态: 无数据。"
 
     async def humanlike_status(self, event: Any = None, **kwargs: Any) -> Any:
+        if self._services_explicit:
+            yield "explicit_state_read_capability_required"
+            return
         p = self._plugin
         sk = self._session_key(event)
         load_fn = getattr(p, "_load_humanlike_state", None)
@@ -1362,6 +1458,9 @@ class PublicAPI:
             yield "拟人状态: 无数据。"
 
     async def lifelike_learning_status(self, event: Any = None, **kwargs: Any) -> Any:
+        if self._services_explicit:
+            yield "explicit_state_read_capability_required"
+            return
         p = self._plugin
         sk = self._session_key(event)
         load_fn = getattr(p, "_load_lifelike_learning_state", None)
@@ -1377,6 +1476,9 @@ class PublicAPI:
             yield "生命化学习状态: 无数据。"
 
     async def personality_drift_status(self, event: Any = None, **kwargs: Any) -> Any:
+        if self._services_explicit:
+            yield "explicit_state_read_capability_required"
+            return
         p = self._plugin
         sk = self._session_key(event)
         load_fn = getattr(p, "_load_personality_drift_state", None)
@@ -1392,8 +1494,11 @@ class PublicAPI:
             yield "人格漂移状态: 无数据。"
 
     async def fallibility_status(self, event: Any = None, **kwargs: Any) -> Any:
-        p = self._plugin
         cfg = self._services.config or {}
+        if self._services_explicit:
+            yield "explicit_state_read_capability_required"
+            return
+        p = self._plugin
         if not cfg.get("enable_fallibility_state"):
             yield "fallibility 状态未启用。"
             return
@@ -1414,8 +1519,11 @@ class PublicAPI:
             )
 
     async def moral_repair_reset(self, event: Any = None, **kwargs: Any) -> Any:
-        p = self._plugin
         cfg = self._services.config or {}
+        if self._services_explicit:
+            yield "explicit_state_mutation_capability_required"
+            return
+        p = self._plugin
         sk = self._session_key(event)
         if not cfg.get("allow_moral_repair_reset_backdoor", True):
             yield "道德修复重置后门已关闭，无法执行重置。"
@@ -1426,8 +1534,11 @@ class PublicAPI:
         yield f"已重置会话 {sk} 的道德修复状态。"
 
     async def fallibility_reset(self, event: Any = None, **kwargs: Any) -> Any:
-        p = self._plugin
         cfg = self._services.config or {}
+        if self._services_explicit:
+            yield "explicit_state_mutation_capability_required"
+            return
+        p = self._plugin
         sk = self._session_key(event)
         if not cfg.get("allow_fallibility_reset_backdoor", True):
             yield "fallibility 重置后门已关闭，无法执行重置。"
@@ -1438,8 +1549,11 @@ class PublicAPI:
         yield f"已重置会话 {sk} 的 fallibility 状态。"
 
     async def lifelike_learning_reset(self, event: Any = None, **kwargs: Any) -> Any:
-        p = self._plugin
         cfg = self._services.config or {}
+        if self._services_explicit:
+            yield "explicit_state_mutation_capability_required"
+            return
+        p = self._plugin
         sk = self._session_key(event)
         if not cfg.get("allow_lifelike_learning_reset_backdoor", True):
             yield "lifelike learning 重置后门已关闭，无法执行重置。"
@@ -1450,8 +1564,11 @@ class PublicAPI:
         yield f"已重置会话 {sk} 的 lifelike learning 状态。"
 
     async def personality_drift_reset(self, event: Any = None, **kwargs: Any) -> Any:
-        p = self._plugin
         cfg = self._services.config or {}
+        if self._services_explicit:
+            yield "explicit_state_mutation_capability_required"
+            return
+        p = self._plugin
         sk = self._session_key(event)
         if not cfg.get("allow_personality_drift_reset_backdoor", True):
             yield "personality drift 重置后门已关闭，无法执行重置。"
@@ -1489,7 +1606,6 @@ class PublicAPI:
         Returns:
             计算栈处理结果。
         """
-        p = self._plugin
         host = self._host(session_key)
         if host is None:
             return {"ok": False, "error": "host_unavailable"}
@@ -1504,7 +1620,14 @@ class PublicAPI:
             event_time=self._event_time(effective_now),
         )
         # Feedback loop: trigger based on time since last bot expression
-        last_expr_time = p._store.last_bot_expression_time.get(session_key, 0.0)
+        if self._services_explicit:
+            last_expr_time = self._explicit_last_bot_expression_time.get(
+                session_key, 0.0
+            )
+        else:
+            last_expr_time = self._plugin._store.last_bot_expression_time.get(
+                session_key, 0.0
+            )
         if last_expr_time > 0:
             gap = effective_now - last_expr_time
             if gap < 30.0:
@@ -1536,7 +1659,6 @@ class PublicAPI:
         Returns:
             计算栈处理结果。
         """
-        p = self._plugin
         host = self._host(session_key)
         if host is None:
             return {"ok": False, "error": "host_unavailable"}
@@ -1550,7 +1672,12 @@ class PublicAPI:
             now=effective_now,
             event_time=self._event_time(effective_now),
         )
-        p._store.last_bot_expression_time.set(session_key, effective_now)
+        if self._services_explicit:
+            self._explicit_last_bot_expression_time[session_key] = effective_now
+        else:
+            self._plugin._store.last_bot_expression_time.set(
+                session_key, effective_now
+            )
         return host.on_response(event)
 
     async def observe_emotion_text(
@@ -1579,6 +1706,11 @@ class PublicAPI:
         self, *args: Any, **kwargs: Any
     ) -> dict[str, Any]:
         """观测用户消息撤回事件：递增 input_epoch，清除相关状态。"""
+        if self._services_explicit:
+            return {
+                "ok": False,
+                "error": "explicit_state_mutation_capability_required",
+            }
         p = self._p
         event = args[0] if args else None
         supplied_session_key = str(kwargs.get("session_key", "") or "")
@@ -1664,6 +1796,11 @@ class PublicAPI:
     ) -> Any:
         import copy
 
+        if self._services_explicit:
+            return {
+                "ok": False,
+                "error": "explicit_state_read_capability_required",
+            }
         state = await self._plugin._load_state(session_key)
         if not as_dict and state is not None and not isinstance(state, dict):
             return copy.deepcopy(state)
@@ -1689,13 +1826,18 @@ class PublicAPI:
         memory_text: str = "",
         **kwargs: Any,
     ) -> dict[str, Any]:
-        p = self._plugin
         sk = self._session_key(event_or_session, session_key)
         if not sk:
             return {"ok": False, "error": "session_unavailable"}
         host = self._host(sk)
         if host is None:
             return {"ok": False, "error": "host_unavailable"}
+        if self._services_explicit:
+            return {
+                "ok": False,
+                "error": "explicit_state_read_capability_required",
+            }
+        p = self._plugin
         memory_system = p._memory_system_for_session(sk)
         query_embedding = await self._resolve_query_embedding(query)
 
@@ -1965,26 +2107,50 @@ class PublicAPI:
         延迟与 inflight 计数竞态——计数的读-改-写全在条件锁内原子完成，动态 limit 每次
         被唤醒时重新判定，槽位释放时精确唤醒一个等待者。
         """
-        p = self._p
+        explicit_services = bool(getattr(self, "_services_explicit", False))
         cond = self._internal_assessor_llm_condition()
         async with cond:
-            while (p._internal_assessor_llm_inflight
-                   >= self._internal_assessor_llm_concurrency_limit()):
-                await cond.wait()
-            p._internal_assessor_llm_inflight += 1
+            if explicit_services:
+                while (
+                    self._explicit_internal_assessor_llm_inflight
+                    >= self._internal_assessor_llm_concurrency_limit()
+                ):
+                    await cond.wait()
+                self._explicit_internal_assessor_llm_inflight += 1
+            else:
+                while (
+                    self._p._internal_assessor_llm_inflight
+                    >= self._internal_assessor_llm_concurrency_limit()
+                ):
+                    await cond.wait()
+                self._p._internal_assessor_llm_inflight += 1
         try:
-            context = self._services.context
+            services = getattr(self, "_services", None)
+            context = (
+                services.context
+                if services is not None
+                else getattr(self._p, "context", None)
+            )
             if hasattr(context, "llm_generate"):
                 result = await context.llm_generate(**kwargs)
                 return result
             return SimpleNamespace(completion_text="")
         finally:
             async with cond:
-                p._internal_assessor_llm_inflight -= 1
+                if explicit_services:
+                    self._explicit_internal_assessor_llm_inflight -= 1
+                else:
+                    self._p._internal_assessor_llm_inflight -= 1
                 cond.notify()
 
     def _internal_assessor_llm_condition(self) -> asyncio.Condition:
         """惰性创建并复用内部评估器并发闸的条件变量（绑定首次调用时的事件循环）。"""
+        if bool(getattr(self, "_services_explicit", False)):
+            cond = self._explicit_internal_assessor_llm_cond
+            if cond is None:
+                cond = asyncio.Condition()
+                self._explicit_internal_assessor_llm_cond = cond
+            return cond
         p = self._p
         cond = getattr(p, "_internal_assessor_llm_cond", None)
         if cond is None:
@@ -1997,8 +2163,14 @@ class PublicAPI:
 
     def _internal_assessor_llm_concurrency_decision(self) -> dict[str, Any]:
         """计算内部评估器 LLM 并发策略：基础 2 通道 + 极端积压时临时 burst 到 3。"""
-        p = self._p
-        total_queued = sum(len(q) for q in p._store.background_post_queues.values())
+        if bool(getattr(self, "_services_explicit", False)):
+            total_queued = 0
+            inflight = self._explicit_internal_assessor_llm_inflight
+        else:
+            total_queued = sum(
+                len(q) for q in self._p._store.background_post_queues.values()
+            )
+            inflight = getattr(self._p, "_internal_assessor_llm_inflight", 0)
         base_limit = 2
         burst_limit = 3
         reasons = ["base_two_lane_guard"]
@@ -2010,7 +2182,7 @@ class PublicAPI:
             "limit": limit,
             "base_limit": base_limit,
             "burst_limit": burst_limit,
-            "inflight": getattr(p, "_internal_assessor_llm_inflight", 0),
+            "inflight": inflight,
             "reasons": reasons,
         }
 
@@ -2076,7 +2248,6 @@ class PublicAPI:
         Returns:
             记忆查询结果字典，包含 matches 列表。
         """
-        p = self._plugin
         host = self._host(session_key)
         if host is None:
             return {
@@ -2089,6 +2260,18 @@ class PublicAPI:
                 "count": 0,
                 "error": "host_unavailable",
             }
+        if self._services_explicit:
+            return {
+                "schema_version": "sylanne.alpha.memory_system.v1",
+                "session_key": session_key,
+                "slice": "sylanne_memory",
+                "query": query,
+                "source": "explicit_state_read_capability_required",
+                "matches": [],
+                "count": 0,
+                "error": "explicit_state_read_capability_required",
+            }
+        p = self._plugin
         memory_system = p._memory_system_for_session(session_key)
         query_embedding = await self._resolve_query_embedding(query)
 
@@ -2152,10 +2335,15 @@ class PublicAPI:
     async def inject_emotion_context(
         self, event: Any = None, request: Any = None, *, session_key: str = ""
     ) -> dict[str, Any]:
-        p = self._plugin
-        sk = session_key or self._session_key(event)
         if request is None:
             return {"prompt": ""}
+        if self._services_explicit:
+            return {
+                "prompt": str(getattr(request, "prompt", "") or ""),
+                "error": "explicit_state_read_capability_required",
+            }
+        p = self._plugin
+        sk = session_key or self._session_key(event)
         # Build memory-based injection - use last event text as query hint
         host = self._host(sk)
         if host is None:
@@ -2198,7 +2386,6 @@ class PublicAPI:
         from sylanne_alpha.diagnostics_surface import proactive_decision
         from .host import SylanneAlphaHostEvent
 
-        p = self._plugin
         host = self._host(session_key)
         if host is None:
             return {
@@ -2225,14 +2412,15 @@ class PublicAPI:
         )
         surface = host.on_proactive_check(event)
         decision_payload = proactive_decision(surface)
-        try:
-            from sylanne_alpha.v2core.integration import merge_idle_reach_into_decision
+        if not self._services_explicit:
+            try:
+                from sylanne_alpha.v2core.integration import merge_idle_reach_into_decision
 
-            decision_payload = await merge_idle_reach_into_decision(
-                p, session_key, decision_payload
-            )
-        except Exception:
-            pass
+                decision_payload = await merge_idle_reach_into_decision(
+                    self._plugin, session_key, decision_payload
+                )
+            except Exception:
+                pass
         # Add reason_code from host_payload
         decision_payload["reason_code"] = surface["host_payload"].get(
             "reason_code", "life_rhythm"
