@@ -19,6 +19,7 @@ from sylanne_alpha.scope_contracts import (
 )
 from sylanne_alpha.scope_identity import BotBinding, ScopeResolver
 from sylanne_alpha.scope_runtime import (
+    PersonaRuntime,
     RequestRuntimeView,
     ScopeRuntimeRegistry,
     ScopeUnavailable,
@@ -45,13 +46,23 @@ class _ProofSession:
 
 
 class _ProofEvent:
-    def __init__(self, session_id: str, sender_id: str) -> None:
+    def __init__(
+        self,
+        session_id: str,
+        sender_id: str,
+        *,
+        self_id: str = "10001",
+        message_id: str | None = None,
+    ) -> None:
         self.session = _ProofSession(session_id)
         self.session_id = session_id
         self.unified_msg_origin = str(self.session)
-        self.message_obj = SimpleNamespace(message_id=f"message-{session_id}")
+        self.message_obj = SimpleNamespace(
+            message_id=message_id or f"message-{session_id}"
+        )
         self.message_str = "hello"
         self.extras: dict[str, object] = {}
+        self.self_id = self_id
         self.sender_id = sender_id
         self.sender_reads = 0
 
@@ -62,7 +73,7 @@ class _ProofEvent:
         return "aiocqhttp"
 
     def get_self_id(self) -> str:
-        return "10001"
+        return self.self_id
 
     def get_sender_id(self) -> str:
         self.sender_reads += 1
@@ -104,7 +115,19 @@ def _proof_plugin(tmp_path):
     plugin.config = {}
     plugin._config = {}
     plugin._scope_resolver_v1 = resolver
-    plugin._scope_runtime_registry = ScopeRuntimeRegistry.for_test(
+    def ready_persona_runtime(scope) -> PersonaRuntime:
+        runtime = PersonaRuntime(persona_ref=scope.persona_ref)
+
+        def construct_services(owner: PersonaRuntime) -> bool:
+            owner.self_core = object()
+            owner.autonomy_scheduler = object()
+            return True
+
+        runtime.persona_services_factory = construct_services
+        return runtime
+
+    plugin._scope_runtime_registry = ScopeRuntimeRegistry(
+        runtime_factory=ready_persona_runtime,
         repository=resolver._repository,
     )
     plugin._scope_runtime_binding = contextvars.ContextVar(
@@ -864,6 +887,123 @@ async def test_decorated_hooks_read_sender_once_and_publish_only_opaque_subject(
     assert len(observed) == 1
     assert observed[0].relation_runtime is not None
     assert raw_sender not in repr(event.extras)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_same_transport_message_isolated_by_bot_account(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    plugin, manager = _proof_plugin(tmp_path)
+    observed: list[RequestRuntimeView] = []
+    _install_proof_tail(monkeypatch, observed)
+    arrivals = 0
+    overlap = asyncio.Event()
+
+    async def select_persona(**_kwargs):
+        nonlocal arrivals
+        arrivals += 1
+        if arrivals == 2:
+            overlap.set()
+        try:
+            await asyncio.wait_for(overlap.wait(), timeout=0.25)
+        except TimeoutError:
+            pass
+        return (
+            "narrator",
+            {
+                "prompt": "quiet",
+                "begin_dialogs": [],
+                "tools": None,
+                "skills": [],
+            },
+            None,
+            False,
+        )
+
+    manager.resolve_selected_persona.side_effect = select_persona
+    left = _ProofEvent(
+        "42",
+        "same-human",
+        self_id="bot-left",
+        message_id="shared-adapter-message",
+    )
+    right = _ProofEvent(
+        "42",
+        "same-human",
+        self_id="bot-right",
+        message_id="shared-adapter-message",
+    )
+
+    await asyncio.gather(
+        EmotionalStatePlugin.on_message(plugin, left),
+        EmotionalStatePlugin.on_message(plugin, right),
+    )
+    await asyncio.gather(
+        EmotionalStatePlugin.on_llm_request(
+            plugin,
+            left,
+            SimpleNamespace(conversation=SimpleNamespace(persona_id=None)),
+        ),
+        EmotionalStatePlugin.on_llm_request(
+            plugin,
+            right,
+            SimpleNamespace(conversation=SimpleNamespace(persona_id=None)),
+        ),
+    )
+
+    assert arrivals == 2, "inbound dedup must include the receiving Bot identity"
+    assert overlap.is_set() is True
+    assert manager.resolve_selected_persona.await_count == 2
+    assert left.sender_reads == right.sender_reads == 1
+    left_view = left.get_extra("_sylanne_runtime_view_v1")
+    right_view = right.get_extra("_sylanne_runtime_view_v1")
+    assert type(left_view) is RequestRuntimeView
+    assert type(right_view) is RequestRuntimeView
+    left_scope = left_view.resolved.scope
+    right_scope = right_view.resolved.scope
+    assert left_scope is not None and right_scope is not None
+    assert left_scope.bot_ref != right_scope.bot_ref
+    assert left_scope.persona_ref != right_scope.persona_ref
+    assert left_scope.session_ref != right_scope.session_ref
+    assert left_view.persona_runtime is not right_view.persona_runtime
+    assert left_view.session_runtime is not right_view.session_runtime
+    assert left_view.relation_runtime is not right_view.relation_runtime
+    assert left_view.persona_runtime.store is not right_view.persona_runtime.store
+    assert left_view.session_runtime.store is left_view.persona_runtime.store
+    assert right_view.session_runtime.store is right_view.persona_runtime.store
+    assert left_view.relation_runtime is not None
+    assert right_view.relation_runtime is not None
+    assert (
+        left_view.relation_runtime.scope.relation_ref
+        != right_view.relation_runtime.scope.relation_ref
+    )
+    assert {id(view) for view in observed} == {id(left_view), id(right_view)}
+
+    left_view.persona_runtime.store.last_user_texts.set(
+        left_scope.storage_token,
+        "left-only",
+    )
+    right_view.persona_runtime.store.last_user_texts.set(
+        right_scope.storage_token,
+        "right-only",
+    )
+    assert (
+        left_view.persona_runtime.store.last_user_texts.get(left_scope.storage_token)
+        == "left-only"
+    )
+    assert (
+        right_view.persona_runtime.store.last_user_texts.get(right_scope.storage_token)
+        == "right-only"
+    )
+    assert (
+        left_view.persona_runtime.store.last_user_texts.get(right_scope.storage_token)
+        is None
+    )
+    assert (
+        right_view.persona_runtime.store.last_user_texts.get(left_scope.storage_token)
+        is None
+    )
 
 
 @pytest.mark.asyncio
