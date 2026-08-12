@@ -105,6 +105,12 @@ def test_meltdown_purge_deletes_kv() -> None:
         _store = type("S", (), {"sylanne_memory_cache": {}})()
         _v2core_runtimes = {"sess/m": {}}
 
+        async def get_kv_data(self, key: str, default=None):  # noqa: ANN001
+            return self._kv.get(key, default)
+
+        async def put_kv_data(self, key: str, value) -> None:  # noqa: ANN001
+            self._kv[key] = value
+
         async def delete_kv_data(self, key: str) -> None:
             self._kv.pop(key, None)
 

@@ -86,7 +86,7 @@ def test_domains_survive_restart() -> None:
 
     async def reload_only(plugin: _KVPlugin) -> dict:
         rt = ig._runtime_for(plugin, "sess:persist")
-        await ig._load_domains(plugin, "sess:persist", rt["domains"])
+        await ig._load_legacy_domains(plugin, "sess:persist", rt["domains"])
         return rt["domains"]
 
     doms2 = asyncio.run(reload_only(p2))
@@ -110,13 +110,13 @@ def test_behavior_last_fired_drops_nonfinite_ts() -> None:
     # 写路径：含 NaN/+inf/-inf 的不应期表落盘 → 只留有限项
     blf = {"laziness": float("nan"), "grudge": float("inf"),
            "jealousy": float("-inf"), "lying": 1234.5}
-    asyncio.run(ig._save_domains(p, "sess:persist", {}, blf))
+    asyncio.run(ig._save_legacy_domains(p, "sess:persist", {}, blf))
     stored = p._kv[key]["_behavior_last_fired"]
     assert stored == {"lying": 1234.5}, f"写路径未滤掉非有限 ts：{stored}"
 
     # 读路径：即便 KV 里混进 NaN，恢复出来也不带它（否则门控被废）
     p._kv[key]["_behavior_last_fired"] = {"x": float("nan"), "y": 99.0}
-    out = asyncio.run(ig._load_domains(p, "sess:persist", {}))
+    out = asyncio.run(ig._load_legacy_domains(p, "sess:persist", {}))
     assert out == {"y": 99.0}, f"读路径未滤掉非有限 ts：{out}"
     assert all(math.isfinite(v) for v in out.values())
 
@@ -128,7 +128,7 @@ def test_load_tolerates_missing_key() -> None:
 
     async def go() -> None:
         rt = ig._runtime_for(p, "sess:persist")
-        await ig._load_domains(p, "sess:persist", rt["domains"])   # KV 空
+        await ig._load_legacy_domains(p, "sess:persist", rt["domains"])  # KV 空
         assert rt["domains"]["distill"]._samples == 0              # 空起步
 
     asyncio.run(go())

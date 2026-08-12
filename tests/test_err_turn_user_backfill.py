@@ -270,7 +270,9 @@ async def test_idempotent_response_hook_ran_then_after_message_sent_fires_too() 
     汇总两次驱动，`_backfill_user_if_framework_skips` 总调用次数必须恰好 1。"""
 
     class _FullTurnPlugin:
-        _on_llm_response_inner = EmotionalStatePlugin._on_llm_response_inner
+        _on_llm_response_with_bound_runtime = (
+            EmotionalStatePlugin._on_llm_response_with_bound_runtime
+        )
         _on_after_message_sent_err_backfill = (
             EmotionalStatePlugin._on_after_message_sent_err_backfill
         )
@@ -289,7 +291,7 @@ async def test_idempotent_response_hook_ran_then_after_message_sent_fires_too() 
     event = _MarkedEvent(extras={})
     resp = SimpleNamespace(role="assistant", completion_text="嗯")
 
-    await p._on_llm_response_inner(event, resp)  # 响应钩子跑过 -> 补写 1 次 + handled=True
+    await p._on_llm_response_with_bound_runtime(event, resp)
     await p._on_after_message_sent_err_backfill(event)  # handled=True -> 早退
 
     assert p._backfill_user_if_framework_skips.await_count == 1, (
@@ -339,7 +341,9 @@ async def test_response_pipeline_survives_event_without_extra_api() -> None:
     这里直接放行真实实现验证零异常。"""
 
     class _RespPipelinePlugin:
-        _on_llm_response_inner = EmotionalStatePlugin._on_llm_response_inner
+        _on_llm_response_with_bound_runtime = (
+            EmotionalStatePlugin._on_llm_response_with_bound_runtime
+        )
         _backfill_user_if_framework_skips = (
             EmotionalStatePlugin._backfill_user_if_framework_skips
         )
@@ -360,7 +364,7 @@ async def test_response_pipeline_survives_event_without_extra_api() -> None:
     event = _LegacyEventNoExtra()
     resp = SimpleNamespace(role="assistant", completion_text="")
 
-    await p._on_llm_response_inner(event, resp)  # 不应抛异常
+    await p._on_llm_response_with_bound_runtime(event, resp)  # 不应抛异常
 
 
 @pytest.mark.asyncio
@@ -595,6 +599,9 @@ async def test_hook_exception_does_not_block_sibling_handler_in_manual_chain() -
             )
             self.reset_called_with: list = []
 
+        def _bound_runtime(self):
+            return SimpleNamespace(scope=SimpleNamespace(storage_token=SESSION_KEY))
+
         def _on_session_reset(self, session_key: str) -> None:
             self.reset_called_with.append(session_key)
 
@@ -611,7 +618,10 @@ async def test_hook_exception_does_not_block_sibling_handler_in_manual_chain() -
 
     handlers = [
         p._on_after_message_sent_err_backfill,
-        p.on_after_message_sent_reset_ghost_cleanup,
+        functools.partial(
+            EmotionalStatePlugin.on_after_message_sent_reset_ghost_cleanup.__wrapped__,
+            p,
+        ),
     ]
     for handler in handlers:
         try:

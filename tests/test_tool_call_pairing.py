@@ -173,7 +173,7 @@ class TestOnDecoratingResultStrip(unittest.TestCase):
         seg = self._plain("你好<thinking>内部推理</thinking>世界")
         result = SimpleNamespace(chain=[seg])
         event = SimpleNamespace(get_result=lambda: result)
-        asyncio.run(plugin.on_decorating_result(event))
+        asyncio.run(type(plugin).on_decorating_result.__wrapped__(plugin, event))
         remaining = "".join(
             getattr(c, "text", "") for c in result.chain
         )
@@ -184,7 +184,7 @@ class TestOnDecoratingResultStrip(unittest.TestCase):
         seg = self._plain("<thinking>只有思考</thinking>")
         result = SimpleNamespace(chain=[seg])
         event = SimpleNamespace(get_result=lambda: result)
-        asyncio.run(plugin.on_decorating_result(event))
+        asyncio.run(type(plugin).on_decorating_result.__wrapped__(plugin, event))
         # 纯 thinking → 段被丢弃，chain 为空
         self.assertEqual(len(result.chain), 0)
 
@@ -192,7 +192,7 @@ class TestOnDecoratingResultStrip(unittest.TestCase):
         plugin = self._make_plugin()
         event = SimpleNamespace(get_result=lambda: None)
         # 不应抛异常
-        asyncio.run(plugin.on_decorating_result(event))
+        asyncio.run(type(plugin).on_decorating_result.__wrapped__(plugin, event))
 
 
 if __name__ == "__main__":

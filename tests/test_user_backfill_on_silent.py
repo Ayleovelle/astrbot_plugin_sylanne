@@ -76,7 +76,9 @@ class _Plugin:
     _framework_will_persist_this_turn = EmotionalStatePlugin._framework_will_persist_this_turn
     _agent_was_aborted = EmotionalStatePlugin._agent_was_aborted
     _backfill_user_if_framework_skips = EmotionalStatePlugin._backfill_user_if_framework_skips
-    _on_llm_response_inner = EmotionalStatePlugin._on_llm_response_inner
+    _on_llm_response_with_bound_runtime = (
+        EmotionalStatePlugin._on_llm_response_with_bound_runtime
+    )
 
     def __init__(
         self,
@@ -282,7 +284,7 @@ async def test_5_v2core_fallthrough_legacy_silent_still_backfills(
     event = _Event(is_stopped=False, req=_ReqStub(has_conversation=True))
     resp = _Resp("")  # legacy 空 completion，静默不发（SILENT 等价形态）
 
-    await p._on_llm_response_inner(event, resp)
+    await p._on_llm_response_with_bound_runtime(event, resp)
 
     assert p.user_sync_calls == [("sk1", "user", "在干嘛呢")], (
         f"v2core 回落后 legacy SILENT 也应经收口恰好补写一次，实际：{p.user_sync_calls!r}"
@@ -402,7 +404,7 @@ async def test_7_legacy_raises_finally_still_backfills(monkeypatch: pytest.Monke
     resp = _Resp("")
 
     with pytest.raises(RuntimeError, match="legacy boom"):
-        await p._on_llm_response_inner(event, resp)
+        await p._on_llm_response_with_bound_runtime(event, resp)
 
     assert p.user_sync_calls == [("sk1", "user", "在干嘛呢")], (
         f"legacy 抛异常也不应吞掉 finally 补写，实际：{p.user_sync_calls!r}"

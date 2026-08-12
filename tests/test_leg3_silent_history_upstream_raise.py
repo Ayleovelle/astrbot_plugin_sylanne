@@ -79,7 +79,9 @@ class _Plugin:
     _framework_will_persist_this_turn = EmotionalStatePlugin._framework_will_persist_this_turn
     _agent_was_aborted = EmotionalStatePlugin._agent_was_aborted
     _backfill_user_if_framework_skips = EmotionalStatePlugin._backfill_user_if_framework_skips
-    _on_llm_response_inner = EmotionalStatePlugin._on_llm_response_inner
+    _on_llm_response_with_bound_runtime = (
+        EmotionalStatePlugin._on_llm_response_with_bound_runtime
+    )
 
     def __init__(self, *, text: str, legacy_raises: bool = False) -> None:
         self._text_value = text
@@ -119,7 +121,7 @@ async def test_backfill_fires_once_when_v2core_bridge_raises(monkeypatch: pytest
     event = _Event()
     resp = _Resp("")  # SILENT 形态：completion 空
 
-    await p._on_llm_response_inner(event, resp)
+    await p._on_llm_response_with_bound_runtime(event, resp)
 
     assert p.user_sync_calls == [("sk1", "user", "在干嘛呢")], (
         f"上游 v2core 异常下补写应恰好一次，实际：{p.user_sync_calls!r}"
@@ -134,12 +136,12 @@ async def test_backfill_fires_exactly_once_no_double_write(monkeypatch: pytest.M
     event = _Event()
     resp = _Resp("")
 
-    await p._on_llm_response_inner(event, resp)
+    await p._on_llm_response_with_bound_runtime(event, resp)
 
     assert p.user_sync_calls == [("sk1", "user", "喂")], f"应恰好一次，实际：{p.user_sync_calls!r}"
 
     # 幂等自检：finally 只跑一次，同一事件循环内不会因为重复调用而堆积。
-    await p._on_llm_response_inner(event, resp)
+    await p._on_llm_response_with_bound_runtime(event, resp)
     assert p.user_sync_calls == [
         ("sk1", "user", "喂"),
         ("sk1", "user", "喂"),
@@ -154,7 +156,7 @@ async def test_empty_text_not_synced(monkeypatch: pytest.MonkeyPatch) -> None:
     event = _Event()
     resp = _Resp("")
 
-    await p._on_llm_response_inner(event, resp)
+    await p._on_llm_response_with_bound_runtime(event, resp)
 
     assert p.user_sync_calls == [], f"空文本不应同步，实际：{p.user_sync_calls!r}"
 
@@ -168,7 +170,7 @@ async def test_backfill_still_fires_when_legacy_raises(monkeypatch: pytest.Monke
     resp = _Resp("")
 
     with pytest.raises(RuntimeError, match="legacy boom"):
-        await p._on_llm_response_inner(event, resp)
+        await p._on_llm_response_with_bound_runtime(event, resp)
 
     assert p.user_sync_calls == [("sk1", "user", "在干嘛呢")], (
         f"legacy 抛异常也不应吞掉 finally 补写，实际：{p.user_sync_calls!r}"

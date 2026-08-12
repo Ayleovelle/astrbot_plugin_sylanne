@@ -189,12 +189,12 @@ def test_adaptation_registered_and_autopersisted() -> None:
         ad._topics = {"加班": {"aff": 0.7, "last_turn": 5, "raised_turn": 2}}
         snap = ad.to_dict()
         # 走真落盘
-        await ig._save_domains(p, sk, rt["domains"], {})
+        await ig._save_legacy_domains(p, sk, rt["domains"], {})
         assert any("v2core_domains" in k for k in p._kv)
         # 清运行态重建 → 从 KV 恢复
         p._v2core_runtimes = {}
         rt2 = ig._runtime_for(p, sk)
-        await ig._load_domains(p, sk, rt2["domains"])
+        await ig._load_legacy_domains(p, sk, rt2["domains"])
         return {"snap": snap, "restored": rt2["domains"]["adaptation"].to_dict()}
 
     out = asyncio.run(go())

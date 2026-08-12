@@ -175,8 +175,10 @@ def test_behavior_last_fired_persists_roundtrip() -> None:
     p = _KVPlugin()
 
     async def go():
-        await ig._save_domains(p, "s", {}, {"grudge": 1000.0, "lying": 2000.0})
-        return await ig._load_domains(p, "s", {})
+        await ig._save_legacy_domains(
+            p, "s", {}, {"grudge": 1000.0, "lying": 2000.0}
+        )
+        return await ig._load_legacy_domains(p, "s", {})
 
     restored = asyncio.run(go())
     assert restored.get("grudge") == 1000.0 and restored.get("lying") == 2000.0
