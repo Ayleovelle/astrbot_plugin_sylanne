@@ -732,6 +732,11 @@ class WebUIRoutes:
 
     def __init__(self, plugin: PluginHost) -> None:
         self._p = plugin
+        self._services = PluginServices(
+            config=getattr(plugin, "config", None) or getattr(plugin, "_config", {}),
+            logger=getattr(plugin, "logger", logger),
+            context=getattr(plugin, "context", None),
+        )
 
     def _bound_webui_session_key(self, requested_session: str = "") -> str | None:
         """Resolve only the exact session already bound to this request context.
@@ -2735,7 +2740,7 @@ class WebUIRoutes:
         """返回插件 logo.png，设置正确的 Content-Type。"""
         from astrbot.api.web import error_response, file_response
 
-        logo_path = Path(self._pluginlugin_dir) / "logo.png"
+        logo_path = Path(self._plugin_dir) / "logo.png"
         if not logo_path.exists():
             return error_response("Not Found", status_code=404)
         return file_response(logo_path, content_type="image/png")
@@ -2744,7 +2749,7 @@ class WebUIRoutes:
         """通过 AstrBot 内置 Web 服务器提供 WebUI dashboard HTML 页面。"""
         from astrbot.api.web import error_response, file_response
 
-        dashboard_path = Path(self._pluginlugin_dir) / "UI" / "index.html"
+        dashboard_path = Path(self._plugin_dir) / "UI" / "index.html"
         if not dashboard_path.exists():
             return error_response("Dashboard not found", status_code=404)
         return file_response(

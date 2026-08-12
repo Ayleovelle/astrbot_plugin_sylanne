@@ -29,6 +29,65 @@ def test_config_presets():
         assert "values" in preset
 
 
+def test_probe_handler_reads_the_plugin_config_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The active probe route must not depend on an unbound service container."""
+    import sylanne_alpha.webui_routes as webui_routes
+
+    async def no_network_probe(_fn):
+        return {"ok": False, "error": "test"}
+
+    monkeypatch.setattr(webui_routes.asyncio, "to_thread", no_network_probe)
+    plugin = SimpleNamespace(
+        _config={
+            "sylanne_webui_enabled": False,
+            "sylanne_webui_host": "127.0.0.9",
+            "sylanne_webui_port": 2818,
+        },
+        _webui_runtime_info=lambda: {"runtime_id": "probe-test"},
+        _iter_loaded_webui_server_modules=lambda: [],
+    )
+
+    payload = asyncio.run(webui_routes.WebUIRoutes(plugin).probe_handler())
+
+    assert payload["enabled"] is False
+    assert payload["host"] == "127.0.0.9"
+    assert payload["port"] == 2818
+
+
+@pytest.mark.parametrize(
+    ("handler_name", "relative_path", "content_type"),
+    [
+        ("logo_handler", "logo.png", "image/png"),
+        ("dashboard_handler", "UI/index.html", "text/html; charset=utf-8"),
+    ],
+)
+def test_static_handlers_resolve_the_canonical_plugin_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    handler_name: str,
+    relative_path: str,
+    content_type: str,
+) -> None:
+    """Logo and dashboard routes must use WebUIRoutes._plugin_dir."""
+    from sylanne_alpha.webui_routes import WebUIRoutes
+
+    target = tmp_path / relative_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"fixture")
+    web = ModuleType("astrbot.api.web")
+    web.error_response = lambda message, status_code: {"error": message, "status": status_code}
+    web.file_response = lambda path, content_type: {
+        "path": Path(path),
+        "content_type": content_type,
+    }
+    monkeypatch.setitem(sys.modules, "astrbot.api.web", web)
+    monkeypatch.setattr(WebUIRoutes, "_plugin_dir", str(tmp_path))
+
+    response = asyncio.run(getattr(WebUIRoutes(SimpleNamespace()), handler_name)())
+
+    assert response == {"path": target, "content_type": content_type}
+
+
 def _schema() -> dict:
     path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
     return json.loads(path.read_text(encoding="utf-8"))
