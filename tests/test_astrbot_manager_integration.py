@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 from sylanne_alpha import transient_context
 from sylanne_alpha.scope_contracts import ResolvedScope
 from sylanne_alpha.scope_identity import PersonaSource
+from sylanne_alpha.scope_repository import ScopeRepository
 from sylanne_alpha.scope_runtime import ScopeRuntimeRegistry
 from tests.scope_fixtures import scopes as build_scopes
 
@@ -206,25 +209,32 @@ class TestIntegrationFallback(unittest.TestCase):
     def test_full_lifecycle_without_managers(self):
         main = importlib.import_module("main")
         plugin = main.EmotionalStatePlugin(context=SimpleNamespace(), config={})
-        result = asyncio.run(
-            plugin.observe_request(
-                "room:fallback",
-                text="test",
-                confidence=0.7,
-                flags=["safe"],
-                now=1.0,
-            )
+        repository = ScopeRepository(Path(tempfile.mkdtemp(prefix="manager-scope-")))
+        plugin._scope_runtime_registry.bind_repository(repository)
+        scope = repository.create_scope(
+            build_scopes.__wrapped__().bot_a_persona_a,
+            expected_absent=True,
         )
-        self.assertEqual(result["schema_version"], "sylanne.alpha.body.v1")
-        result2 = asyncio.run(
-            plugin.observe_response(
-                "room:fallback",
-                text="reply",
-                confidence=0.8,
-                flags=["safe"],
-                now=2.0,
+        with plugin._bind_runtime_for_scope(scope):
+            result = asyncio.run(
+                plugin.observe_request(
+                    scope.storage_token,
+                    text="test",
+                    confidence=0.7,
+                    flags=["safe"],
+                    now=1.0,
+                )
             )
-        )
+            self.assertEqual(result["schema_version"], "sylanne.alpha.body.v1")
+            result2 = asyncio.run(
+                plugin.observe_response(
+                    scope.storage_token,
+                    text="reply",
+                    confidence=0.8,
+                    flags=["safe"],
+                    now=2.0,
+                )
+            )
         self.assertGreater(result2["turns"], result["turns"])
 
 

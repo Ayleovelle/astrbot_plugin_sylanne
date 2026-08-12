@@ -234,14 +234,21 @@ class TestH2PresenceAntiTask:
             system_prompt = "你是苏思澜。不是接活办任务。"
 
         req = _Req()
-        out = dm.apply(_Ev(), req, _Buf())
+        fragments: list[tuple] = []
+
+        def _add_fragment(*args):
+            fragments.append(args)
+            return True
+
+        out = dm.apply(_Ev(), req, _Buf(), add_fragment=_add_fragment)
         assert out["should_contract"] is True
         assert "astrbot_execute_python" in out["gated_tools"]
         assert "anysearch_batch_search" in out["gated_tools"]
         assert "anysearch_batch_search" not in req.func_tool.names()
         assert "clone_tts" in req.func_tool.names()  # 合法工具保留
-        assert "[本轮提示]" in req.system_prompt  # 契约注入
-        assert "去人设" not in req.system_prompt  # B1：绝不要求去人设（保住苏思澜）
+        assert fragments and "[本轮提示]" in fragments[0][2]
+        assert "去人设" not in fragments[0][2]  # B1：绝不要求去人设（保住苏思澜）
+        assert req.system_prompt == "你是苏思澜。不是接活办任务。"
 
     def test_wide_gate_chat_no_attachment_gates_tools_no_contract(self) -> None:
         """放宽门控：无附件的普通闲聊也摘逃生舱工具，但不注契约（非纠正链）。"""

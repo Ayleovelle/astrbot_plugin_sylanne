@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 from sylanne_alpha.life_simulation import LifeEvent, _event_from_dict, _event_to_dict
 from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline
+from sylanne_alpha.session_state_store import SessionStateStore
 
 
 # ---- origin_session roundtrip ----
@@ -73,11 +74,11 @@ class _SF:
         return "Group" in sk or "group" in sk
 
 
-class _Store:
+class _Store(SessionStateStore):
     def __init__(self, hosts):
-        self.hosts = _Hosts(hosts)
-        self.relationship_register_state = _Reg()
-        self.intimacy_override = _Reg()
+        super().__init__()
+        for key, host in hosts.items():
+            self.hosts.set(key, host)
 
 
 class _Plugin:
@@ -94,6 +95,10 @@ def _pipe(plugin):
     pipe = LLMRequestPipeline.__new__(LLMRequestPipeline)
     pipe._p = plugin
     return pipe
+
+
+def _owned_tasks(plugin: _Plugin, session_key: str) -> list:
+    return list(plugin._store.background_tasks.get(session_key, set()))
 
 
 def _romantic(sender="owner-1"):
@@ -169,6 +174,12 @@ class _PendingCtx:
         return self.data.pop(k, default)
 
 
+class _TaskList(list):
+    def discard(self, task):
+        if task in self:
+            self.remove(task)
+
+
 def test_life_sim_outreach_backfills_origin_session():
     """T2-07②：目标会话确定后应回填 LifeEvent.origin_session。
 
@@ -182,7 +193,7 @@ def test_life_sim_outreach_backfills_origin_session():
     p = _Plugin({"priv:owner-1": _Host(100.0)})
     p._store.relationship_register_state.set("priv:owner-1", _romantic())
     p._store.pending_outreach_context = _PendingCtx()
-    p._background_tasks: list = []
+    p._background_tasks = _TaskList()
 
     sim = LifeSimulator(config={})
     ev = LifeEvent(text="摸鱼中", mood="happy", urgency=0.1, timestamp=1.0)
@@ -196,7 +207,7 @@ def test_life_sim_outreach_backfills_origin_session():
 
     assert ev.origin_session == "priv:owner-1"
     # 清理内部起的 5 分钟 fallback 后台任务，避免测试遗留 pending task 警告。
-    for t in list(p._background_tasks):
+    for t in _owned_tasks(p, "priv:owner-1"):
         t.cancel()
 
 
@@ -209,12 +220,12 @@ def test_life_sim_outreach_no_event_id_does_not_crash():
     p = _Plugin({"priv:owner-1": _Host(100.0)})
     p._store.relationship_register_state.set("priv:owner-1", _romantic())
     p._store.pending_outreach_context = _PendingCtx()
-    p._background_tasks: list = []
+    p._background_tasks = _TaskList()
     p._life_simulator = LifeSimulator(config={})
 
     pipe = _pipe(p)
     asyncio.run(pipe._life_sim_outreach("摸鱼中", "开心", None))
-    for t in list(p._background_tasks):
+    for t in _owned_tasks(p, "priv:owner-1"):
         t.cancel()
 
 
@@ -276,8 +287,9 @@ def test_life_sim_outreach_consumes_followup_after_bridge_dispatch(monkeypatch) 
     p = _Plugin({"priv:owner-1": _Host(100.0)})
     p._store.relationship_register_state.set("priv:owner-1", _romantic())
     p._store.pending_outreach_context = _PendingCtx()
-    p._background_tasks: list = []
-    p._memory_system_for_session = lambda sk: mem
+    p._background_tasks = _TaskList()
+    p._store.memory_systems.set("priv:owner-1", mem)
+    p._memory_system_for_session = p._store.memory_systems.get
     p.config["sylanne_alpha_proactive_bridge_enabled"] = True
 
     sim = LifeSimulator(config={})
@@ -300,8 +312,9 @@ def test_life_sim_outreach_consumes_followup_after_bridge_dispatch(monkeypatch) 
 
     async def _drive() -> None:
         await pipe._life_sim_outreach("摸鱼中", "开心", intent)
-        assert p._background_tasks, "应已排入 5min fallback 后台任务"
-        await asyncio.gather(*p._background_tasks)
+        tasks = _owned_tasks(p, "priv:owner-1")
+        assert tasks, "应已排入 5min fallback 后台任务"
+        await asyncio.gather(*tasks)
 
     asyncio.run(_drive())
 

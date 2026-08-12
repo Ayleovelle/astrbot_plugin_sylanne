@@ -29,6 +29,7 @@ from sylanne_alpha.scope_contracts import (
     SessionScope,
 )
 from sylanne_alpha.scope_identity import PersonaSource
+from sylanne_alpha.scope_repository import ScopeRepository
 from sylanne_alpha.scope_runtime import ScopeUnavailable
 
 
@@ -121,11 +122,14 @@ def _load_main_module():
     return importlib.import_module("main")
 
 
-def _make_plugin(main_mod):
-    return main_mod.EmotionalStatePlugin(context=SimpleNamespace(), config={})
+def _make_plugin(main_mod, tmp_path):
+    plugin = main_mod.EmotionalStatePlugin(context=SimpleNamespace(), config={})
+    repository = ScopeRepository(tmp_path / "scope-v1")
+    plugin._scope_runtime_registry.bind_repository(repository)
+    return plugin, repository
 
 
-def _scope_for_reset(label: str) -> SessionScope:
+def _scope_for_reset(label: str, repository: ScopeRepository) -> SessionScope:
     suffix = hashlib.sha256(label.encode("utf-8")).hexdigest()[:20]
     bot = BotRef(token=f"bot_v1_{suffix}", generation=0)
     persona = PersonaRevisionRef(
@@ -135,12 +139,17 @@ def _scope_for_reset(label: str) -> SessionScope:
         source_fingerprint="b" * 64,
         lifecycle_generation=0,
     )
-    return SessionScope(
-        bot_ref=bot,
-        persona_ref=persona,
-        session_ref=SessionRef(token=f"session_v1_{suffix}", bot_ref=bot, generation=0),
-        storage_token=f"scope_v1_{suffix}",
-        scope_generation=0,
+    return repository.create_scope(
+        SessionScope(
+            bot_ref=bot,
+            persona_ref=persona,
+            session_ref=SessionRef(
+                token=f"session_v1_{suffix}", bot_ref=bot, generation=0
+            ),
+            storage_token=f"scope_v1_{suffix}",
+            scope_generation=0,
+        ),
+        expected_absent=True,
     )
 
 
@@ -164,9 +173,9 @@ def _resolved_scope(scope: SessionScope) -> ResolvedScope:
     )
 
 
-def test_unbound_private_session_access_fails_closed_without_runtime_growth():
+def test_unbound_private_session_access_fails_closed_without_runtime_growth(tmp_path):
     main_mod = _load_main_module()
-    plugin = _make_plugin(main_mod)
+    plugin, _repository = _make_plugin(main_mod, tmp_path)
     registry = plugin._scope_runtime_registry
 
     with pytest.raises(ScopeUnavailable):
@@ -178,10 +187,10 @@ def test_unbound_private_session_access_fails_closed_without_runtime_growth():
     assert registry.session_count == 0
 
 
-def test_on_session_reset_clears_l1_epoch_and_buffers_preserves_l2():
+def test_on_session_reset_clears_l1_epoch_and_buffers_preserves_l2(tmp_path):
     main_mod = _load_main_module()
-    plugin = _make_plugin(main_mod)
-    scope = _scope_for_reset("reset")
+    plugin, repository = _make_plugin(main_mod, tmp_path)
+    scope = _scope_for_reset("reset", repository)
 
     with plugin._bind_runtime_for_scope(scope):
         session_key = scope.storage_token
@@ -216,11 +225,11 @@ def test_on_session_reset_clears_l1_epoch_and_buffers_preserves_l2():
         assert not any("日本旅行" in r.text for r in after)
 
 
-def test_after_message_sent_hook_triggers_on_clean_ltm_session_extra():
+def test_after_message_sent_hook_triggers_on_clean_ltm_session_extra(tmp_path):
     """钩子只在 event.get_extra('_clean_ltm_session') 为真时才触发清理。"""
     main_mod = _load_main_module()
-    plugin = _make_plugin(main_mod)
-    scope = _scope_for_reset("hook")
+    plugin, repository = _make_plugin(main_mod, tmp_path)
+    scope = _scope_for_reset("hook", repository)
     with plugin._bind_runtime_for_scope(scope):
         mem = plugin._memory_system_for_scope(scope)
         mem.write_summary("幽灵：上次聊的项目", session_key=scope.storage_token)
@@ -237,9 +246,12 @@ def test_after_message_sent_hook_triggers_on_clean_ltm_session_extra():
 
     # 未设置标记：不应清理。
     ev_noop = _FakeEvent({"_sylanne_resolved_scope_v1": _resolved_scope(scope)}, "raw")
-    asyncio.run(
-        plugin.on_after_message_sent_reset_ghost_cleanup(ev_noop)
-    )
+    with plugin._bind_runtime_for_scope(scope):
+        asyncio.run(
+            type(plugin).on_after_message_sent_reset_ghost_cleanup.__wrapped__(
+                plugin, ev_noop
+            )
+        )
     assert len(mem._l1) == 1, "未设置 _clean_ltm_session 时不应清理"
 
     # 设置标记（复刻 AstrBot 内置 /reset 的 set_extra 行为）：应清理。
@@ -250,18 +262,21 @@ def test_after_message_sent_hook_triggers_on_clean_ltm_session_extra():
         },
         "raw",
     )
-    asyncio.run(
-        plugin.on_after_message_sent_reset_ghost_cleanup(ev_reset)
-    )
+    with plugin._bind_runtime_for_scope(scope):
+        asyncio.run(
+            type(plugin).on_after_message_sent_reset_ghost_cleanup.__wrapped__(
+                plugin, ev_reset
+            )
+        )
     assert len(mem._l1) == 0, "设置 _clean_ltm_session=True 后应清空 L1"
     assert mem._recall_epoch_boundary > 0.0
 
 
-def test_on_session_reset_does_not_touch_l3_nodes_object_identity():
+def test_on_session_reset_does_not_touch_l3_nodes_object_identity(tmp_path):
     """L3 图谱节点对象本身不被清空/替换（只在门控条件下不再入池，不动数据结构）。"""
     main_mod = _load_main_module()
-    plugin = _make_plugin(main_mod)
-    scope = _scope_for_reset("l3")
+    plugin, repository = _make_plugin(main_mod, tmp_path)
+    scope = _scope_for_reset("l3", repository)
     with plugin._bind_runtime_for_scope(scope):
         mem = plugin._memory_system_for_scope(scope)
 

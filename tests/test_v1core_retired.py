@@ -42,7 +42,9 @@ def test_v2_speak_continues_to_delivery_without_v1_fallback_language() -> None:
 def test_main_routes_unsuppressed_reply_to_delivery_once() -> None:
     from main import EmotionalStatePlugin
 
-    source = inspect.getsource(EmotionalStatePlugin._on_llm_response_inner)
+    source = inspect.getsource(
+        EmotionalStatePlugin._on_llm_response_with_bound_runtime
+    )
     assert "suppress_delivery = await apply_v2core_response" in source
     assert "if not suppress_delivery:" in source
     assert source.count(
