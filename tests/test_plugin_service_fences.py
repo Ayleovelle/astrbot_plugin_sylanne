@@ -606,6 +606,32 @@ class _PoisonPlugin:
         object.__setattr__(self, name, value)
 
 
+def test_explicit_marker_without_services_tool_config_fails_closed() -> None:
+    plugin = _PoisonPlugin()
+    api = PublicAPI.__new__(PublicAPI)
+    api._p = plugin
+    api._services_explicit = True
+
+    result = json.loads(asyncio.run(api.query_agent_state_tool(state="emotion")))
+
+    assert result["error"] == "explicit_state_read_capability_required"
+    assert plugin.ambient_accesses == []
+
+
+def test_explicit_marker_without_services_assessor_context_fails_closed() -> None:
+    plugin = _PoisonPlugin()
+    api = PublicAPI.__new__(PublicAPI)
+    api._p = plugin
+    api._services_explicit = True
+    api._explicit_internal_assessor_llm_cond = None
+    api._explicit_internal_assessor_llm_inflight = 0
+
+    result = asyncio.run(api._call_internal_assessor_llm(prompt="stay isolated"))
+
+    assert result.completion_text == ""
+    assert plugin.ambient_accesses == []
+
+
 class _IsolatedHost:
     def __init__(self, name: str) -> None:
         self.name = name

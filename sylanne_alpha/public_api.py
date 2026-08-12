@@ -1140,7 +1140,11 @@ class PublicAPI:
         cfg = (
             services.config
             if services is not None
-            else getattr(self._p, "config", {})
+            else (
+                {}
+                if getattr(self, "_services_explicit", False)
+                else getattr(self._p, "config", {})
+            )
         ) or {}
         max_chars = int(cfg.get("llm_tool_response_max_chars", 400))
         raw = self._tool_json(payload)
@@ -2129,7 +2133,11 @@ class PublicAPI:
             context = (
                 services.context
                 if services is not None
-                else getattr(self._p, "context", None)
+                else (
+                    None
+                    if explicit_services
+                    else getattr(self._p, "context", None)
+                )
             )
             if hasattr(context, "llm_generate"):
                 result = await context.llm_generate(**kwargs)
