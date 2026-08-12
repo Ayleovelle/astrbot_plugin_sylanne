@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from .scope_identity import PersonaSource
 
 _TOKEN_PAYLOAD = re.compile(r"[A-Za-z0-9_-]+\Z", re.ASCII)
+_SCOPE_STORAGE_TOKEN = re.compile(r"scope_v1_[A-Za-z0-9_-]{43}\Z", re.ASCII)
 _IDENTITY_QUALITY = "event_get_sender_id"
 _IDENTITY_QUALITY_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}\Z", re.ASCII)
 _SUBJECT_KIND = "user"
@@ -25,6 +26,18 @@ def _require_token(value: object, prefix: str) -> str:
         or _TOKEN_PAYLOAD.fullmatch(value[len(prefix) :]) is None
     ):
         raise ValueError(f"invalid {prefix} token")
+    return value
+
+
+def is_scope_storage_token(value: object) -> bool:
+    """Return whether ``value`` has the exact HMAC-SHA256 scope token shape."""
+
+    return type(value) is str and _SCOPE_STORAGE_TOKEN.fullmatch(value) is not None
+
+
+def _require_scope_storage_token(value: object) -> str:
+    if not is_scope_storage_token(value):
+        raise ValueError("invalid scope_v1_ storage token")
     return value
 
 
@@ -164,7 +177,7 @@ class SessionScope:
         session_ref = _require_session_ref(self.session_ref)
         _require_persona_belongs(bot_ref, persona_ref)
         _require_session_belongs(bot_ref, session_ref)
-        _require_token(self.storage_token, "scope_v1_")
+        _require_scope_storage_token(self.storage_token)
         _require_generation(self.scope_generation, "scope_generation")
 
     def storage_components(self) -> tuple[str, str, str]:
@@ -554,4 +567,5 @@ __all__ = [
     "TurnDeliveryLease",
     "TurnSubjectProof",
     "VerifiedSubjectInput",
+    "is_scope_storage_token",
 ]

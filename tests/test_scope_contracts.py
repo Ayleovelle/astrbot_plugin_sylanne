@@ -26,7 +26,8 @@ from sylanne_alpha.scope_contracts import (
     SessionScope,
     TurnDeliveryLease,
 )
-from sylanne_alpha.scope_identity import PersonaSource
+from sylanne_alpha.scope_identity import PersonaSource, ScopeIdentityKey
+from tests.scope_fixtures import scope_storage_token
 
 
 def _bot() -> BotRef:
@@ -66,13 +67,57 @@ def test_session_scope_uses_only_opaque_storage_components_and_is_frozen() -> No
         bot_ref=bot,
         persona_ref=persona,
         session_ref=session,
-        storage_token="scope_v1_X",
+        storage_token=scope_storage_token("contract-frozen"),
         scope_generation=3,
     )
 
     assert scope.storage_components() == ("bot_v1_A", "persona_v1_P", "session_v1_S")
     with pytest.raises(FrozenInstanceError):
         scope.storage_token = "scope_v1_changed"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    "storage_token",
+    [
+        "scope_v1_fake",
+        "scope_v1_" + "a" * 42,
+        "scope_v1_" + "a" * 44,
+    ],
+)
+def test_session_scope_rejects_noncanonical_storage_token_shapes(
+    storage_token: str,
+) -> None:
+    bot = _bot()
+
+    with pytest.raises(ValueError):
+        SessionScope(
+            bot_ref=bot,
+            persona_ref=_persona(bot),
+            session_ref=_session(bot),
+            storage_token=storage_token,
+            scope_generation=3,
+        )
+
+
+def test_session_scope_accepts_identity_minted_storage_token() -> None:
+    bot = _bot()
+    persona = _persona(bot)
+    session = _session(bot)
+    token = ScopeIdentityKey(
+        key_id="scope-contract-test",
+        secret=b"k" * 32,
+    ).scope_token(bot, persona, session)
+
+    scope = SessionScope(
+        bot_ref=bot,
+        persona_ref=persona,
+        session_ref=session,
+        storage_token=token,
+        scope_generation=3,
+    )
+
+    assert scope.storage_token == token
+    assert len(token.removeprefix("scope_v1_")) == 43
 
 
 def test_session_scope_rejects_persona_owned_by_a_different_bot() -> None:
@@ -84,7 +129,7 @@ def test_session_scope_rejects_persona_owned_by_a_different_bot() -> None:
             bot_ref=bot,
             persona_ref=_persona(other_bot),
             session_ref=_session(bot),
-            storage_token="scope_v1_X",
+            storage_token=scope_storage_token("contract-parent-mismatch"),
             scope_generation=3,
         )
 
@@ -198,7 +243,7 @@ def test_api_diagnostics_and_delivery_contracts_keep_sensitive_fields_redacted()
         bot_ref=bot,
         persona_ref=persona,
         session_ref=session,
-        storage_token="scope_v1_X",
+        storage_token=scope_storage_token("contract-resolved"),
         scope_generation=3,
     )
 
@@ -324,7 +369,7 @@ def test_resolved_scope_accepts_only_complete_success_or_disabled_states() -> No
         bot_ref=bot,
         persona_ref=_persona(bot),
         session_ref=_session(bot),
-        storage_token="scope_v1_X",
+        storage_token=scope_storage_token("contract-active"),
         scope_generation=3,
     )
     source = _persona_source()
@@ -363,7 +408,7 @@ def test_resolved_scope_rejects_mixed_success_states(overrides: dict[str, object
             bot_ref=bot,
             persona_ref=_persona(bot),
             session_ref=_session(bot),
-            storage_token="scope_v1_X",
+            storage_token=scope_storage_token("contract-disabled"),
             scope_generation=3,
         ),
         "persona_source": _persona_source(),
@@ -419,7 +464,7 @@ def test_resolved_scope_rejects_untrusted_persona_source_without_leaking_repr() 
                 bot_ref=bot,
                 persona_ref=_persona(bot),
                 session_ref=_session(bot),
-                storage_token="scope_v1_X",
+                storage_token=scope_storage_token("contract-redaction"),
                 scope_generation=3,
             ),
             persona_source={"prompt": marker},  # type: ignore[arg-type]

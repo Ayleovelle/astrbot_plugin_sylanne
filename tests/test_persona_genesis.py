@@ -27,6 +27,7 @@ from sylanne_alpha.scope_repository import (
     StaleScopeWrite,
 )
 from sylanne_alpha.scope_runtime import PersonaRuntime, ScopeMismatch, ScopeRuntimeRegistry
+from tests.scope_fixtures import scope_storage_token
 
 
 def _profile() -> dict[str, object]:
@@ -84,7 +85,7 @@ def _scope_for_persona(persona: PersonaRevisionRef, *, index: int = 0) -> Sessio
         bot_ref=persona.bot_ref,
         persona_ref=persona,
         session_ref=session,
-        storage_token=f"scope_v1_GenesisOwner{suffix}",
+        storage_token=scope_storage_token(f"genesis-owner-{suffix}"),
         scope_generation=0,
     )
 

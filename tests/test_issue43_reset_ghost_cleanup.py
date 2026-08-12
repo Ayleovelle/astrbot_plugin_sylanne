@@ -31,6 +31,7 @@ from sylanne_alpha.scope_contracts import (
 from sylanne_alpha.scope_identity import PersonaSource
 from sylanne_alpha.scope_repository import ScopeRepository
 from sylanne_alpha.scope_runtime import ScopeUnavailable
+from tests.scope_fixtures import scope_storage_token
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +147,7 @@ def _scope_for_reset(label: str, repository: ScopeRepository) -> SessionScope:
             session_ref=SessionRef(
                 token=f"session_v1_{suffix}", bot_ref=bot, generation=0
             ),
-            storage_token=f"scope_v1_{suffix}",
+            storage_token=scope_storage_token(f"issue43-{suffix}"),
             scope_generation=0,
         ),
         expected_absent=True,

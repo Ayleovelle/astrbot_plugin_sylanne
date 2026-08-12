@@ -826,7 +826,10 @@ def _lookup_scope(ref: BotDeliveryRef) -> SessionScope:
         bot_ref=ref.bot_ref,
         persona_ref=ref.persona_ref,
         session_ref=ref.session_ref,
-        storage_token="scope_v1_outbox_lookup",
+        # Canonical shape is required by SessionScope, but this fixed sentinel
+        # carries no authority; it selects only the parent-keyed outbox path.
+        # The stored draft reconstructs the durable exact scope for owner checks.
+        storage_token="scope_v1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         scope_generation=0,
     )
 

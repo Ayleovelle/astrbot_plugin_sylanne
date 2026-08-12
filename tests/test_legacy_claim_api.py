@@ -19,6 +19,7 @@ from sylanne_alpha.scope_contracts import (
 )
 from sylanne_alpha.scope_repository import ScopeRepository
 from sylanne_alpha.scope_runtime import ScopeRuntimeRegistry
+from tests.scope_fixtures import scope_storage_token
 
 
 def _scope() -> SessionScope:
@@ -30,7 +31,7 @@ def _scope() -> SessionScope:
     return SessionScope(
         bot_ref=bot, persona_ref=persona,
         session_ref=SessionRef(token="session_v1_api", bot_ref=bot, generation=0),
-        storage_token="scope_v1_api", scope_generation=0,
+        storage_token=scope_storage_token("legacy-claim-api"), scope_generation=0,
     )
 
 

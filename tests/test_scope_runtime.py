@@ -37,7 +37,7 @@ from sylanne_alpha.session_context import SessionContext
 from sylanne_alpha.session_state_store import SessionStateStore
 from sylanne_alpha.v2core import integration
 from sylanne_alpha.webui_routes import WebUIRoutes
-from tests.scope_fixtures import scopes
+from tests.scope_fixtures import scope_storage_token, scopes
 
 
 def _transport_scope(scope) -> ResolvedTransportScope:
@@ -197,7 +197,7 @@ def test_transport_owner_publication_rejects_late_lower_session_generation(
     base = scopes.bot_a_persona_a
     generation_zero = replace(
         base,
-        storage_token="scope_v1_transport_generation_zero",
+        storage_token=scope_storage_token("transport-generation-zero"),
     )
     generation_one = replace(
         base,
@@ -206,7 +206,7 @@ def test_transport_owner_publication_rejects_late_lower_session_generation(
             bot_ref=base.bot_ref,
             generation=1,
         ),
-        storage_token="scope_v1_transport_generation_one",
+        storage_token=scope_storage_token("transport-generation-one"),
     )
     registry.exact_session(generation_zero)
     generation_one_runtime = registry.exact_session(generation_one)
@@ -234,7 +234,7 @@ def test_transport_owner_publication_rejects_late_lower_session_generation(
     fresh = replace(
         scopes.bot_a_persona_b,
         session_ref=generation_zero.session_ref,
-        storage_token="scope_v1_transport_generation_fresh",
+        storage_token=scope_storage_token("transport-generation-fresh"),
     )
     fresh_runtime = registry.exact_session(fresh)
     assert registry.publish_transport_owner(old_transport, fresh) is True
@@ -254,12 +254,12 @@ def test_same_transport_generation_can_follow_a_later_frozen_persona(scopes) -> 
     first = replace(
         scopes.bot_a_persona_a,
         session_ref=session_ref,
-        storage_token="scope_v1_transport_persona_first",
+        storage_token=scope_storage_token("transport-persona-first"),
     )
     second = replace(
         scopes.bot_a_persona_b,
         session_ref=session_ref,
-        storage_token="scope_v1_transport_persona_second",
+        storage_token=scope_storage_token("transport-persona-second"),
     )
     registry.exact_session(first)
     second_runtime = registry.exact_session(second)
@@ -448,8 +448,11 @@ def test_persona_switch_restores_exact_runtime_without_cross_bot_aliasing(scopes
         scopes.bot_b_persona_a,
     )
 
+    registry.exact_session(a1)
     a_runtime = registry.for_scope(a1)
+    registry.exact_session(b1)
     b_runtime = registry.for_scope(b1)
+    registry.exact_session(a2)
     other_bot_runtime = registry.for_scope(a2)
     a_runtime.store.last_user_texts.set(a1.storage_token, "A")
     b_runtime.store.last_user_texts.set(b1.storage_token, "B")
@@ -465,7 +468,9 @@ def test_persona_switch_restores_exact_runtime_without_cross_bot_aliasing(scopes
 
 def test_releasing_one_scope_does_not_mutate_siblings(scopes) -> None:
     registry = ScopeRuntimeRegistry.for_test()
+    registry.exact_session(scopes.bot_a_persona_a)
     left = registry.for_scope(scopes.bot_a_persona_a)
+    registry.exact_session(scopes.bot_b_persona_a)
     right = registry.for_scope(scopes.bot_b_persona_a)
     left.store.last_bot_texts.set(scopes.bot_a_persona_a.storage_token, "discard")
     right.store.last_bot_texts.set(scopes.bot_b_persona_a.storage_token, "safe")
@@ -703,7 +708,7 @@ async def test_stale_generation_cannot_replace_or_enter_current_conv_sync_lease(
 @pytest.mark.asyncio
 async def test_claim_release_metadata_is_bounded_without_stale_resurrection() -> None:
     store = SessionStateStore()
-    first_token = "scope_v1_churn_0"
+    first_token = scope_storage_token("churn-0")
     release_stale = asyncio.Event()
     store.claim_session(first_token, 0)
 
@@ -714,8 +719,8 @@ async def test_claim_release_metadata_is_bounded_without_stale_resurrection() ->
     stale_task = asyncio.create_task(_stale_write())
     await asyncio.sleep(0)
     store.release_session(first_token)
-    for index in range(1, 205):
-        token = f"scope_v1_churn_{index}"
+    for index in range(1, 1000):
+        token = scope_storage_token(f"churn-{index}")
         store.claim_session(token, 0)
         store.last_user_texts.set(token, "current")
         store.release_session(token)
@@ -733,11 +738,37 @@ async def test_claim_release_metadata_is_bounded_without_stale_resurrection() ->
     unchecked = dict(store.last_user_texts._snapshot_items_unchecked())
     assert first_token not in unchecked
 
-    store.last_user_texts.set("legacy-session", "legacy")
-    store.release_session("legacy-session")
-    assert store.last_user_texts.get("legacy-session") is None
-    store.last_user_texts.set("legacy-session", "reused")
-    assert store.last_user_texts.get("legacy-session") == "reused"
+    # This malformed scope-shaped key is a deterministic false positive in the
+    # old 2048-byte Bloom filter after the 1000-token sequence above.
+    false_positive_legacy = "scope_v1_fake_397"
+    store.last_user_texts.set(false_positive_legacy, "legacy")
+    assert store.last_user_texts.get(false_positive_legacy) == "legacy"
+    store.release_session(false_positive_legacy)
+    assert store.last_user_texts.get(false_positive_legacy) is None
+    store.last_user_texts.set(false_positive_legacy, "reused")
+    assert store.last_user_texts.get(false_positive_legacy) == "reused"
+
+
+def test_scope_storage_shape_is_the_exact_claim_authority() -> None:
+    store = SessionStateStore()
+    reserved_unclaimed = scope_storage_token("reserved-unclaimed")
+
+    store.last_user_texts.set(reserved_unclaimed, "must not write")
+    assert store.last_user_texts.get(reserved_unclaimed) is None
+    store.release_session(reserved_unclaimed)
+
+    for legacy_token in (
+        "scope_v1_fake",
+        "scope_v1_" + "a" * 42,
+        "scope_v1_" + "a" * 44,
+    ):
+        store.last_user_texts.set(legacy_token, "legacy")
+        assert store.last_user_texts.get(legacy_token) == "legacy"
+        store.release_session(legacy_token)
+        assert store.last_user_texts.get(legacy_token) is None
+
+        with pytest.raises(ValueError):
+            store.claim_session(legacy_token, 0)
 
 
 @pytest.mark.asyncio

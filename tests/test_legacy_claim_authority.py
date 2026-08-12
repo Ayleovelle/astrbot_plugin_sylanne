@@ -17,6 +17,7 @@ from sylanne_alpha.scope_contracts import (
     SessionScope,
 )
 from sylanne_alpha.scope_repository import ScopeRepository
+from tests.scope_fixtures import scope_storage_token
 
 
 def _scope(*, generation: int = 0) -> SessionScope:
@@ -34,7 +35,7 @@ def _scope(*, generation: int = 0) -> SessionScope:
         session_ref=SessionRef(
             token="session_v1_legacy", bot_ref=bot, generation=generation
         ),
-        storage_token="scope_v1_legacy",
+        storage_token=scope_storage_token("legacy-claim-authority"),
         scope_generation=generation,
     )
 

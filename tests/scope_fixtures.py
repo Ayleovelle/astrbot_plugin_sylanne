@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 from dataclasses import dataclass
 
 import pytest
@@ -13,6 +15,14 @@ _DIGEST_A = "a" * 64
 _DIGEST_B = "b" * 64
 _DIGEST_C = "c" * 64
 _DIGEST_D = "d" * 64
+
+
+def scope_storage_token(label: str) -> str:
+    """Return a deterministic test token with the production HMAC digest shape."""
+
+    digest = hashlib.sha256(label.encode("utf-8")).digest()
+    payload = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return f"scope_v1_{payload}"
 
 
 def _bot(token: str) -> BotRef:
@@ -72,30 +82,30 @@ def scopes() -> ScopeFixtures:
             bot=bot_a,
             persona=persona_a,
             session_token="session_v1_fixture_one",
-            storage_token="scope_v1_fixture_one",
+            storage_token=scope_storage_token("fixture-one"),
         ),
         bot_a_persona_b=_scope(
             bot=bot_a,
             persona=persona_b,
             session_token="session_v1_fixture_one",
-            storage_token="scope_v1_fixture_two",
+            storage_token=scope_storage_token("fixture-two"),
         ),
         bot_a_persona_a_second_session=_scope(
             bot=bot_a,
             persona=persona_a,
             session_token="session_v1_fixture_two",
-            storage_token="scope_v1_fixture_three",
+            storage_token=scope_storage_token("fixture-three"),
         ),
         bot_b_persona_a=_scope(
             bot=bot_b,
             persona=other_bot_persona_a,
             session_token="session_v1_fixture_one",
-            storage_token="scope_v1_fixture_four",
+            storage_token=scope_storage_token("fixture-four"),
         ),
         bot_a_persona_a_recreated=_scope(
             bot=bot_a,
             persona=recreated_persona_a,
             session_token="session_v1_fixture_one",
-            storage_token="scope_v1_fixture_five",
+            storage_token=scope_storage_token("fixture-five"),
         ),
     )

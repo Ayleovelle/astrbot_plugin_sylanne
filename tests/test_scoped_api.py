@@ -26,6 +26,7 @@ from sylanne_alpha.scope_contracts import (
 )
 from sylanne_alpha.scope_repository import ScopeRepository
 from sylanne_alpha.scope_runtime import ScopeRuntimeRegistry
+from tests.scope_fixtures import scope_storage_token
 from sylanne_alpha.scoped_api import (
     PERSONA_DOSSIER_ROUTE_SPEC,
     SCOPED_API_METHODS,
@@ -59,7 +60,7 @@ def _scope(
         bot_ref=bot,
         persona_ref=persona,
         session_ref=SessionRef(token=session_token, bot_ref=bot, generation=0),
-        storage_token=f"scope_v1_{session_token.rsplit('_', 1)[-1]}",
+        storage_token=scope_storage_token(f"scoped-api-{session_token}"),
         scope_generation=0,
     )
 

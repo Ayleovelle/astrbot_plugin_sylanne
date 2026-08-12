@@ -14,6 +14,7 @@ from sylanne_alpha.scope_contracts import (
 from sylanne_alpha.scope_identity import BotBinding, load_or_create_scope_identity_key
 from sylanne_alpha.scope_repository import ScopeRepository
 from sylanne_alpha.session_catalog import ProtectedDeliveryBinding, SessionCatalog
+from tests.scope_fixtures import scope_storage_token
 
 
 def _transport(bot: BotRef) -> ResolvedTransportScope:
@@ -39,7 +40,7 @@ def _scope(*, bot: BotRef, persona_token: str) -> SessionScope:
         bot_ref=transport.bot_ref,
         persona_ref=persona,
         session_ref=transport.session_ref,
-        storage_token=f"scope_v1_{persona_token.rsplit('_', 1)[-1]}",
+        storage_token=scope_storage_token(f"catalog-{persona_token}"),
         scope_generation=0,
     )
 

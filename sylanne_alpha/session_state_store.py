@@ -24,11 +24,11 @@ from __future__ import annotations
 import asyncio
 import collections
 import contextvars
-import hashlib
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, Generic, Iterator, TypeVar, cast
 
 from sylanne_alpha.infra import BoundedDict
+from sylanne_alpha.scope_contracts import is_scope_storage_token
 
 if TYPE_CHECKING:
     from sylanne_alpha.host import SylanneAlphaHost
@@ -37,7 +37,6 @@ if TYPE_CHECKING:
 V = TypeVar("V")
 
 _OWNER_LEASE_CAPACITY = 200
-_SCOPE_FILTER_BYTES = 2048
 
 
 class SessionMap(Generic[V]):
@@ -191,18 +190,13 @@ class SessionStateStore:
         # 登记表：所有需按 session_key 清理的 SessionMap（register 自动追加）
         self._maps: list[SessionMap] = []
         self._task_cleanup_waiters: set[asyncio.Task[Any]] = set()
-        # Keep the current/retired high-water generation together in one bounded
-        # owner table.  A retired record is a tombstone: reclaiming the same
-        # generation cannot resurrect an old task.  ``_scope_aware_tokens`` is
-        # retained as a compatibility view for diagnostics/tests.
+        # Keep only the bounded current/retired high-water generations.  Exact
+        # scope-token shape is the permanent fail-closed authority, so evicted
+        # records cannot turn a scoped token into a legacy session.
         self._scope_generations: BoundedDict = BoundedDict(
             maxsize=_OWNER_LEASE_CAPACITY
         )
         self._scope_aware_tokens = self._scope_generations
-        # Fixed-size, no-false-negative ownership history.  It lets an evicted
-        # claimed token remain fail-closed without turning never-claimed legacy
-        # keys (including scope-shaped fixture keys) into claimed sessions.
-        self._scope_token_filter = bytearray(_SCOPE_FILTER_BYTES)
         self._session_generation_binding: contextvars.ContextVar[dict[str, int]] = (
             contextvars.ContextVar(
                 f"sylanne-session-store-generation:{id(self)}",
@@ -371,16 +365,15 @@ class SessionStateStore:
 
         if self._closed:
             raise RuntimeError("session state store is closed")
+        if not is_scope_storage_token(session_key):
+            raise ValueError("invalid scope storage token")
         record = self._scope_generations.get(session_key)
-        if record is None and self._scope_token_was_claimed(session_key):
-            raise RuntimeError("evicted session owner cannot be reclaimed")
         current = record[0] if self._valid_generation_record(record) else None
         active = bool(record[1]) if self._valid_generation_record(record) else False
         if current is not None and generation < current:
             raise RuntimeError("session generation cannot move backwards")
         if current == generation and not active:
             raise RuntimeError("retired session generation cannot be reclaimed")
-        self._remember_scope_token(session_key)
         if current != generation:
             self._scope_generations[session_key] = (generation, True)
             self._cancel_fragment_buffer(
@@ -403,29 +396,6 @@ class SessionStateStore:
             and len(value) == 2
             and type(value[0]) is int
             and type(value[1]) is bool
-        )
-
-    @staticmethod
-    def _scope_filter_indexes(session_key: str) -> tuple[int, int, int, int]:
-        digest = hashlib.blake2s(
-            session_key.encode("utf-8"),
-            digest_size=8,
-            person=b"syllease",
-        ).digest()
-        bit_count = _SCOPE_FILTER_BYTES * 8
-        return tuple(
-            int.from_bytes(digest[offset : offset + 2], "big") % bit_count
-            for offset in range(0, 8, 2)
-        )  # type: ignore[return-value]
-
-    def _remember_scope_token(self, session_key: str) -> None:
-        for index in self._scope_filter_indexes(session_key):
-            self._scope_token_filter[index // 8] |= 1 << (index % 8)
-
-    def _scope_token_was_claimed(self, session_key: str) -> bool:
-        return all(
-            self._scope_token_filter[index // 8] & (1 << (index % 8))
-            for index in self._scope_filter_indexes(session_key)
         )
 
     def _authorize_current_task(self, session_key: str, generation: int) -> None:
@@ -453,8 +423,7 @@ class SessionStateStore:
         """Whether a token must use the fail-closed generation lease path."""
 
         return (
-            session_key in self._scope_generations
-            or self._scope_token_was_claimed(session_key)
+            is_scope_storage_token(session_key)
             or session_key in self._session_generation_binding.get()
         )
 
@@ -466,7 +435,7 @@ class SessionStateStore:
         if self._valid_generation_record(record):
             generation, active = record
             return bool(active and bound == generation), generation
-        if self._scope_token_was_claimed(session_key) or bound is not None:
+        if is_scope_storage_token(session_key) or bound is not None:
             return False, None
         return True, None
 
@@ -723,7 +692,6 @@ class SessionStateStore:
             cleanup_waiters = tuple(self._task_cleanup_waiters)
             await asyncio.gather(*cleanup_waiters, return_exceptions=True)
         self._scope_generations.clear()
-        self._scope_token_filter[:] = b"\x00" * len(self._scope_token_filter)
         self._generation_tasks.clear()
         self._session_generation_binding.set({})
 

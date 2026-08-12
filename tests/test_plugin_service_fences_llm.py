@@ -18,6 +18,7 @@ from sylanne_alpha.person_shelf import (
 )
 from sylanne_alpha.plugin_services import PluginServices
 from sylanne_alpha.session_state_store import SessionStateStore
+from tests.scope_fixtures import scope_storage_token
 
 
 class _Provider:
@@ -341,33 +342,34 @@ def test_explicit_prompt_cache_same_token_aba_rejects_old_generation_write() -> 
             plugin,
             services=PluginServices(config={}, runtime_state=owner),
         )
-        owner.claim_session("same", 1)
+        token = scope_storage_token("pipeline-cache-aba")
+        owner.claim_session(token, 1)
         resume_old = asyncio.Event()
 
         async def _old_generation_write() -> None:
             await resume_old.wait()
             current["prompt"] = "stale-generation-one"
-            pipe._cache_system_prompt("same")
+            pipe._cache_system_prompt(token)
 
         old_task = asyncio.create_task(_old_generation_write())
         await asyncio.sleep(0)
-        owner.claim_session("same", 2)
+        owner.claim_session(token, 2)
         current["prompt"] = "generation-two"
-        pipe._cache_system_prompt("same")
+        pipe._cache_system_prompt(token)
 
-        pipe.release_session("same", expected_generation=1)
-        assert owner.system_prompt_cache.get("same") == "generation-two"
+        pipe.release_session(token, expected_generation=1)
+        assert owner.system_prompt_cache.get(token) == "generation-two"
 
         resume_old.set()
         await old_task
-        assert owner.system_prompt_cache.get("same") == "generation-two"
+        assert owner.system_prompt_cache.get(token) == "generation-two"
 
     asyncio.run(_exercise())
 
 
 def test_explicit_claimed_release_without_generation_uses_calling_lease() -> None:
     async def _exercise() -> None:
-        token = "scope_v1_pipeline_release"
+        token = scope_storage_token("pipeline-release")
         owner = SessionStateStore()
         pipe = LLMRequestPipeline(  # type: ignore[arg-type]
             _PoisonPlugin(),

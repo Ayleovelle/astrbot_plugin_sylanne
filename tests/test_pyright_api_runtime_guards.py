@@ -13,6 +13,7 @@ from sylanne_alpha.scope_contracts import (
 )
 from sylanne_alpha.v2core.integration import _existing_runtime_from_scope_or_legacy
 from sylanne_alpha.webui_routes import WebUIRoutes
+from tests.scope_fixtures import scope_storage_token
 
 
 class _NoneReturningMap:
@@ -67,7 +68,7 @@ def test_existing_v2_runtime_fails_closed_for_non_iterable_registry_snapshot() -
             1,
         ),
         session_ref=SessionRef("session_v1_pyright_guard", bot, 1),
-        storage_token="scope_v1_pyright_guard",
+        storage_token=scope_storage_token("pyright-guard"),
         scope_generation=1,
     )
     plugin = SimpleNamespace(

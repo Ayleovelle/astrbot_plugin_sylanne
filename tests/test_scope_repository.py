@@ -25,6 +25,7 @@ from sylanne_alpha.scope_repository import (
     ScopeRepository,
     StaleScopeWrite,
 )
+from tests.scope_fixtures import scope_storage_token
 
 
 def _scope(
@@ -47,7 +48,7 @@ def _scope(
         bot_ref=bot,
         persona_ref=persona,
         session_ref=session,
-        storage_token=f"scope_v1_{session_token.rsplit('_', 1)[-1]}",
+        storage_token=scope_storage_token(f"repository-{session_token}"),
         scope_generation=0,
     )
 

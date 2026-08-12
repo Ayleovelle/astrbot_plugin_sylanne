@@ -40,6 +40,7 @@ from sylanne_alpha.scope_identity import (
 from sylanne_alpha.scope_repository import ScopeRepository, ScopedPersistenceGateway
 from sylanne_alpha.scope_runtime import ScopeRuntimeRegistry
 from sylanne_alpha.session_catalog import ProtectedDeliveryBinding, SessionCatalog
+from tests.scope_fixtures import scope_storage_token
 
 
 _PLATFORM = "test-platform"
@@ -124,7 +125,7 @@ def _scope(
             lifecycle_generation=0,
         ),
         session_ref=transport.session_ref,
-        storage_token=f"scope_v1_{persona_token.rsplit('_', 1)[-1]}",
+        storage_token=scope_storage_token(f"outbox-{persona_token}"),
         scope_generation=0,
     )
 
