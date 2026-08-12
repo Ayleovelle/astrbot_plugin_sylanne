@@ -228,6 +228,7 @@ def _runtime_fenced_claim_stack(tmp_path):
         catalog=catalog,
         transport=transport,
         binding=binding,
+        intent=intent,
         registry=registry,
     )
 
@@ -339,6 +340,93 @@ def test_exact_claim_returns_only_scope_safe_status_after_authorization(tmp_path
         runtime_fence=lambda: True,
     ) == {"ok": True, "claim": {"record_id": "c" * 64, "status": "copied"}}
     assert (claims.lookup_calls, claims.issue_calls, claims.claim_calls) == (1, 1, 1)
+
+
+def _repository_file_snapshot(repository: ScopeRepository) -> dict[str, bytes]:
+    return {
+        path.relative_to(repository.root).as_posix(): path.read_bytes()
+        for path in repository.root.rglob("*")
+        if path.is_file()
+    }
+
+
+def _assert_claim_failure_left_no_artifacts(
+    stack: SimpleNamespace,
+    before: dict[str, bytes],
+) -> None:
+    assert _repository_file_snapshot(stack.repository) == before
+    assert not stack.repository.component_path(stack.scope, "memory").exists()
+    assert not (stack.repository.legacy_unscoped_root / "staging").exists()
+    assert not (stack.repository.legacy_unscoped_root / "quarantine").exists()
+
+
+def test_stale_scope_from_claim_memory_returns_redacted_conflict_without_retry(
+    tmp_path,
+) -> None:
+    from sylanne_alpha.legacy_claim_api import LegacyClaimApiError
+    from sylanne_alpha.scope_repository import StaleScopeWrite
+
+    stack = _runtime_fenced_claim_stack(tmp_path)
+    before = _repository_file_snapshot(stack.repository)
+    calls = {"claim": 0}
+
+    def stale_claim(*_args, **_kwargs):
+        calls["claim"] += 1
+        raise StaleScopeWrite(
+            stack.scope.scope_generation,
+            stack.scope.scope_generation + 1,
+            code="scope_generation_stale_sensitive_detail",
+        )
+
+    stack.api.claims.claim_memory = stale_claim
+    result = stack.api.claim_after_authorization(
+        stack.intent,
+        principal=stack.principal,
+        record_id=stack.source.source_fingerprint,
+        scope=stack.scope,
+        relation_scope=stack.relation_scope,
+        post_lookup_revalidate=lambda: True,
+        runtime_fence=lambda: True,
+    )
+
+    assert isinstance(result, LegacyClaimApiError)
+    assert result.public_payload() == {"error": "scope_stale"}
+    assert (result.status, result.code) == (409, "scope_stale")
+    assert calls == {"claim": 1}
+    _assert_claim_failure_left_no_artifacts(stack, before)
+
+
+def test_claim_lock_failure_returns_redacted_unavailable_without_retry(tmp_path) -> None:
+    import portalocker
+
+    from sylanne_alpha.legacy_claim_api import LegacyClaimApiError
+
+    stack = _runtime_fenced_claim_stack(tmp_path)
+    before = _repository_file_snapshot(stack.repository)
+    calls = {"claim": 0}
+
+    def locked_claim(*_args, **_kwargs):
+        calls["claim"] += 1
+        raise portalocker.exceptions.LockException(
+            "sensitive repository path and process identity"
+        )
+
+    stack.api.claims.claim_memory = locked_claim
+    result = stack.api.claim_after_authorization(
+        stack.intent,
+        principal=stack.principal,
+        record_id=stack.source.source_fingerprint,
+        scope=stack.scope,
+        relation_scope=stack.relation_scope,
+        post_lookup_revalidate=lambda: True,
+        runtime_fence=lambda: True,
+    )
+
+    assert isinstance(result, LegacyClaimApiError)
+    assert result.public_payload() == {"error": "scope_repository_unavailable"}
+    assert (result.status, result.code) == (503, "scope_repository_unavailable")
+    assert calls == {"claim": 1}
+    _assert_claim_failure_left_no_artifacts(stack, before)
 
 
 def test_post_lookup_runtime_fence_aborts_before_destination_write(tmp_path) -> None:

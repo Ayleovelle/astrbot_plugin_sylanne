@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from collections.abc import Callable
 from typing import Any
 
+import portalocker
+
 from .legacy_claim_authority import LEGACY_CLAIM_ACTION, LegacyClaimAuthority, LegacyClaimIntent
 from .legacy_scope_claim import (
     LegacyClaimAuthorizationDenied,
@@ -14,6 +16,7 @@ from .legacy_scope_claim import (
     LegacyScopeClaimService,
 )
 from .scope_contracts import RelationScope, ScopeApiPathEcho, ScopedPrincipal, SessionScope
+from .scope_repository import StaleScopeWrite
 from .scoped_api import ScopedApiRuntimeUnavailable
 
 
@@ -123,6 +126,10 @@ class LegacyClaimApi:
                 409 if runtime_stale else 403,
                 "scope_stale" if runtime_stale else "scope_principal_forbidden",
             )
+        except StaleScopeWrite:
+            return LegacyClaimApiError(409, "scope_stale")
+        except portalocker.exceptions.LockException:
+            return LegacyClaimApiError(503, "scope_repository_unavailable")
         except (LegacyClaimQuarantined, LegacyClaimConflict, OSError, ValueError):
             return LegacyClaimApiError(409, "legacy_claim_unavailable")
         return {
