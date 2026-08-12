@@ -407,6 +407,37 @@ async def test_terminate_drains_and_consolidates_every_persona_autonomy_owner(
     stop_webui.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_retire_persona_drains_store_tasks_before_late_writes_can_survive(
+    scopes,
+) -> None:
+    registry = ScopeRuntimeRegistry.for_test()
+    scope = scopes.bot_a_persona_a
+    runtime = registry.for_scope(scope)
+    registry.exact_session(scope)
+
+    async def _late_write(label: str) -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            runtime.store.last_user_texts.set(label, "late")
+
+    segmented = asyncio.create_task(_late_write("segmented"))
+    checkpoint = asyncio.create_task(_late_write("checkpoint"))
+    runtime.store.segmented_tasks.set("segmented", segmented)
+    runtime.store.background_post_checkpoint_tasks.set("checkpoint", checkpoint)
+    await asyncio.sleep(0)
+
+    assert registry.retire_persona(scope) is True
+    cleanup_waiters = tuple(runtime.store._task_cleanup_waiters)
+    assert cleanup_waiters
+    await asyncio.gather(*cleanup_waiters, return_exceptions=True)
+
+    assert segmented.cancelled()
+    assert checkpoint.cancelled()
+    assert runtime.store.last_user_texts.snapshot_items() == []
+
+
 def test_persona_switch_restores_exact_runtime_without_cross_bot_aliasing(scopes) -> None:
     registry = ScopeRuntimeRegistry.for_test()
     a1, b1, a2 = (

@@ -176,7 +176,10 @@ class SessionStateStore:
         self.background_post_last_committed: SessionMap = self._reg("background_post_last_committed", BoundedDict(maxsize=200))
         self.background_post_active: SessionMap = self._reg("background_post_active", BoundedDict(maxsize=200))
         self.background_post_worker_state: SessionMap = self._reg("background_post_worker_state", BoundedDict(maxsize=200))
-        self.background_post_checkpoint_tasks: SessionMap = self._reg("background_post_checkpoint_tasks", {})
+        self.background_post_checkpoint_tasks: SessionMap = self._reg(
+            "background_post_checkpoint_tasks",
+            BoundedDict(maxsize=200, on_evict=self._cancel_and_drain_tasks),
+        )
         # Pipeline 创建的短任务按 session 归属；release/aclose 会先 cancel 再清容器。
         self.background_tasks: SessionMap = self._reg(
             "background_tasks",
@@ -284,13 +287,27 @@ class SessionStateStore:
                 except Exception:
                     pass
 
-    def _cancel_and_drain_tasks(self, key: str, value: Any) -> None:
+    def _cancel_and_drain_tasks(
+        self,
+        key: str,
+        value: Any,
+        *,
+        after_drain: Any = None,
+    ) -> None:
         """Cancel tasks and arrange exception-safe draining for sync eviction."""
 
         tasks = value if isinstance(value, (set, list, tuple)) else (value,)
         pending: list[Any] = []
+        seen: set[int] = set()
         for task in tuple(tasks):
-            if task is None or bool(getattr(task, "done", lambda: True)()):
+            if task is None:
+                continue
+            marker = id(task)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            if bool(getattr(task, "done", lambda: True)()):
+                self._consume_task_result(task)
                 continue
             cancel = getattr(task, "cancel", None)
             if not callable(cancel):
@@ -301,18 +318,31 @@ class SessionStateStore:
             except Exception:
                 continue
         if not pending:
+            if callable(after_drain):
+                after_drain()
             return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
+            remaining = len(pending)
+
+            def _finish(task: Any) -> None:
+                nonlocal remaining
+                self._consume_task_result(task)
+                remaining -= 1
+                if remaining == 0 and callable(after_drain):
+                    after_drain()
+
             for task in pending:
                 add_done_callback = getattr(task, "add_done_callback", None)
                 if callable(add_done_callback):
-                    add_done_callback(self._consume_task_result)
+                    add_done_callback(_finish)
             return
 
         async def _drain() -> None:
             await asyncio.gather(*pending, return_exceptions=True)
+            if callable(after_drain):
+                after_drain()
 
         waiter = loop.create_task(_drain(), name=f"sylanne-owner-drain:{key}")
         self._task_cleanup_waiters.add(waiter)
@@ -332,17 +362,18 @@ class SessionStateStore:
         """释放某会话在所有已登记 SessionMap 中的态。漏登记 = 容器不在 = 立即暴露。"""
         fragment = self.fragment_buffers.get(session_key)
         self._cancel_fragment_buffer(session_key, fragment)
-        self._cancel_and_drain_tasks(
-            session_key, self.background_tasks.get(session_key, set())
+        owned_tasks = self._task_values(
+            self.background_tasks.get(session_key, set()),
+            self.segmented_tasks.get(session_key),
+            self.background_post_checkpoint_tasks.get(session_key),
         )
         self._cancel_and_drain_tasks(
-            session_key, self.segmented_tasks.get(session_key)
+            session_key,
+            owned_tasks,
+            after_drain=lambda: self._clear_session_state(session_key),
         )
-        checkpoint_task = self.background_post_checkpoint_tasks.get(session_key)
-        self._cancel_and_drain_tasks(session_key, checkpoint_task)
         conv_sync_umo = self._conv_sync_session_umos.pop(session_key, None)
-        for m in self._maps:
-            m.pop(session_key, None)
+        self._clear_session_state(session_key)
         if conv_sync_umo is not None:
             self._release_unused_conv_sync_lock(conv_sync_umo)
 
@@ -353,6 +384,7 @@ class SessionStateStore:
         tasks.add(task)
 
         def _discard(done: Any) -> None:
+            self._consume_task_result(done)
             current = self.background_tasks.get(session_key)
             if isinstance(current, set):
                 current.discard(done)
@@ -368,42 +400,73 @@ class SessionStateStore:
         """Cancel/await all owner tasks, then release every registered session state."""
 
         tasks: list[Any] = []
-        task_maps = (
-            self.background_tasks,
-            self.segmented_tasks,
-            self.background_post_checkpoint_tasks,
+        owned_tasks = self._task_values(
+            *(owned for task_map in self._task_maps() for owned in task_map.values())
         )
-        for task_map in task_maps:
-            for _session_key, owned in task_map.snapshot_items():
-                collection = owned if isinstance(owned, (set, list, tuple)) else (owned,)
-                for task in tuple(collection):
-                    if task is None or bool(getattr(task, "done", lambda: True)()):
-                        continue
-                    try:
-                        task.cancel()
-                    except Exception:
-                        continue
-                    tasks.append(task)
+        for task in owned_tasks:
+            if bool(getattr(task, "done", lambda: True)()):
+                self._consume_task_result(task)
+                continue
+            try:
+                task.cancel()
+            except Exception:
+                continue
+            tasks.append(task)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        cleanup_waiters = tuple(self._task_cleanup_waiters)
-        if cleanup_waiters:
-            await asyncio.gather(*cleanup_waiters, return_exceptions=True)
+        for task_map in self._task_maps():
+            task_map.clear()
         for _session_key, fragment in self.fragment_buffers.snapshot_items():
             self._cancel_fragment_buffer(_session_key, fragment)
         self.reset_all()
+        while self._task_cleanup_waiters:
+            cleanup_waiters = tuple(self._task_cleanup_waiters)
+            await asyncio.gather(*cleanup_waiters, return_exceptions=True)
 
     def reset_all(self) -> None:
         """整体清空所有会话态（供 state_persistence 的全局 reset 用）。"""
-        for _session_key, tasks in self.background_tasks.snapshot_items():
-            self._cancel_and_drain_tasks(_session_key, tasks)
+        owned_tasks = self._task_values(
+            *(owned for task_map in self._task_maps() for owned in task_map.values())
+        )
+        self._cancel_and_drain_tasks(
+            "reset-all",
+            owned_tasks,
+            after_drain=self._clear_all_state,
+        )
         for _session_key, fragment in self.fragment_buffers.snapshot_items():
             self._cancel_fragment_buffer(_session_key, fragment)
+        self._clear_all_state()
+
+    def _clear_session_state(self, session_key: str) -> None:
+        for m in self._maps:
+            m.pop(session_key, None)
+
+    def _clear_all_state(self) -> None:
         for m in self._maps:
             m.clear()
         self._conv_sync_session_umos.clear()
         for umo in list(self.conv_sync_locks.keys()):
             self._release_unused_conv_sync_lock(umo)
+
+    def _task_maps(self) -> tuple[SessionMap, SessionMap, SessionMap]:
+        return (
+            self.background_tasks,
+            self.segmented_tasks,
+            self.background_post_checkpoint_tasks,
+        )
+
+    @staticmethod
+    def _task_values(*owned_values: Any) -> list[Any]:
+        tasks: list[Any] = []
+        seen: set[int] = set()
+        for owned in owned_values:
+            collection = owned if isinstance(owned, (set, list, tuple)) else (owned,)
+            for task in collection:
+                if task is None or id(task) in seen:
+                    continue
+                seen.add(id(task))
+                tasks.append(task)
+        return tasks
 
     # ------------------------------------------------------------------
     # 真语义容器的专用方法

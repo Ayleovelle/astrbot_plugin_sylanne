@@ -1598,6 +1598,113 @@ def test_segmented_task_lru_eviction_cancels_and_drains_evicted_task() -> None:
     asyncio.run(_exercise())
 
 
+def test_checkpoint_task_lru_eviction_cancels_and_drains_evicted_task() -> None:
+    async def _exercise() -> None:
+        owner = SessionStateStore()
+        finalized: list[str] = []
+        tasks: list[asyncio.Task[None]] = []
+
+        async def _wait(label: str) -> None:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                finalized.append(label)
+
+        try:
+            for index in range(201):
+                task = asyncio.create_task(_wait(str(index)))
+                tasks.append(task)
+                owner.background_post_checkpoint_tasks.set(str(index), task)
+                if index == 0:
+                    await asyncio.sleep(0)
+            cleanup_waiters = tuple(owner._task_cleanup_waiters)
+            assert cleanup_waiters
+            await asyncio.gather(*cleanup_waiters, return_exceptions=True)
+
+            assert tasks[0].cancelled()
+            assert "0" in finalized
+            assert len(owner.background_post_checkpoint_tasks) == 200
+        finally:
+            await owner.aclose()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(_exercise())
+
+
+def test_reset_all_cancels_and_drains_segmented_and_checkpoint_before_reclear() -> None:
+    async def _exercise() -> None:
+        owner = SessionStateStore()
+
+        async def _late_write(label: str) -> None:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                owner.last_user_texts.set(label, "late")
+
+        segmented = asyncio.create_task(_late_write("segmented"))
+        checkpoint = asyncio.create_task(_late_write("checkpoint"))
+        owner.segmented_tasks.set("segmented", segmented)
+        owner.background_post_checkpoint_tasks.set("checkpoint", checkpoint)
+        await asyncio.sleep(0)
+
+        owner.reset_all()
+        cleanup_waiters = tuple(owner._task_cleanup_waiters)
+        assert cleanup_waiters
+        await asyncio.gather(*cleanup_waiters, return_exceptions=True)
+
+        assert segmented.cancelled()
+        assert checkpoint.cancelled()
+        assert owner.last_user_texts.snapshot_items() == []
+
+    asyncio.run(_exercise())
+
+
+def test_done_failed_tasks_are_observed_on_every_owner_cleanup_path() -> None:
+    class _DoneFailedTask:
+        def __init__(self) -> None:
+            self.observed = 0
+
+        def done(self) -> bool:
+            return True
+
+        def exception(self) -> RuntimeError:
+            self.observed += 1
+            return RuntimeError("owned failure")
+
+    async def _exercise() -> None:
+        eviction_owner = SessionStateStore()
+        evicted = _DoneFailedTask()
+        eviction_owner.segmented_tasks.set("evicted", evicted)
+        for index in range(200):
+            eviction_owner.segmented_tasks.set(f"fill-{index}", None)
+        assert evicted.observed == 1
+
+        release_owner = SessionStateStore()
+        released = _DoneFailedTask()
+        release_owner.background_post_checkpoint_tasks.set("released", released)
+        release_owner.release_session("released")
+        assert released.observed == 1
+
+        reset_owner = SessionStateStore()
+        reset = _DoneFailedTask()
+        reset_owner.segmented_tasks.set("reset", reset)
+        reset_owner.background_post_checkpoint_tasks.set("reset", reset)
+        reset_owner.reset_all()
+        assert reset.observed == 1
+
+        close_owner = SessionStateStore()
+        closed = _DoneFailedTask()
+        close_owner.segmented_tasks.set("closed", closed)
+        close_owner.background_post_checkpoint_tasks.set("closed", closed)
+        await close_owner.aclose()
+        assert closed.observed == 1
+
+    asyncio.run(_exercise())
+
+
 class _LateBoundCompatPlugin:
     def __init__(self) -> None:
         self.config: dict[str, Any] = {}
