@@ -621,7 +621,19 @@ class StatePersistence:
         dirty_set = self.swap_dirty() if self.is_dirty() else set()
         snapshot = host.kernel.snapshot()
 
-        if dirty_set and self.has_kv_api():
+        if dirty_set:
+            get_fn = self._kv_get()
+            put_fn = self._kv_put()
+            if self._services_explicit and (
+                not callable(get_fn) or not callable(put_fn)
+            ):
+                self._dirty.restore(dirty_set)
+                logger.warning(
+                    "Sylanne kernel persist: explicit KV authority lacks required "
+                    "get/put callbacks; fail-closed preserving dirty state"
+                )
+                return
+        if dirty_set and callable(put_fn):
             try:
                 # 只序列化 dirty 子系统对应的数据
                 partial_snapshot = self._extract_dirty_snapshot(snapshot, dirty_set)
@@ -635,16 +647,15 @@ class StatePersistence:
                 kv_key = self.kernel_kv_key(session_key)
                 # 保存备份（上一次成功的数据）
                 backup_key = f"{kv_key}_backup"
-                _get_fn = self._kv_get()
-                _put_fn = self._kv_put()
-                try:
-                    existing = await _get_fn(kv_key, None)
-                    if existing and isinstance(existing, dict):
-                        await _put_fn(backup_key, existing)
-                except Exception:
-                    pass  # 备份失败不阻塞主路径
+                if callable(get_fn):
+                    try:
+                        existing = await get_fn(kv_key, None)
+                        if existing and isinstance(existing, dict):
+                            await put_fn(backup_key, existing)
+                    except Exception:
+                        pass  # 备份失败不阻塞主路径
 
-                await _put_fn(kv_key, partial_snapshot)
+                await put_fn(kv_key, partial_snapshot)
             except Exception as e:
                 self._dirty.restore(dirty_set)
                 logger.warning(f"Sylanne kernel KV persist: {e}", exc_info=True)
@@ -842,10 +853,16 @@ class StatePersistence:
             # authority.  No AstrBot KV or legacy runtime method is reached.
             scoped_runtime.save_buffer(session_key, buf_dict)
             return
-        if self.has_kv_api():
+        put_fn = self._kv_put()
+        if self._services_explicit and not callable(put_fn):
+            logger.warning(
+                "Sylanne buffer persist: explicit KV authority lacks put callback; "
+                "fail-closed skipping compatibility file write"
+            )
+            return
+        if callable(put_fn):
             try:
-                _put_fn = self._kv_put()
-                await _put_fn(self.buffer_kv_key(session_key), buf_dict)
+                await put_fn(self.buffer_kv_key(session_key), buf_dict)
             except Exception as e:
                 logger.warning(f"Sylanne buffer KV persist: {e}", exc_info=True)
         # 始终写文件（向后兼容/回退），offload 到线程避免阻塞事件循环
@@ -869,14 +886,22 @@ class StatePersistence:
         scoped_runtime = self._scoped_runtime_for_host(session_key, host)
         if scoped_runtime is not None:
             return scoped_runtime.load_buffer(session_key)
-        if self.has_kv_api():
+        get_fn = self._kv_get()
+        if self._services_explicit and not callable(get_fn):
+            logger.warning(
+                "Sylanne buffer load: explicit KV authority lacks get callback; "
+                "fail-closed skipping compatibility file read"
+            )
+            return None
+        if callable(get_fn):
             try:
-                _get_fn = self._kv_get()
-                data = await _get_fn(self.buffer_kv_key(session_key), None)
+                data = await get_fn(self.buffer_kv_key(session_key), None)
                 if data and isinstance(data, dict):
                     return data
             except Exception as e:
                 logger.debug(f"Sylanne skip: {e}")
+                if self._services_explicit:
+                    return None
         # 回退到文件 IO
         return await asyncio.to_thread(host.runtime.load_buffer, session_key)
 
@@ -2095,21 +2120,26 @@ class StatePersistence:
                         "任何已知记忆格式（既非当前 MemorySystem 形状，也非旧版"
                         "SylanneMemoryState），跳过（既不当作有效数据用，也不当空覆盖）"
                     )
-        # 回退：从 kernel body.memory 中加载
+        # 回退：从 kernel body.memory 中加载。显式服务是唯一 authority；缺少
+        # host_fn 时不得穿透到 plugin._host() 选择环境中的默认/最近会话。
         state_from_body = None
+        host = None
+        host_fn = self._services.host_fn
+        if not callable(host_fn) and not self._services_explicit:
+            host_fn = getattr(self._p, "_host", None)
         try:
-            _host_fn = self._services.host_fn
-            host = _host_fn(session_key)
-            data = host.kernel.body.memory.get("_memory_system")
-            if isinstance(data, dict):
-                state_from_body = MemorySystem.create_from_dict(data)
-                if getattr(state_from_body, "_quarantine", None) and self._load_admit_ok(
-                    session_key, token
-                ):
-                    await self._persist_memory_quarantine(
-                        session_key, list(state_from_body._quarantine)
-                    )
-                return self._admit_loaded_state(session_key, state_from_body, token)
+            if callable(host_fn):
+                host = host_fn(session_key)
+                data = host.kernel.body.memory.get("_memory_system")
+                if isinstance(data, dict):
+                    state_from_body = MemorySystem.create_from_dict(data)
+                    if getattr(
+                        state_from_body, "_quarantine", None
+                    ) and self._load_admit_ok(session_key, token):
+                        await self._persist_memory_quarantine(
+                            session_key, list(state_from_body._quarantine)
+                        )
+                    return self._admit_loaded_state(session_key, state_from_body, token)
         except Exception as e:
             logger.debug(f"Sylanne skip: {e}")
         # MEM-01 最后回退（row c）：AlphaBodyState.from_dict（sylanne_core/compute/
@@ -2121,7 +2151,6 @@ class StatePersistence:
         try:
             from .memory_legacy_formats import salvage_memory_system_from_alpha_json
 
-            host = self._p._host(session_key)
             runtime = getattr(host, "runtime", None)
             path_fn = getattr(runtime, "_path", None) if runtime is not None else None
             if callable(path_fn):

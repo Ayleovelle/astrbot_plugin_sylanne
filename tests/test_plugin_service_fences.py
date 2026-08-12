@@ -4,9 +4,11 @@ import asyncio
 import json
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
+from main import EmotionalStatePlugin
 from sylanne_alpha.plugin_services import PluginServices
 from sylanne_alpha.proactive_scheduler import ProactiveScheduler
 from sylanne_alpha.public_api import PublicAPI
@@ -950,3 +952,39 @@ def test_scheduler_rejects_explicit_services_with_scoped_persistence() -> None:
             services=PluginServices(),
             persistence=object(),  # type: ignore[arg-type]
         )
+
+
+def test_terminate_accepts_a_synchronous_pipeline_close_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AstrBot-compatible close hooks may be sync or async during hot reload."""
+
+    pipeline_closes: list[str] = []
+    plugin = object.__new__(EmotionalStatePlugin)
+    plugin._scope_delivery_workers = {}
+    plugin._v3_shadow = SimpleNamespace(
+        begin_shutdown=lambda: None,
+        terminate=AsyncMock(),
+    )
+    plugin._scope_runtime_registry = SimpleNamespace(
+        live_persona_runtimes=lambda: (),
+        live_session_runtimes=lambda: (),
+    )
+    plugin._background_tasks = []
+    plugin._emotion_spirit_bridge = None
+    plugin._qzone_audit = None
+    plugin._qzone_http_session = None
+    plugin._state_persistence = SimpleNamespace(terminate=AsyncMock())
+    plugin._llm_request_pipeline = SimpleNamespace(
+        aclose=lambda: pipeline_closes.append("closed")
+    )
+
+    monkeypatch.setattr(
+        "sylanne_alpha.v2core.integration.drain_pending_saves", AsyncMock()
+    )
+    monkeypatch.setattr("sylanne_alpha.v2core.integration.save_all_domains", AsyncMock())
+    monkeypatch.setattr("main.stop_webui_server", AsyncMock())
+
+    asyncio.run(plugin.terminate())
+
+    assert pipeline_closes == ["closed"]

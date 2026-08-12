@@ -52,6 +52,7 @@ import contextlib  # noqa: E402
 import contextvars  # noqa: E402
 import functools  # noqa: E402
 import importlib  # noqa: E402
+import inspect  # noqa: E402
 import json  # noqa: E402
 import math  # noqa: E402
 import time  # noqa: E402
@@ -6729,7 +6730,9 @@ class EmotionalStatePlugin(Star):
             getattr(self, "_llm_request_pipeline", None), "aclose", None
         )
         if callable(close_pipeline):
-            await close_pipeline()
+            close_result = close_pipeline()
+            if inspect.isawaitable(close_result):
+                await close_result
 
     async def _send_realtime_chat_plan(
         self,

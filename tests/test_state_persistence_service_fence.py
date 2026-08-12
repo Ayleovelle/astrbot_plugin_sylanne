@@ -439,3 +439,72 @@ def test_two_instances_fail_closed_for_ambiguous_module_mark_and_isolate_flush()
         assert _backend_bytes(backend_b) == before_b
 
     asyncio.run(go())
+
+
+def test_partial_explicit_kernel_kv_authority_preserves_dirty_state_and_bytes() -> None:
+    async def probe(*, get: bool, put: bool) -> None:
+        backend = _Backend()
+        plugin = _PluginWithoutKv()
+        persistence = StatePersistence(
+            plugin,
+            services=_partial_services(backend, get=get, put=put),
+        )
+        session_key = f"sess:partial-kernel-{get}-{put}"
+        host = SylanneAlphaHost(
+            root=tempfile.mkdtemp(prefix="state_partial_kernel_"),
+            session_key=session_key,
+        )
+        before = _backend_bytes(backend)
+
+        persistence.mark_dirty("memory")
+        await persistence.persist_kernel(session_key, host)
+
+        assert _backend_bytes(backend) == before
+        assert persistence.is_dirty() is True
+
+    async def go() -> None:
+        await probe(get=False, put=True)
+        await probe(get=True, put=False)
+
+    asyncio.run(go())
+
+
+def test_explicit_buffer_load_without_get_never_reads_ambient_file_state() -> None:
+    async def go() -> None:
+        backend = _Backend()
+        plugin = _PluginWithoutKv()
+        persistence = StatePersistence(
+            plugin,
+            services=_partial_services(backend, get=False, put=True),
+        )
+        ambient_reads: list[str] = []
+        host = SimpleNamespace(
+            runtime=SimpleNamespace(
+                load_buffer=lambda session_key: ambient_reads.append(session_key)
+                or {"secret": "ambient"}
+            )
+        )
+
+        assert await persistence.load_buffer_data("sess:missing-buffer-get", host) is None
+        assert ambient_reads == []
+
+    asyncio.run(go())
+
+
+def test_explicit_memory_load_without_host_service_never_uses_plugin_host() -> None:
+    async def go() -> None:
+        backend = _Backend()
+        plugin = _PluginWithoutKv()
+        ambient_host_reads: list[str] = []
+        plugin._host = (  # type: ignore[method-assign]
+            lambda session_key: ambient_host_reads.append(session_key)
+            or SimpleNamespace(runtime=None)
+        )
+        persistence = StatePersistence(plugin, services=_services(backend))
+        before = _backend_bytes(backend)
+
+        assert await persistence.load_sylanne_memory_state("sess:missing-host") is None
+        assert ambient_host_reads == []
+        assert _backend_bytes(backend) == before
+
+    asyncio.run(go())
