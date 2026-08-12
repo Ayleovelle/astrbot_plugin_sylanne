@@ -291,13 +291,77 @@ def test_explicit_same_plugin_same_session_prompt_caches_are_instance_local() ->
 
 
 def test_explicit_prompt_cache_does_not_evaluate_plugin_fallback_property() -> None:
+    owner = SessionStateStore()
     pipe = LLMRequestPipeline(  # type: ignore[arg-type]
         _CachePoisonPlugin(),
-        services=PluginServices(config={}),
+        services=PluginServices(config={}, runtime_state=owner),
     )
-    pipe._cached_system_prompts["same"] = "service-owned"
+    owner.system_prompt_cache.set("same", "service-owned")
 
     assert pipe._life_sim_persona_getter("same") == "service-owned"
+
+
+def test_explicit_prompt_cache_is_bounded_and_released_with_owner() -> None:
+    plugin = _PoisonPlugin()
+    current = {"prompt": ""}
+    plugin._bound_runtime = lambda: _persona_binding(current["prompt"])
+    owner = SessionStateStore()
+    pipe = LLMRequestPipeline(  # type: ignore[arg-type]
+        plugin,
+        services=PluginServices(config={}, runtime_state=owner),
+    )
+
+    for index in range(205):
+        current["prompt"] = f"persona-{index}"
+        pipe._cache_system_prompt(f"session-{index}")
+
+    assert len(owner.system_prompt_cache) == 200
+    assert owner.system_prompt_cache.get("session-0") is None
+    assert owner.system_prompt_cache.get("session-204") == "persona-204"
+
+    pipe.release_session("session-204")
+    assert owner.system_prompt_cache.get("session-204") is None
+    assert pipe._life_sim_persona_getter("session-204") != "persona-204"
+
+    current["prompt"] = "persona-reclaimed"
+    pipe._cache_system_prompt("session-204")
+    assert len(owner.system_prompt_cache) == 200
+    asyncio.run(pipe.aclose())
+    assert owner.system_prompt_cache.snapshot_items() == []
+
+
+def test_explicit_prompt_cache_same_token_aba_rejects_old_generation_write() -> None:
+    async def _exercise() -> None:
+        plugin = _PoisonPlugin()
+        current = {"prompt": "generation-one"}
+        plugin._bound_runtime = lambda: _persona_binding(current["prompt"])
+        owner = SessionStateStore()
+        pipe = LLMRequestPipeline(  # type: ignore[arg-type]
+            plugin,
+            services=PluginServices(config={}, runtime_state=owner),
+        )
+        owner.claim_session("same", 1)
+        resume_old = asyncio.Event()
+
+        async def _old_generation_write() -> None:
+            await resume_old.wait()
+            current["prompt"] = "stale-generation-one"
+            pipe._cache_system_prompt("same")
+
+        old_task = asyncio.create_task(_old_generation_write())
+        await asyncio.sleep(0)
+        owner.claim_session("same", 2)
+        current["prompt"] = "generation-two"
+        pipe._cache_system_prompt("same")
+
+        pipe.release_session("same", expected_generation=1)
+        assert owner.system_prompt_cache.get("same") == "generation-two"
+
+        resume_old.set()
+        await old_task
+        assert owner.system_prompt_cache.get("same") == "generation-two"
+
+    asyncio.run(_exercise())
 
 
 def test_explicit_services_never_consume_plugin_amnesia_or_scan_recent_hosts() -> None:
@@ -333,6 +397,8 @@ def test_default_mode_retains_plugin_clock_cache_and_amnesia_compatibility() -> 
     pipe._cache_system_prompt("same")
 
     assert pipe._now() == 303.0
+    assert plugin._cached_system_prompts == {"same": "default-persona"}
+    pipe.release_session("same")
     assert plugin._cached_system_prompts == {"same": "default-persona"}
     assert pipe._take_amnesia_pending("same") is True
     assert plugin._amnesia_sessions == set()

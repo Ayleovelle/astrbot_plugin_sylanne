@@ -767,13 +767,13 @@ class LLMRequestPipeline:
         else:
             self._services = self._build_compat_services(plugin)
         if self._services_explicit:
-            self._cached_system_prompts: dict[str, str] = {}
             selected_owner = getattr(self._services, "runtime_state", None)
             self._runtime_state = (
                 selected_owner
                 if isinstance(selected_owner, SessionStateStore)
                 else SessionStateStore()
             )
+            self._cached_system_prompts = self._runtime_state.system_prompt_cache
         else:
             if not hasattr(self._p, "_cached_system_prompts"):
                 self._p._cached_system_prompts = {}
@@ -915,7 +915,12 @@ class LLMRequestPipeline:
         self._runtime_state = owner
         return owner
 
-    def release_session(self, session_key: str) -> None:
+    def release_session(
+        self,
+        session_key: str,
+        *,
+        expected_generation: int | None = None,
+    ) -> None:
         """Release one exact storage token from this pipeline's runtime owner."""
 
         if not isinstance(session_key, str) or not session_key:
@@ -925,7 +930,10 @@ class LLMRequestPipeline:
             # lifecycle already performs the release; resolving ``plugin._store``
             # after that scope is retired would cross the frozen-scope fence.
             return
-        self._runtime_owner().release_session(session_key)
+        self._runtime_owner().release_session(
+            session_key,
+            expected_generation=expected_generation,
+        )
 
     async def aclose(self) -> None:
         """Close the selected runtime owner and cancel its pipeline tasks."""
@@ -1370,7 +1378,10 @@ class LLMRequestPipeline:
         persona_source = getattr(resolved, "persona_source", None)
         system_prompt = str(getattr(persona_source, "prompt", "") or "").strip()
         if system_prompt:
-            self._cached_system_prompts[session_key] = system_prompt
+            if getattr(self, "_services_explicit", False):
+                self._runtime_owner().system_prompt_cache.set(session_key, system_prompt)
+            else:
+                self._cached_system_prompts[session_key] = system_prompt
 
     def _life_sim_persona_getter(self, session_key: str = "") -> str:
         """返回生命模拟器使用的人格描述。

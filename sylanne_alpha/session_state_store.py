@@ -223,6 +223,9 @@ class SessionStateStore:
         )
 
         # ---- 请求/响应诊断缓存 ----
+        self.system_prompt_cache: SessionMap = self._reg(
+            "system_prompt_cache", BoundedDict(maxsize=200)
+        )
         self.last_request_budgets: SessionMap = self._reg("last_request_budgets", BoundedDict(maxsize=200))
         self.last_understanding_closed_loop: SessionMap = self._reg("last_understanding_closed_loop", BoundedDict(maxsize=200))
         self.last_bot_expression_time: SessionMap = self._reg("last_bot_expression_time", BoundedDict(maxsize=200))
