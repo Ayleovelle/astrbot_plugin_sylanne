@@ -889,8 +889,11 @@ def _is_followup_trigger_token(tok: str) -> bool:
 
 
 def _content_tokens_for_followup(text: str) -> set[str]:
-    """分词后剔除触发词/数字，只留跟"聊的是什么事"相关的内容 token。"""
-    return {t for t in _tokenize(text) if not _is_followup_trigger_token(t)}
+    """先剔除完整触发短语，再分词，只保留实际话题内容 token。"""
+    content = _DAY_OF_MONTH_RE.sub(" ", text)
+    for trigger in sorted(_FOLLOWUP_TRIGGER_TOKENS, key=len, reverse=True):
+        content = content.replace(trigger, " ")
+    return {t for t in _tokenize(content) if not _is_followup_trigger_token(t)}
 
 
 def _followup_mention_overlap(incoming_text: str, topic_snippet: str) -> float:

@@ -298,8 +298,18 @@ class TestConsumeOnMention:
         assert ms.consume_pending_followups_by_text("一定哦") == 0
         assert len(ms._pending_followups) == 1
 
-    def test_true_positive_content_mention_still_consumes(self):
-        """修复没有矫枉过正：真提到实质内容（面试）时仍应正常消费。"""
+    def test_fallback_tokenizer_trigger_only_mentions_do_not_consume(self, monkeypatch):
+        """无 jieba 时，承诺/时间触发短语本身仍不能冒充话题内容。"""
+        monkeypatch.setattr(_memory_system_mod, "_jieba", None)
+        for text in ("明天见！", "明天再说吧", "我明天有空", "一定哦"):
+            ms = MemorySystem()
+            ms.write_summary("我答应你明天一定去面试", source_turns=1, temperature=0.0)
+            assert ms.consume_pending_followups_by_text(text) == 0
+            assert len(ms._pending_followups) == 1
+
+    def test_true_positive_content_mention_still_consumes(self, monkeypatch):
+        """无 jieba 时真提到实质内容（面试）仍应正常消费。"""
+        monkeypatch.setattr(_memory_system_mod, "_jieba", None)
         ms = MemorySystem()
         ms.write_summary("我答应你明天一定去面试", source_turns=1, temperature=0.0)
         consumed = ms.consume_pending_followups_by_text("面试过了,还挺顺利")

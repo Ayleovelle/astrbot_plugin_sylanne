@@ -540,6 +540,48 @@ def _runtime_from_scope_or_legacy(
     return _legacy_runtime_for_raw_session(plugin, scope_or_session)
 
 
+def _existing_runtime_from_scope_or_legacy(
+    plugin: Any, scope_or_session: SessionScope | str
+) -> dict[str, Any] | None:
+    """Read an already-owned V2 runtime without creating any state owner."""
+
+    if type(scope_or_session) is SessionScope:
+        registry = getattr(plugin, "_scope_runtime_registry", None)
+        is_live = getattr(registry, "is_live_session", None)
+        live_personas = getattr(registry, "live_persona_runtimes", None)
+        if not callable(is_live) or not callable(live_personas):
+            return None
+        try:
+            if not is_live(scope_or_session):
+                return None
+            persona_runtime = next(
+                (
+                    runtime
+                    for runtime in live_personas()
+                    if getattr(runtime, "persona_ref", None)
+                    == scope_or_session.persona_ref
+                ),
+                None,
+            )
+        except ScopeMismatch:
+            return None
+        cache = getattr(persona_runtime, "v2core_runtimes", None)
+        if not isinstance(cache, dict):
+            return None
+        runtime = cache.get(
+            _runtime_cache_key(scope_or_session.storage_token, scope_or_session)
+        )
+        return runtime if isinstance(runtime, dict) else None
+
+    if _requires_frozen_scope(plugin) or not isinstance(scope_or_session, str):
+        return None
+    cache = getattr(plugin, "_v2core_runtimes", None)
+    if not isinstance(cache, dict):
+        return None
+    runtime = cache.get(_runtime_cache_key(scope_or_session, None))
+    return runtime if isinstance(runtime, dict) else None
+
+
 def _runtime_for(
     plugin: Any,
     scope_or_session: SessionScope | str,
@@ -1328,7 +1370,7 @@ def consume_pending_quality(
     新话题），陈旧分丢弃返 None——否则陈旧高质量分注入不相关新话题，且 _drift_embodiment 的
     dt 巨大会放大这次错漂移。裸 float（旧格式/测试直塞）向后兼容，视为不过期。
     """
-    rt = _runtime_from_scope_or_legacy(plugin, scope_or_session)
+    rt = _existing_runtime_from_scope_or_legacy(plugin, scope_or_session)
     if not isinstance(rt, dict):
         return None
     q = rt.get("pending_quality")
@@ -1402,7 +1444,7 @@ def consume_dispatch_modulators(
     （> _DISPATCH_MOD_TTL，防跨轮串味——rt 是跨轮持久字典）→ None，调用方按中性
     默认（1.0/1.0/0.0）处理，零力学变化。
     """
-    rt = _runtime_from_scope_or_legacy(plugin, scope_or_session)
+    rt = _existing_runtime_from_scope_or_legacy(plugin, scope_or_session)
     if not isinstance(rt, dict):
         return None
     mods = rt.get("turn_dispatch_modulators")

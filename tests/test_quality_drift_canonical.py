@@ -11,7 +11,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from sylanne_alpha.scope_runtime import ScopeRuntimeRegistry
+from sylanne_alpha.v2core import integration as integration_mod
 from sylanne_alpha.v2core.integration import consume_pending_quality
+from tests.scope_fixtures import scopes
 
 
 def _plugin_with_rt(pending_quality) -> SimpleNamespace:  # noqa: ANN001
@@ -77,6 +80,40 @@ def test_consume_no_runtime_safe() -> None:
     p._config = {}
     p._v2core_runtimes = {}
     assert consume_pending_quality(p, "missing") is None
+    assert p._v2core_runtimes == {}
+
+
+def test_consume_missing_raw_runtime_does_not_create_cache() -> None:
+    """消费是只读 lookup；插件尚无 legacy cache 时也不得顺手创建。"""
+    p = SimpleNamespace(_config={})
+    assert consume_pending_quality(p, "missing") is None
+    assert not hasattr(p, "_v2core_runtimes")
+
+
+def test_consume_missing_scoped_runtime_does_not_create_owner(scopes) -> None:
+    """缺失 exact/live scoped runtime 时不得创建 Persona/Session owner。"""
+    registry = ScopeRuntimeRegistry.for_test()
+    p = SimpleNamespace(_scope_runtime_registry=registry)
+
+    assert consume_pending_quality(p, scopes.bot_a_persona_a) is None
+    assert registry.persona_count == 0
+    assert registry.session_count == 0
+
+
+def test_consume_existing_scoped_runtime_clears_exact_value(scopes) -> None:
+    """已存在的 exact/live scoped runtime 仍保持一次性消费语义。"""
+    scope = scopes.bot_a_persona_a
+    registry = ScopeRuntimeRegistry.for_test()
+    persona_runtime = registry.for_scope(scope)
+    registry.exact_session(scope)
+    runtime = {"pending_quality": 0.91}
+    persona_runtime.v2core_runtimes[
+        integration_mod._runtime_cache_key(scope.storage_token, scope)
+    ] = runtime
+    p = SimpleNamespace(_scope_runtime_registry=registry)
+
+    assert consume_pending_quality(p, scope) == 0.91
+    assert runtime["pending_quality"] is None
 
 
 def test_injected_value_drives_drift_end_to_end() -> None:

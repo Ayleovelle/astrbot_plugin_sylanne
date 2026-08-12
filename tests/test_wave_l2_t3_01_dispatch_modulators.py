@@ -17,12 +17,15 @@ express.segment_bias/pause_bias 同理：只喂 fragment._style_line 的口吻�
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline
 from sylanne_alpha.message_dispatch import realtime_plan
+from sylanne_alpha.scope_runtime import ScopeRuntimeRegistry
 from sylanne_alpha.v2core import integration as ig
 from sylanne_alpha.v2core.behavior import _BEHAVIORS, _clamp_modulators, select_behavior
 from sylanne_alpha.v2core.contracts import BeatContext, BodySnapshot, Phase
+from tests.scope_fixtures import scopes
 
 
 def _body(**kw) -> BodySnapshot:
@@ -227,6 +230,38 @@ class TestConsumeDispatchModulators:
     def test_no_runtime_returns_none(self) -> None:
         p = _ConsumePlugin()
         assert ig.consume_dispatch_modulators(p, "missing_session") is None
+        assert p._v2core_runtimes == {}
+
+    def test_missing_scoped_runtime_does_not_create_owner(self, scopes) -> None:
+        registry = ScopeRuntimeRegistry.for_test()
+        p = SimpleNamespace(_scope_runtime_registry=registry)
+
+        assert ig.consume_dispatch_modulators(p, scopes.bot_a_persona_a) is None
+        assert registry.persona_count == 0
+        assert registry.session_count == 0
+
+    def test_existing_scoped_runtime_consumes_exact_value(self, scopes) -> None:
+        scope = scopes.bot_a_persona_a
+        registry = ScopeRuntimeRegistry.for_test()
+        persona_runtime = registry.for_scope(scope)
+        registry.exact_session(scope)
+        runtime = {"turn_dispatch_modulators": {
+            "cps_mult": 1.2,
+            "max_part_chars_mult": 0.9,
+            "extra_predelay_s": 1.5,
+            "ts": time.time(),
+        }}
+        persona_runtime.v2core_runtimes[
+            ig._runtime_cache_key(scope.storage_token, scope)
+        ] = runtime
+        p = SimpleNamespace(_scope_runtime_registry=registry)
+
+        assert ig.consume_dispatch_modulators(p, scope) == {
+            "cps_mult": 1.2,
+            "max_part_chars_mult": 0.9,
+            "extra_predelay_s": 1.5,
+        }
+        assert runtime["turn_dispatch_modulators"] is None
 
     def test_fresh_value_consumed_once(self) -> None:
         p = _ConsumePlugin()
