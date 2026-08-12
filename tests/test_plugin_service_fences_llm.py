@@ -444,6 +444,18 @@ def test_default_mode_retains_plugin_clock_cache_and_amnesia_compatibility() -> 
     assert plugin._amnesia_sessions == set()
 
 
+def test_default_mode_caches_prompt_when_plugin_exposes_session_map() -> None:
+    plugin = _PoisonPlugin()
+    owner = SessionStateStore()
+    plugin._cached_system_prompts = owner.system_prompt_cache  # type: ignore[assignment]
+    plugin._bound_runtime = lambda: _persona_binding("default-persona")
+    pipe = LLMRequestPipeline(plugin)  # type: ignore[arg-type]
+
+    pipe._cache_system_prompt("same")
+
+    assert owner.system_prompt_cache.get("same") == "default-persona"
+
+
 def test_default_observe_request_accepts_a_synchronous_compat_callback(
     monkeypatch: Any,
 ) -> None:

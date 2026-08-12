@@ -44,7 +44,7 @@ from sylanne_alpha.semantic_segmentation import (
 )
 from sylanne_alpha.state_persistence import mark_dirty
 from sylanne_alpha.scope_contracts import SessionScope
-from sylanne_alpha.session_state_store import SessionStateStore
+from sylanne_alpha.session_state_store import SessionMap, SessionStateStore
 from sylanne_alpha.utils import safe_ensure_future
 
 if TYPE_CHECKING:
@@ -1388,7 +1388,11 @@ class LLMRequestPipeline:
             if getattr(self, "_services_explicit", False):
                 self._runtime_owner().system_prompt_cache.set(session_key, system_prompt)
             else:
-                self._cached_system_prompts[session_key] = system_prompt
+                cached_system_prompts = self._cached_system_prompts
+                if isinstance(cached_system_prompts, SessionMap):
+                    cached_system_prompts.set(session_key, system_prompt)
+                else:
+                    cached_system_prompts[session_key] = system_prompt
 
     def _life_sim_persona_getter(self, session_key: str = "") -> str:
         """返回生命模拟器使用的人格描述。

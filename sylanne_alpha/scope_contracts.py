@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeGuard
 
 if TYPE_CHECKING:
     from .scope_identity import PersonaSource
@@ -29,7 +29,7 @@ def _require_token(value: object, prefix: str) -> str:
     return value
 
 
-def is_scope_storage_token(value: object) -> bool:
+def is_scope_storage_token(value: object) -> TypeGuard[str]:
     """Return whether ``value`` has the exact HMAC-SHA256 scope token shape."""
 
     return type(value) is str and _SCOPE_STORAGE_TOKEN.fullmatch(value) is not None
