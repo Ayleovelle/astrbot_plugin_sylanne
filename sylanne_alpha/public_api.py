@@ -195,6 +195,8 @@ class PublicAPI:
     def _host(self, session_key: str) -> Any:
         host_fn = self._services.host_fn
         if not callable(host_fn):
+            if self._services_explicit:
+                return None
             raise RuntimeError("host service is unavailable")
         return host_fn(session_key)
 
@@ -226,7 +228,14 @@ class PublicAPI:
             return float(observed_now_fn())
         if not self._services_explicit and observed_now_fn is not None:
             return float(observed_now_fn)
+        if self._services_explicit:
+            raise RuntimeError("observed time service is unavailable")
         return time.time()
+
+    def _event_time(self, observed_now: float) -> dict[str, Any]:
+        if self._services_explicit:
+            return {"epoch": float(observed_now)}
+        return dict(self._plugin._event_time(observed_now))
 
     def _bound_webui_session_key(self) -> str | None:
         """Return the exact session named by an already-bound private scope.
@@ -319,6 +328,8 @@ class PublicAPI:
             观测台数据字典，包含 cards、visualization、config_controls 等。
         """
         host = self._host(session_key)
+        if host is None:
+            return {"ok": False, "error": "host_unavailable"}
         surface = host.diagnostics()
         body = surface["body"]
         diagnostics = surface["diagnostics"]
@@ -427,7 +438,11 @@ class PublicAPI:
 
     async def _observatory_route_handler(self) -> dict[str, Any]:
         session_key = self._bound_webui_session_key()
-        if session_key is None and getattr(self._p, "_scope_runtime_registry", None) is None:
+        if (
+            session_key is None
+            and not self._services_explicit
+            and getattr(self._p, "_scope_runtime_registry", None) is None
+        ):
             session_key = self._legacy_observatory_session_key()
         if session_key is None:
             return {"ok": False, "error": "scope_unavailable"}
@@ -437,7 +452,11 @@ class PublicAPI:
         """Build the lineage payload only for the exact bound session owner."""
 
         session_key = self._bound_webui_session_key()
-        if session_key is None and getattr(self._p, "_scope_runtime_registry", None) is None:
+        if (
+            session_key is None
+            and not self._services_explicit
+            and getattr(self._p, "_scope_runtime_registry", None) is None
+        ):
             session_key = self._legacy_observatory_session_key()
         if session_key is None:
             return {"ok": False, "error": "scope_unavailable"}
@@ -1461,6 +1480,8 @@ class PublicAPI:
         """
         p = self._plugin
         host = self._host(session_key)
+        if host is None:
+            return {"ok": False, "error": "host_unavailable"}
         effective_now = now or self._observed_now()
         from sylanne_alpha.host import SylanneAlphaHostEvent
 
@@ -1469,7 +1490,7 @@ class PublicAPI:
             confidence=confidence,
             flags=list(flags or []),
             now=effective_now,
-            event_time=p._event_time(effective_now),
+            event_time=self._event_time(effective_now),
         )
         # Feedback loop: trigger based on time since last bot expression
         last_expr_time = p._store.last_bot_expression_time.get(session_key, 0.0)
@@ -1506,6 +1527,8 @@ class PublicAPI:
         """
         p = self._plugin
         host = self._host(session_key)
+        if host is None:
+            return {"ok": False, "error": "host_unavailable"}
         effective_now = now or self._observed_now()
         from sylanne_alpha.host import SylanneAlphaHostEvent
 
@@ -1514,7 +1537,7 @@ class PublicAPI:
             confidence=confidence,
             flags=list(flags or []),
             now=effective_now,
-            event_time=p._event_time(effective_now),
+            event_time=self._event_time(effective_now),
         )
         p._store.last_bot_expression_time.set(session_key, effective_now)
         return host.on_response(event)
@@ -1610,6 +1633,8 @@ class PublicAPI:
     ) -> dict[str, Any]:
         # Legacy compat: simulate_update removed
         host = self._host(session_key)
+        if host is None:
+            return {}
         return {}
 
     async def get_emotion_snapshot(
@@ -1617,6 +1642,8 @@ class PublicAPI:
     ) -> dict[str, Any]:
         # Legacy compat: command_surface removed
         host = self._host(session_key)
+        if host is None:
+            return {"turns": 0, "error": "host_unavailable"}
         payload = {}
         payload["turns"] = host.kernel.turns
         return payload
@@ -1656,6 +1683,8 @@ class PublicAPI:
         if not sk:
             return {"ok": False, "error": "session_unavailable"}
         host = self._host(sk)
+        if host is None:
+            return {"ok": False, "error": "host_unavailable"}
         memory_system = p._memory_system_for_session(sk)
         query_embedding = await self._resolve_query_embedding(query)
 
@@ -2004,6 +2033,17 @@ class PublicAPI:
         """
         p = self._plugin
         host = self._host(session_key)
+        if host is None:
+            return {
+                "schema_version": "sylanne.alpha.memory_system.v1",
+                "session_key": session_key,
+                "slice": "sylanne_memory",
+                "query": query,
+                "source": "host_unavailable",
+                "matches": [],
+                "count": 0,
+                "error": "host_unavailable",
+            }
         memory_system = p._memory_system_for_session(session_key)
         query_embedding = await self._resolve_query_embedding(query)
 
@@ -2073,6 +2113,8 @@ class PublicAPI:
             return {"prompt": ""}
         # Build memory-based injection - use last event text as query hint
         host = self._host(sk)
+        if host is None:
+            return {"prompt": str(getattr(request, "prompt", "") or "")}
         last_text = str(host.kernel.last_event.get("text") or "")
         query_hint = (
             last_text[:100]
@@ -2113,13 +2155,28 @@ class PublicAPI:
 
         p = self._plugin
         host = self._host(session_key)
+        if host is None:
+            return {
+                "ok": False,
+                "error": "host_unavailable",
+                "host_payload": {
+                    "reason": "host_unavailable",
+                    "reason_code": "host_unavailable",
+                },
+                "decision": {
+                    "action": "hold",
+                    "allowed": False,
+                    "reason": "host_unavailable",
+                    "reason_code": "host_unavailable",
+                },
+            }
         effective_now = now or self._observed_now()
         event = SylanneAlphaHostEvent(
             text="",
             confidence=0.5,
             flags=["proactive", "safe"],
             now=effective_now,
-            event_time=p._event_time(effective_now),
+            event_time=self._event_time(effective_now),
         )
         surface = host.on_proactive_check(event)
         decision_payload = proactive_decision(surface)

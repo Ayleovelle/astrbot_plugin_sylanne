@@ -108,6 +108,8 @@ class ProactiveScheduler:
     def _host(self, session_key: str) -> Any:
         host_fn = self._services.host_fn
         if not callable(host_fn):
+            if self._services_explicit:
+                return None
             raise RuntimeError("host service is unavailable")
         return host_fn(session_key)
 
@@ -139,6 +141,8 @@ class ProactiveScheduler:
             return float(observed_now_fn())
         if not self._services_explicit and observed_now_fn is not None:
             return float(observed_now_fn)
+        if self._services_explicit:
+            raise RuntimeError("observed time service is unavailable")
         return time.time()
 
     def _require_legacy_session_api(self) -> None:
@@ -438,9 +442,11 @@ class ProactiveScheduler:
         candidates = dict(self._p._store.proactive_candidate_sessions.items())
         checked = 0
         dispatched = 0
+        dispatch_fn = None
+        if not self._services_explicit:
+            dispatch_fn = getattr(self._plugin, "request_proactive_speech_dispatch", None)
         for sk, info in candidates.items():
             checked += 1
-            dispatch_fn = getattr(self._plugin, "request_proactive_speech_dispatch", None)
             if dispatch_fn and callable(dispatch_fn):
                 event = (
                     info.get("event")
@@ -476,6 +482,8 @@ class ProactiveScheduler:
         from sylanne_alpha.diagnostics_surface import proactive_decision
 
         host = self._host(sk)
+        if host is None:
+            return {"should_speak": False, "reason": "host_unavailable"}
         surface = host.diagnostics()
         decision = proactive_decision(surface)
         # v2core 空闲触达咨询：沉默积累（你的节律超期 + 她憋着的话）让 reach 胜出时，
@@ -682,6 +690,14 @@ class ProactiveScheduler:
             }
 
         host = self._host(sk)
+        if host is None:
+            return {
+                "dispatched": False,
+                "reason": "host_unavailable",
+                "session_key": sk,
+                "decision": decision,
+                "dry_run": False,
+            }
         surface = host.diagnostics()
         reason_code = await bridge.infer_reason_code(sk, surface=surface)
         mood = ""
