@@ -356,14 +356,6 @@ async def test_transport_turn_and_persona_freeze_precede_existing_pipeline(
         lambda *_args: None,
     )
 
-    async def legacy_ready(*_args) -> bool:
-        return True
-
-    monkeypatch.setattr(
-        EmotionalStatePlugin,
-        "_on_message_after_scope_frozen",
-        legacy_ready,
-    )
     monkeypatch.setattr(
         EmotionalStatePlugin,
         "_publish_transport_runtime_owner",

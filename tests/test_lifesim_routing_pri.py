@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from sylanne_alpha.life_simulation import LifeEvent, _event_from_dict, _event_to_dict
 from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline
 
@@ -58,6 +60,9 @@ class _Hosts:
 
     def keys(self):
         return self._d.keys()
+
+    def get(self, key, default=None):
+        return self._d.get(key, default)
 
     def __len__(self):
         return len(self._d)
@@ -119,10 +124,27 @@ def test_intimate_helper_empty_when_none():
     assert _pipe(p)._most_recent_intimate_host_key() == ""
 
 
-def test_shared_host_key_unchanged_picks_last_active():
-    """共享 _most_recent_host_key 行为不变：选最近活跃，不管亲密/群。"""
-    p = _Plugin({"a": _Host(50.0), "GroupMessage:g:x": _Host(300.0)})
-    assert _pipe(p)._most_recent_host_key() == "GroupMessage:g:x"
+def test_scoped_intimate_helper_uses_exact_bound_owner_not_recent_host():
+    p = _Plugin(
+        {
+            "priv:owner-1": _Host(50.0),
+            "priv:newer-owner-1": _Host(300.0),
+        }
+    )
+    p._scope_runtime_registry = object()
+    p._bound_runtime = lambda: SimpleNamespace(
+        scope=SimpleNamespace(storage_token="priv:owner-1")
+    )
+    p._store.relationship_register_state.set("priv:owner-1", _romantic())
+    p._store.relationship_register_state.set("priv:newer-owner-1", _romantic())
+
+    assert _pipe(p)._most_recent_intimate_host_key() == "priv:owner-1"
+
+    p._store.relationship_register_state.set(
+        "priv:owner-1",
+        _romantic("not-owner"),
+    )
+    assert _pipe(p)._most_recent_intimate_host_key() == ""
 
 
 # ---- T2-07②：_life_sim_outreach 回填 origin_session ----

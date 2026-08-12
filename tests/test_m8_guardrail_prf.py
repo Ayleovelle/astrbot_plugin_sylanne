@@ -139,15 +139,9 @@ def test_dropped_event_also_skipped_in_fragment():
     assert "被丢弃的事件内容" not in sim.life_prompt_fragment()
 
 
-# ---- 多会话漂移审计（裁决/MED-6：只记录风险，不修，不断"不误投"）----
+# ---- 精确 owner 选择：不得回退最近会话 ----
 
-def test_document_current_multi_session_drift_risk():
-    """文档化漂移风险：_most_recent_host_key 选最后活跃会话，不一定是事件来源会话。
-
-    断言：在多 host 场景下，选中的是 last_event.now 最大者（最后活跃），
-    而非"事件来源会话"——证明漂移风险客观存在。仅断回写选择一致，
-    不断言"不误投"（2A 审计不修，origin_session 留 2B）。
-    """
+def test_scoped_outreach_never_falls_back_to_recent_foreign_host():
     from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline
 
     class _Kernel:
@@ -160,23 +154,38 @@ def test_document_current_multi_session_drift_risk():
 
     class _Store:
         def __init__(self):
-            # session_A 先活跃，session_B 后活跃（last_event.now 更大）
             self.hosts = {
                 "session_A": _Host(100.0),
                 "session_B": _Host(200.0),
             }
+            self.relationship_register_state = {
+                "session_A": {
+                    "sender_id": "foreign",
+                    "romantic_conf": 0.9,
+                    "sample_count": 10,
+                },
+                "session_B": {
+                    "sender_id": "owner",
+                    "romantic_conf": 0.9,
+                    "sample_count": 10,
+                },
+            }
+            self.intimacy_override = {}
 
     class _Plugin:
         def __init__(self):
             self._store = _Store()
+            self._scope_runtime_registry = object()
+            self.config = {"sylanne_alpha_owner_id": "owner"}
+            self._bound_runtime = lambda: type(
+                "Binding",
+                (),
+                {"scope": type("Scope", (), {"storage_token": "session_A"})()},
+            )()
 
     pipe = LLMRequestPipeline.__new__(LLMRequestPipeline)
     pipe._p = _Plugin()
-    chosen = pipe._most_recent_host_key()
-    # 选最后活跃（B），即便事件可能来自 A —— 漂移风险已知存在
-    assert chosen == "session_B"
-    # 回写选择一致（同输入恒选同一会话，可复现）
-    assert pipe._most_recent_host_key() == "session_B"
+    assert pipe._most_recent_intimate_host_key() == ""
 
 
 
