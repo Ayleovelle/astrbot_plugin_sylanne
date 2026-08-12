@@ -640,7 +640,10 @@ async def scoped_api_payload(
         }
         outbox = getattr(plugin, "_scope_delivery_outbox", None)
         diagnostics = getattr(outbox, "diagnostics", None)
-        delivery = diagnostics(scope) if callable(diagnostics) else None
+        try:
+            delivery = diagnostics(scope) if callable(diagnostics) else None
+        except Exception:  # noqa: BLE001 - HTTP boundary exposes only the fixed zero DTO
+            delivery = None
         payload["delivery"] = _scoped_delivery_diagnostics(delivery)
     elif endpoint == "observation-history":
         payload["observation_history"] = _scoped_history_payload(plugin, authorization)
@@ -1083,7 +1086,12 @@ class WebUIRoutes:
             return self._scoped_native_error(final)
         return payload
 
-    async def pages_scoped_api_handler(self, endpoint: str = "scope") -> Any:
+    async def pages_scoped_api_handler(
+        self,
+        endpoint: str = "scope",
+        *,
+        registered_path_params: Mapping[str, object] | None = None,
+    ) -> Any:
         """Broker one Pages request without exporting a scope capability.
 
         AstrBot's iframe bridge carries only host-verified ``request.username``
@@ -1103,6 +1111,18 @@ class WebUIRoutes:
                 ScopedApiError(400, "legacy_session_selector_forbidden")
             )
         params = getattr(request, "path_params", {})
+        if registered_path_params is not None and (
+            not isinstance(params, Mapping)
+            or set(registered_path_params)
+            != {"bot_ref", "persona_ref", "session_ref"}
+            or any(
+                params.get(key) != value
+                for key, value in registered_path_params.items()
+            )
+        ):
+            return self._scoped_native_error(
+                ScopedApiError(400, "invalid_scoped_request")
+            )
         try:
             route = scoped_api_route_spec(endpoint)
             if getattr(request, "method", None) != route.method:

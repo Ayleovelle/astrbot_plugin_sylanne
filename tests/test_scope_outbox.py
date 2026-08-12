@@ -276,6 +276,13 @@ def _outbox(context: SimpleNamespace) -> DeliveryOutbox:
     )
 
 
+def _hold_repository_lock(root: str, ready, release) -> None:
+    repository = ScopeRepository(root)
+    with repository.transaction():
+        ready.set()
+        release.wait(10)
+
+
 def test_delivery_diagnostics_are_exact_scope_generation_bound_and_redacted(
     outbox_context,
 ) -> None:
@@ -339,6 +346,63 @@ def test_delivery_diagnostics_are_exact_scope_generation_bound_and_redacted(
         "outcome_unknown": 0,
         "suppressed": 0,
     }
+
+
+def test_delivery_diagnostics_and_state_dto_fail_fast_when_repository_is_busy(
+    outbox_context,
+) -> None:
+    from sylanne_alpha.webui_routes import scoped_api_payload
+
+    outbox = _outbox(outbox_context)
+    outbox.enqueue(_issued_draft(outbox_context, text="private-lock-probe"))
+    process_context = mp.get_context("spawn")
+    ready = process_context.Event()
+    release = process_context.Event()
+    holder = process_context.Process(
+        target=_hold_repository_lock,
+        args=(str(outbox_context.repository.root), ready, release),
+    )
+    holder.start()
+    assert ready.wait(10)
+
+    class Authorization:
+        scope = outbox_context.scope
+
+        @staticmethod
+        def public_payload() -> dict[str, object]:
+            return {"ok": True}
+
+    try:
+        started = time.perf_counter()
+        assert outbox.diagnostics(outbox_context.scope) is None
+        diagnostics_elapsed = time.perf_counter() - started
+
+        started = time.perf_counter()
+        payload = asyncio.run(
+            scoped_api_payload(
+                SimpleNamespace(_scope_delivery_outbox=outbox),
+                Authorization(),
+                "state",
+            )
+        )
+        state_elapsed = time.perf_counter() - started
+    finally:
+        release.set()
+        holder.join(10)
+        if holder.is_alive():
+            holder.terminate()
+            holder.join(5)
+
+    assert holder.exitcode == 0
+    assert diagnostics_elapsed < 0.25
+    assert state_elapsed < 0.25
+    assert payload["delivery"] == {
+        "pending": 0,
+        "failed_retryable": 0,
+        "outcome_unknown": 0,
+        "suppressed": 0,
+    }
+    assert "private-lock-probe" not in repr(payload)
 
 
 def _claim_in_subprocess(

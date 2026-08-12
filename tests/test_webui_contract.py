@@ -344,6 +344,37 @@ def test_scoped_state_embeds_only_the_delivery_diagnostics_dto() -> None:
     }
 
 
+def test_scoped_state_redacts_unexpected_delivery_diagnostics_failure() -> None:
+    from sylanne_alpha.webui_routes import scoped_api_payload
+
+    class Authorization:
+        scope = SimpleNamespace(storage_token="scope_v1_busy")
+
+        @staticmethod
+        def public_payload() -> dict[str, object]:
+            return {"ok": True}
+
+    class Outbox:
+        @staticmethod
+        def diagnostics(_scope: object) -> dict[str, object]:
+            raise RuntimeError("private delivery failure must not cross HTTP")
+
+    payload = asyncio.run(
+        scoped_api_payload(
+            SimpleNamespace(_scope_delivery_outbox=Outbox()),
+            Authorization(),
+            "state",
+        )
+    )
+
+    assert payload["delivery"] == {
+        "pending": 0,
+        "failed_retryable": 0,
+        "outcome_unknown": 0,
+        "suppressed": 0,
+    }
+
+
 def test_observation_history_query_parser_validates_and_clamps() -> None:
     from sylanne_alpha.webui_routes import parse_observation_history_query
 

@@ -191,8 +191,74 @@ def test_pages_registers_immutable_http_routes_but_never_the_scoped_websocket() 
     assert "legacy_scope_gone_handler" in source
     assert "/api/v1/legacy/inventory" in source
     assert "legacy_inventory_handler" in source
-    assert 'f"/{P}/pages/api/v1/bots/<bot_ref>/personas/<persona_ref>/sessions/<session_ref>"' in source
-    assert "pages_scoped_api_handler" in source
+
+
+@pytest.mark.asyncio
+async def test_registered_pages_handlers_accept_real_astrbot_path_kwargs() -> None:
+    import main
+
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class Routes:
+        async def pages_scoped_api_handler(
+            self,
+            endpoint: str,
+            *,
+            registered_path_params: dict[str, object],
+        ) -> dict[str, object]:
+            calls.append((endpoint, registered_path_params))
+            return {"endpoint": endpoint}
+
+        def __getattr__(self, _name: str):
+            async def unused(*_args: object, **_kwargs: object) -> dict[str, bool]:
+                return {"ok": True}
+
+            return unused
+
+    class Context:
+        def __init__(self) -> None:
+            self.routes: dict[tuple[str, tuple[str, ...]], object] = {}
+
+        def register_web_api(
+            self,
+            path: str,
+            handler: object,
+            methods: list[str],
+            _description: str,
+        ) -> None:
+            self.routes[(path, tuple(methods))] = handler
+
+    async def unused(*_args: object, **_kwargs: object) -> dict[str, bool]:
+        return {"ok": True}
+
+    plugin = SimpleNamespace(
+        _webui_routes=Routes(),
+        _observatory_route_handler=unused,
+        _memory_settings_get_handler=unused,
+        _memory_settings_post_handler=unused,
+        _lineage_observatory_handler=unused,
+    )
+    context = Context()
+    main.EmotionalStatePlugin._register_web_apis(plugin, context)
+    root = (
+        "/astrbot_plugin_sylanne/pages/api/v1/bots/<bot_ref>/personas/"
+        "<persona_ref>/sessions/<session_ref>"
+    )
+    kwargs = {
+        "bot_ref": "bot_v1_path",
+        "persona_ref": "persona_v1_path",
+        "session_ref": "session_v1_path",
+    }
+
+    state = await context.routes[(f"{root}/state", ("GET",))](**kwargs)
+    nested = await context.routes[(f"{root}/memory/meltdown", ("POST",))](**kwargs)
+
+    assert state == {"endpoint": "state"}
+    assert nested == {"endpoint": "memory/meltdown"}
+    assert calls == [
+        ("state", kwargs),
+        ("memory/meltdown", kwargs),
+    ]
 
 
 def test_host_claim_adapters_preflight_before_nonce_authorization_and_keep_inventory_explicit() -> None:
@@ -497,11 +563,59 @@ async def test_pages_broker_uses_verified_username_without_exposing_a_nonce(
     )
     monkeypatch.setitem(sys.modules, "astrbot.api.web", web)
 
-    result = await WebUIRoutes(plugin).pages_scoped_api_handler("state")
+    result = await WebUIRoutes(plugin).pages_scoped_api_handler(
+        "state",
+        registered_path_params=dict(web.request.path_params),
+    )
 
     assert result["ok"] is True
     assert "state" in result
     assert "scope_nonce" not in json.dumps(result)
+    assert service._pending_nonces == {}
+
+
+@pytest.mark.asyncio
+async def test_pages_broker_rejects_registered_path_mismatch_before_scope_access(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_scoped_api import _service
+    from sylanne_alpha.webui_routes import WebUIRoutes
+
+    service, _repository, registry, scope, relation = _service(tmp_path)
+
+    class Plugin:
+        _scoped_api_service = service
+        _scope_runtime_registry = registry
+        _scoped_api_principal_scope_grant = staticmethod(lambda *_args: relation)
+        _scoped_api_principal_persona_grant = staticmethod(lambda *_args: None)
+
+    def scope_must_not_be_resolved(*_args: object) -> object:
+        raise AssertionError("path mismatch must fail before repository access")
+
+    monkeypatch.setattr(service, "resolve", scope_must_not_be_resolved)
+    web = ModuleType("astrbot.api.web")
+    web.request = SimpleNamespace(
+        username="dashboard-user",
+        path_params={
+            "bot_ref": scope.bot_ref.token,
+            "persona_ref": scope.persona_ref.token,
+            "session_ref": scope.session_ref.token,
+        },
+        query={},
+        method="GET",
+    )
+    monkeypatch.setitem(sys.modules, "astrbot.api.web", web)
+
+    result = await WebUIRoutes(Plugin()).pages_scoped_api_handler(
+        "state",
+        registered_path_params={
+            **web.request.path_params,
+            "session_ref": "session_v1_mismatched",
+        },
+    )
+
+    assert result == {"error": "invalid_scoped_request", "status": 400}
     assert service._pending_nonces == {}
 
 

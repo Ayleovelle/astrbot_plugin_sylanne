@@ -1618,6 +1618,24 @@ class EmotionalStatePlugin(Star):
         pages_scoped_root = (
             f"/{P}/pages/api/v1/bots/<bot_ref>/personas/<persona_ref>/sessions/<session_ref>"
         )
+
+        def pages_scoped_handler_for(frozen_endpoint: str):
+            async def pages_scoped_handler(
+                bot_ref: object,
+                persona_ref: object,
+                session_ref: object,
+            ) -> Any:
+                return await wr.pages_scoped_api_handler(
+                    frozen_endpoint,
+                    registered_path_params={
+                        "bot_ref": bot_ref,
+                        "persona_ref": persona_ref,
+                        "session_ref": session_ref,
+                    },
+                )
+
+            return pages_scoped_handler
+
         for endpoint, route in SCOPED_API_ROUTE_SPECS.items():
             pages_path = (
                 pages_scoped_root
@@ -1625,12 +1643,9 @@ class EmotionalStatePlugin(Star):
                 else f"{pages_scoped_root}/{endpoint}"
             )
 
-            async def pages_scoped_handler(_endpoint: str = route.endpoint) -> Any:
-                return await wr.pages_scoped_api_handler(_endpoint)
-
             context.register_web_api(
                 pages_path,
-                pages_scoped_handler,
+                pages_scoped_handler_for(route.endpoint),
                 [route.method],
                 f"Sylanne Pages scoped API {endpoint}",
             )

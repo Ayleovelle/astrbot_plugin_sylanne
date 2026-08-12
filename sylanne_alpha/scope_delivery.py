@@ -15,6 +15,8 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Protocol
 
+import portalocker
+
 from .scope_contracts import (
     BotDeliveryRef,
     BotRef,
@@ -1342,7 +1344,7 @@ class DeliveryOutbox:
         if type(scope) is not SessionScope:
             return None
         try:
-            with self.repository.transaction():
+            with self.repository._repository_lock_nowait():
                 if self.repository._require_active_scope_locked(scope) != scope:
                     return None
                 turn = self.catalog.current_exact_locked(
@@ -1393,6 +1395,7 @@ class DeliveryOutbox:
         except (
             KeyError,
             OSError,
+            portalocker.exceptions.LockException,
             RepositoryCorruptionError,
             StaleScopeWrite,
             TypeError,
