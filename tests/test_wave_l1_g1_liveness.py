@@ -22,7 +22,11 @@ import main as main_mod
 from sylanne_alpha.bounded_dict import BoundedDict
 from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline
 from sylanne_alpha.rhythm_learner import RhythmLearner
+from sylanne_alpha.scope_contracts import ResolvedScope
+from sylanne_alpha.scope_identity import PersonaSource
+from sylanne_alpha.scope_repository import ScopeRepository, ScopedPersistenceGateway
 from sylanne_alpha.session_state_store import SessionMap
+from tests.scope_fixtures import scopes as build_scopes
 
 
 def _session_map(name: str) -> SessionMap:
@@ -102,17 +106,73 @@ def _make_on_message_plugin(record_calls: list, obs=None):
     return p
 
 
+class _ScopedEvent:
+    def __init__(self, resolved: ResolvedScope, text: str = "在干嘛呢") -> None:
+        self.unified_msg_origin = "opaque-transport"
+        self.message_str = text
+        self._extras = {"_sylanne_resolved_scope_v1": resolved}
+
+    def get_extra(self, key, default=None):
+        return self._extras.get(key, default)
+
+    def set_extra(self, key, value) -> None:
+        self._extras[key] = value
+
+
+def _make_scoped_plugin(tmp_path, record_calls: list, obs=None):
+    plugin = main_mod.EmotionalStatePlugin(context=types.SimpleNamespace(), config={})
+    repository = ScopeRepository(tmp_path / "scope-v1")
+    plugin._scope_runtime_registry.bind_repository(repository)
+    scope = repository.create_scope(
+        build_scopes.__wrapped__().bot_a_persona_a,
+        expected_absent=True,
+    )
+    resolved = ResolvedScope(
+        scope=scope,
+        persona_source=PersonaSource(
+            persona_id="liveness-test",
+            prompt="quiet",
+            begin_dialogs=(),
+            tools=None,
+            skills=None,
+            resolution_source="test",
+        ),
+        identity_quality="verified",
+        resolution_source="test",
+        resolved_at_ms=1,
+        private_scope_enabled=True,
+        disabled_reason=None,
+        turn_generation=0,
+    )
+    plugin._scope_resolver_v1 = types.SimpleNamespace(
+        _repository=repository,
+        _matches_published_scope=lambda _event, candidate: candidate is resolved,
+    )
+    with plugin._bind_runtime_for_scope(scope):
+        runtime = plugin._scope_runtime_registry.exact_session(scope)
+        runtime.life_simulator.record_scoped_user_response = (
+            lambda now=None: record_calls.append(now)
+        )
+        plugin._store.hosts.set(scope.storage_token, _FakeHost(obs) if obs is not None else None)
+    return plugin, repository, scope, resolved
+
+
+def _drive_scoped_message(plugin, scope, resolved, text="在干嘛呢"):
+    event = _ScopedEvent(resolved, text)
+    with plugin._bind_runtime_for_scope(scope):
+        return asyncio.run(plugin._on_message_after_scope_frozen(event, resolved))
+
+
 # ---------------------------------------------------------------------------
 # T2-07①：on_message → life_sim.record_user_response
 # ---------------------------------------------------------------------------
 
 
-def test_on_message_records_user_response_on_life_sim():
+def test_on_message_records_user_response_on_life_sim(tmp_path):
     calls: list = []
-    p = _make_on_message_plugin(calls)
-    asyncio.run(p.on_message(_fake_event("priv:owner-1")))
+    p, _repository, scope, resolved = _make_scoped_plugin(tmp_path, calls)
+    assert _drive_scoped_message(p, scope, resolved) is True
     assert len(calls) == 1
-    assert calls[0][0] == "priv:owner-1"
 
 
 def test_on_message_survives_missing_record_user_response_method():
@@ -134,12 +194,14 @@ def test_on_message_survives_missing_life_simulator():
 # ---------------------------------------------------------------------------
 
 
-def test_on_message_feeds_rhythm_learner_tempo_always():
+def test_on_message_feeds_rhythm_learner_tempo_always(tmp_path):
     """不受亲密度门控：tempo 必须被记录（is_intimate=False 时也一样）。"""
-    p = _make_on_message_plugin([], obs={"warmth": 0.0, "coherence": 0.0, "tension": 1.0})
-    asyncio.run(p.on_message(_fake_event("priv:owner-1")))
-    assert p._rhythm_learner.session_tempo("priv:owner-1") >= 0.0
-    assert "priv:owner-1" in p._rhythm_learner._tempo_timestamps
+    p, _repository, scope, resolved = _make_scoped_plugin(
+        tmp_path, [], obs={"warmth": 0.0, "coherence": 0.0, "tension": 1.0}
+    )
+    assert _drive_scoped_message(p, scope, resolved) is True
+    with p._bind_runtime_for_scope(scope):
+        assert p._rhythm_learner._tempo_timestamps
 
 
 def test_on_message_without_existing_host_still_records_tempo_and_skips_creation():
@@ -164,28 +226,32 @@ class _FakeHostPartialKernel:
         self.kernel = types.SimpleNamespace()  # 无 .computation
 
 
-def test_on_message_survives_partially_initialized_kernel_chain_tempo_still_recorded():
+def test_on_message_survives_partially_initialized_kernel_chain_tempo_still_recorded(tmp_path):
     """kernel 链路本身抛 AttributeError（非 kernel is None）时，engine_obs 应退化为
     {}，但 tempo 记录（observe_user_message）不能被一起吞掉——回归此前『engine_obs
     获取与 observe_user_message 共享一个 try block』导致的静默跳过 bug。"""
-    p = _make_on_message_plugin([])
-    p._store.hosts = _FakeHosts({"priv:owner-1": _FakeHostPartialKernel()})
-    asyncio.run(p.on_message(_fake_event("priv:owner-1")))
-    assert p._rhythm_learner.session_tempo("priv:owner-1") >= 0.0
-    assert "priv:owner-1" in p._rhythm_learner._tempo_timestamps
-    assert p._rhythm_learner.profile("priv:owner-1") is None  # engine_obs={} → 非亲密
+    p, _repository, scope, resolved = _make_scoped_plugin(tmp_path, [])
+    with p._bind_runtime_for_scope(scope):
+        p._store.hosts.set(scope.storage_token, _FakeHostPartialKernel())
+    assert _drive_scoped_message(p, scope, resolved) is True
+    with p._bind_runtime_for_scope(scope):
+        assert p._rhythm_learner._tempo_timestamps
+        assert p._rhythm_learner.scoped_profile() is None
 
 
-def test_on_message_learns_profile_when_intimate():
+def test_on_message_learns_profile_when_intimate(tmp_path):
     """亲密度够（warmth 高）时应学习消息长度画像。"""
-    p = _make_on_message_plugin([], obs={"warmth": 0.9, "coherence": 0.9, "tension": 0.0})
+    p, _repository, scope, resolved = _make_scoped_plugin(
+        tmp_path, [], obs={"warmth": 0.9, "coherence": 0.9, "tension": 0.0}
+    )
     for i in range(10):
-        asyncio.run(
-            p.on_message(_fake_event("priv:owner-1", text=f"这是第{i}条测试消息内容"))
-        )
-    profile = p._rhythm_learner.profile("priv:owner-1")
-    assert profile is not None
-    assert len(profile._msg_lengths) == 10
+        assert _drive_scoped_message(
+            p, scope, resolved, text=f"这是第{i}条测试消息内容"
+        ) is True
+    with p._bind_runtime_for_scope(scope):
+        profile = p._rhythm_learner.scoped_profile()
+        assert profile is not None
+        assert len(profile._msg_lengths) == 10
 
 
 def test_on_message_skips_profile_when_not_intimate():
@@ -201,46 +267,34 @@ def test_on_message_skips_profile_when_not_intimate():
 # ---------------------------------------------------------------------------
 
 
-def _make_throttle_plugin():
-    p = types.SimpleNamespace()
-    p._rhythm_learner = RhythmLearner(intimacy_threshold=0.6)
-    p._rhythm_learner_last_save_ts = 0.0
-    p._rhythm_learner_dirty_in_flight = False
-    p._kv_writes: list = []
-
-    async def _put_kv_data(key, value):
-        p._kv_writes.append((key, value))
-
-    def _has_kv_api():
-        return True
-
-    p.put_kv_data = _put_kv_data
-    p._has_kv_api = _has_kv_api
-    p._rhythm_learner_throttled_save = types.MethodType(
-        main_mod.EmotionalStatePlugin._rhythm_learner_throttled_save, p
-    )
-    return p
+def _make_throttle_plugin(tmp_path):
+    return _make_scoped_plugin(tmp_path, [])[:3]
 
 
-def test_rhythm_learner_throttled_save_first_call_writes():
-    p = _make_throttle_plugin()
-    asyncio.run(p._rhythm_learner_throttled_save())
-    assert len(p._kv_writes) == 1
-    assert p._kv_writes[0][0] == "sylanne_rhythm_learner_state"
+def test_rhythm_learner_throttled_save_first_call_writes(tmp_path):
+    p, repository, scope = _make_throttle_plugin(tmp_path)
+    with p._bind_runtime_for_scope(scope):
+        asyncio.run(p._rhythm_learner_throttled_save())
+    assert ScopedPersistenceGateway(repository, scope).load("rhythm") is not None
 
 
-def test_rhythm_learner_throttled_save_within_gap_skips():
-    p = _make_throttle_plugin()
-    asyncio.run(p._rhythm_learner_throttled_save())
-    asyncio.run(p._rhythm_learner_throttled_save())
-    assert len(p._kv_writes) == 1  # 第二次在 min-gap 内被节流
+def test_rhythm_learner_throttled_save_within_gap_skips(tmp_path):
+    p, repository, scope = _make_throttle_plugin(tmp_path)
+    with p._bind_runtime_for_scope(scope):
+        asyncio.run(p._rhythm_learner_throttled_save())
+        first = ScopedPersistenceGateway(repository, scope).load("rhythm")
+        asyncio.run(p._rhythm_learner_throttled_save())
+        second = ScopedPersistenceGateway(repository, scope).load("rhythm")
+    assert first is not None and second is not None
+    assert second.generation == first.generation
 
 
-def test_rhythm_learner_throttled_save_noop_without_kv_api():
-    p = _make_throttle_plugin()
-    p._has_kv_api = lambda: False
-    asyncio.run(p._rhythm_learner_throttled_save())
-    assert p._kv_writes == []
+def test_rhythm_learner_throttled_save_noop_without_kv_api(tmp_path):
+    p, repository, scope = _make_throttle_plugin(tmp_path)
+    p._has_kv_api = lambda: (_ for _ in ()).throw(AssertionError("legacy KV used"))
+    with p._bind_runtime_for_scope(scope):
+        asyncio.run(p._rhythm_learner_throttled_save())
+    assert ScopedPersistenceGateway(repository, scope).load("rhythm") is not None
 
 
 def test_rhythm_learner_state_roundtrip_via_to_dict_from_dict():
