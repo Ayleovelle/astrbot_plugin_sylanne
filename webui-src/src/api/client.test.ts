@@ -259,6 +259,64 @@ describe('apiBase', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ['query', 'state?scope_nonce=forged', {}],
+    ['case-variant query', 'state?Scope_Nonce=forged', {}],
+    ['own body property', 'legacy-claim', { method: 'POST', body: { record_id: 'r', scope_nonce: 'forged' } }],
+    ['case-variant header', 'state', { headers: { 'x-sylanne-scope-nonce': 'forged' } }],
+  ])('rejects a Pages scope nonce carrier in %s before invoking the bridge', async (_carrier, endpoint, options) => {
+    const apiGet = vi.fn()
+    const apiPost = vi.fn()
+    vi.stubGlobal('window', { AstrBotPluginPage: { apiGet, apiPost } })
+    vi.stubGlobal('location', {
+      pathname: '/api/plugin/page/content/astrbot_plugin_sylanne/dashboard/index.html',
+    })
+
+    const error = await scopedApiFetch(scopeSnapshot(), endpoint, options).catch(
+      (caught: unknown) => caught,
+    )
+
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error).toMatchObject({ status: 400 })
+    expect(apiGet).not.toHaveBeenCalled()
+    expect(apiPost).not.toHaveBeenCalled()
+  })
+
+  it('maps only the exact Pages scope-stale bridge error into the fixed 409 contract', async () => {
+    const apiGet = vi.fn().mockRejectedValue(new Error('scope_stale'))
+    vi.stubGlobal('window', { AstrBotPluginPage: { apiGet, apiPost: vi.fn() } })
+    vi.stubGlobal('location', {
+      pathname: '/api/plugin/page/content/astrbot_plugin_sylanne/dashboard/index.html',
+    })
+
+    const error = await scopedApiFetch(scopeSnapshot(), 'state').catch(
+      (caught: unknown) => caught,
+    )
+
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error).toMatchObject({ status: 409, data: { error: 'scope_stale' } })
+  })
+
+  it.each([
+    '{"error":"scope_stale"}',
+    'scope_stale ',
+    'private backend detail',
+  ])('does not trust or disclose another Pages bridge error: %s', async (message) => {
+    const apiGet = vi.fn().mockRejectedValue(new Error(message))
+    vi.stubGlobal('window', { AstrBotPluginPage: { apiGet, apiPost: vi.fn() } })
+    vi.stubGlobal('location', {
+      pathname: '/api/plugin/page/content/astrbot_plugin_sylanne/dashboard/index.html',
+    })
+
+    const error = await scopedApiFetch(scopeSnapshot(), 'state').catch(
+      (caught: unknown) => caught,
+    )
+
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error).toMatchObject({ status: 0, message: 'scoped Pages request failed' })
+    expect((error as ApiError).data).toBeUndefined()
+  })
+
   it('does not recover a scoped nonce bootstrap through legacy state when CSRF is absent', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       errorResponse(403, { error: 'csrf required' }),

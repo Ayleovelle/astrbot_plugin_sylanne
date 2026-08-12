@@ -20,6 +20,36 @@ export function adaptObservationStorage(
   }
 }
 
+export interface ObservationCapacityLabels {
+  unlimited: string
+  cleanupActive: string
+  cleanupIdle: string
+  protectedWarning: string
+}
+
+export interface ObservationCapacityModel {
+  used: string
+  limit: string
+  cleanup: string
+  warning: string
+}
+
+export function observationCapacityModel(
+  input: Partial<ObservationHistoryStorage> | null | undefined,
+  labels: ObservationCapacityLabels,
+): ObservationCapacityModel {
+  const storage = adaptObservationStorage(input)
+  return {
+    used: formatObservationBytes(storage.used_bytes),
+    limit:
+      storage.limit_bytes === null || storage.limit_bytes === 0
+        ? labels.unlimited
+        : formatObservationBytes(storage.limit_bytes),
+    cleanup: storage.cleanup_active ? labels.cleanupActive : labels.cleanupIdle,
+    warning: storage.budget_unsatisfiable ? labels.protectedWarning : '',
+  }
+}
+
 export function normalizedMeterPercent(reading: Reading): number | undefined {
   if (reading.discrete || typeof reading.value !== 'number' || reading.value < 0 || reading.value > 1) return undefined
   return reading.value * 100

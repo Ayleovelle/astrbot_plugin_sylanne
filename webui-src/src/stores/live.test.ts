@@ -332,4 +332,47 @@ describe('live scoped polling', () => {
     await vi.waitFor(() => expect(scopedApiFetchMock).toHaveBeenCalledTimes(2))
     expect(live.state).toMatchObject({ tick_count: 2 })
   })
+
+  it('refreshes the catalog once and retries one fenced Pages scope-stale request', async () => {
+    const scope = useScopeStore()
+    scope.setCatalog(catalog([{ bot: 'bot_v1_A', persona: 'persona_v1_P', session: 'session_v1_S', generation: 1 }]))
+    isAstrBotPageMock.mockReturnValue(true)
+    fetchScopeCatalogMock.mockResolvedValue(
+      catalog([{ bot: 'bot_v1_A', persona: 'persona_v1_P', session: 'session_v1_S', generation: 2 }]),
+    )
+    scopedApiFetchMock
+      .mockRejectedValueOnce({ status: 409, data: { error: 'scope_stale' } })
+      .mockResolvedValueOnce(scopedState('bot_v1_A', 'persona_v1_P', 'session_v1_S', 2, 22))
+
+    const live = useLiveStore()
+    expect(await live.fetchOnce()).toBe(true)
+    expect(fetchScopeCatalogMock).toHaveBeenCalledOnce()
+    expect(scopedApiFetchMock).toHaveBeenCalledTimes(2)
+    expect(scopedApiFetchMock.mock.calls[0][0].scopeGeneration).toBe(1)
+    expect(scopedApiFetchMock.mock.calls[1][0].scopeGeneration).toBe(2)
+    expect(live.state).toMatchObject({ tick_count: 22, scope_generation: 2 })
+  })
+
+  it('discards a late Pages retry after the selected generation advances again', async () => {
+    const scope = useScopeStore()
+    scope.setCatalog(catalog([{ bot: 'bot_v1_A', persona: 'persona_v1_P', session: 'session_v1_S', generation: 1 }]))
+    isAstrBotPageMock.mockReturnValue(true)
+    fetchScopeCatalogMock.mockResolvedValue(
+      catalog([{ bot: 'bot_v1_A', persona: 'persona_v1_P', session: 'session_v1_S', generation: 2 }]),
+    )
+    const lateRetry = deferred<ScopedApiResponse>()
+    scopedApiFetchMock
+      .mockRejectedValueOnce({ status: 409, data: { error: 'scope_stale' } })
+      .mockReturnValueOnce(lateRetry.promise)
+
+    const live = useLiveStore()
+    const request = live.fetchOnce()
+    await vi.waitFor(() => expect(scopedApiFetchMock).toHaveBeenCalledTimes(2))
+    scope.setCatalog(catalog([{ bot: 'bot_v1_A', persona: 'persona_v1_P', session: 'session_v1_S', generation: 3 }]))
+    lateRetry.resolve(scopedState('bot_v1_A', 'persona_v1_P', 'session_v1_S', 2, 22))
+
+    expect(await request).toBe(false)
+    expect(fetchScopeCatalogMock).toHaveBeenCalledOnce()
+    expect(live.state).toBeNull()
+  })
 })

@@ -7,7 +7,7 @@ import { useI18n } from '../../composables/useI18n'
 import { useScopeStore } from '../../stores/scope'
 import Modal from '../ui/Modal.vue'
 import ObservationTrendChart from './ObservationTrendChart.vue'
-import { adaptObservationStorage, buildCurrentReadings, createObservationRequestGuard, formatObservationBytes, formatObservationOldest, normalizeHistoryBuckets, normalizedMeterPercent, type ObservationGroup } from '../../views/monitorObservation'
+import { adaptObservationStorage, buildCurrentReadings, createObservationRequestGuard, formatObservationOldest, normalizeHistoryBuckets, normalizedMeterPercent, observationCapacityModel, type ObservationGroup } from '../../views/monitorObservation'
 
 const props = defineProps<{ open: boolean; group: ObservationGroup | null; state: StateResponse | null; originRect: DOMRect | null }>()
 const emit = defineEmits<{ 'update:open': [value: boolean] }>()
@@ -93,7 +93,13 @@ const related = computed(() => {
   return [value(t('emo.repair_pressure'), state.emotion?.repair_pressure), value(t('expr.mode'), state.expression?.mode)]
 })
 const readingLabel = (key: string): string => ({ warmth: t('emo.warmth'), arousal: t('emo.arousal'), valence: t('emo.valence'), tension: t('emo.tension'), curiosity: t('emo.curiosity'), repair_pressure: t('emo.repair_pressure'), expression_drive: t('emo.expression_drive'), boundary_firmness: t('emo.boundary_firmness'), integrity: t('bound.integrity'), entropy: t('bound.entropy'), rotation: t('bound.rotation'), repair_rate: t('bound.repair_rate'), surprise: t('gate.surprise'), threshold: t('gate.threshold'), route: t('gate.route'), mode: t('expr.mode'), drive: t('expr.drive'), positive: t('fb.positive'), negative: t('fb.negative'), neutral: t('fb.neutral') }[key] || key)
-const storageLimit = computed(() => storage.value?.limit_bytes == null || storage.value.limit_bytes === 0 ? t('observation.unlimited') : formatObservationBytes(storage.value.limit_bytes))
+const capacity = computed(() => observationCapacityModel(storage.value, {
+  unlimited: t('observation.unlimited'),
+  cleanupActive: t('observation.cleanup_active'),
+  cleanupIdle: t('observation.cleanup_idle'),
+  protectedWarning: t('observation.budget_unsatisfiable'),
+}))
+const storageLimit = computed(() => capacity.value.limit)
 const oldestLabel = computed(() => formatObservationOldest(storage.value?.oldest_ms, t('observation.no_record')))
 const meterPercent = normalizedMeterPercent
 </script>
@@ -109,8 +115,8 @@ const meterPercent = normalizedMeterPercent
     <section id="observation-chamber" class="chamber" aria-live="polite">
       <div class="primary-grid"><section class="current-panel"><h3>{{ t('observation.current') }}</h3><div class="readings"><div v-for="reading in readings" :key="reading.key" class="reading-row" :class="{ 'has-meter': meterPercent(reading) !== undefined }"><b>{{ readingLabel(reading.key) }}</b><span v-if="meterPercent(reading) !== undefined" class="reading-meter"><i :style="{ width: `${meterPercent(reading)}%` }" /></span><span class="mono">{{ reading.value }}</span></div></div></section><section class="trend-panel"><h3>{{ t('observation.trend') }}</h3><p v-if="trendState === 'loading'">{{ t('common.loading') }}</p><p v-else-if="trendState === 'error'">{{ error }} <button type="button" @click="load">{{ t('common.retry') }}</button></p><template v-else-if="trendState === 'chart'"><ObservationTrendChart :buckets="buckets" :label="title" /><p v-if="loading">{{ t('common.loading') }}</p><p v-if="error" class="warning">{{ t('observation.refresh_failed') }} <button type="button" @click="load">{{ t('common.retry') }}</button></p></template><template v-else><p>{{ t('observation.empty') }}</p><p v-if="trendState === 'empty' && loading">{{ t('common.loading') }}</p><p v-if="trendState === 'empty' && error" class="warning">{{ t('observation.refresh_failed') }} <button type="button" @click="load">{{ t('common.retry') }}</button></p></template></section></div>
       <p v-if="visibleHistory?.partial" class="warning">{{ t('observation.partial_warning') }}</p>
-      <p v-if="storage?.budget_unsatisfiable" class="warning">{{ t('observation.budget_unsatisfiable') }}</p>
-      <div class="detail-grid"><section class="lower-panel"><h3>{{ t('observation.explanation') }}</h3><p class="description">{{ description }}</p></section><section class="lower-panel"><h3>{{ t('observation.related') }}</h3><p>{{ related.join(' · ') }}</p></section><section v-if="visibleHistory" class="lower-panel metadata-list"><h3>{{ t('observation.latest') }}</h3><span>{{ latestTime }}</span><span>{{ latestValues.length ? latestValues.map(item => `${readingLabel(item.key)}: ${item.value}`).join(' · ') : t('common.empty') }}</span><span>{{ t('observation.samples') }}: {{ visibleHistory.sample_count }}</span><span>{{ t('observation.storage') }}: {{ formatObservationBytes(storage?.used_bytes) }} / {{ storageLimit }}</span><span>{{ t('observation.oldest') }}: {{ oldestLabel }}</span><span>{{ t('observation.cleanup') }}: {{ storage?.cleanup_active ? t('observation.cleanup_active') : t('observation.cleanup_idle') }}</span></section></div>
+      <p v-if="capacity.warning" class="warning">{{ capacity.warning }}</p>
+      <div class="detail-grid"><section class="lower-panel"><h3>{{ t('observation.explanation') }}</h3><p class="description">{{ description }}</p></section><section class="lower-panel"><h3>{{ t('observation.related') }}</h3><p>{{ related.join(' · ') }}</p></section><section v-if="visibleHistory" class="lower-panel metadata-list"><h3>{{ t('observation.latest') }}</h3><span>{{ latestTime }}</span><span>{{ latestValues.length ? latestValues.map(item => `${readingLabel(item.key)}: ${item.value}`).join(' · ') : t('common.empty') }}</span><span>{{ t('observation.samples') }}: {{ visibleHistory.sample_count }}</span><span>{{ t('observation.storage') }}: {{ capacity.used }} / {{ storageLimit }}</span><span>{{ t('observation.oldest') }}: {{ oldestLabel }}</span><span>{{ t('observation.cleanup') }}: {{ capacity.cleanup }}</span></section></div>
     </section>
   </Modal>
 </template>

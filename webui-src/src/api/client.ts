@@ -221,6 +221,32 @@ function pagesScopedApiPath(snapshot: ScopeRequestSnapshot, endpoint = ''): stri
   return `/pages${scopedApiPath(snapshot, endpoint)}`
 }
 
+function hasOwnScopeNonce(value: unknown): boolean {
+  if (value === null || typeof value !== 'object') return false
+  return Object.keys(value).some((key) => key.toLowerCase() === 'scope_nonce')
+}
+
+function endpointHasScopeNonce(endpoint: string): boolean {
+  const parsed = new URL(endpoint, 'https://sylanne.invalid/')
+  return [...parsed.searchParams.keys()].some((key) => key.toLowerCase() === 'scope_nonce')
+}
+
+function rejectPagesScopeNonceCarrier(endpoint: string, options: ApiOptions): void {
+  const headerCarrier = Object.keys(options.headers || {}).some(
+    (key) => key.toLowerCase() === SCOPE_NONCE_HEADER.toLowerCase(),
+  )
+  if (endpointHasScopeNonce(endpoint) || hasOwnScopeNonce(options.body) || headerCarrier) {
+    throw new ApiError(400, 'scope nonce carrier forbidden')
+  }
+}
+
+function pagesScopedBridgeError(cause: unknown): ApiError {
+  if (cause instanceof ApiError && cause.status === 0 && cause.message === 'scope_stale') {
+    return new ApiError(409, 'scope stale', { error: 'scope_stale' })
+  }
+  return new ApiError(0, 'scoped Pages request failed')
+}
+
 export function personaApiPath(snapshot: PersonaRequestSnapshot): string {
   const persona = snapshotPersona(snapshot)
   return `/api/v1/bots/${encodeURIComponent(persona.bot_ref)}/personas/${encodeURIComponent(
@@ -243,11 +269,16 @@ export async function scopedApiFetch<T extends ScopedApiResponse>(
   const scope = snapshotScope(snapshot)
   const bridge = getAstrBotBridge()
   if (bridge) {
+    rejectPagesScopeNonceCarrier(endpoint, options)
     if (options.signal?.aborted) {
       throw new ApiError(0, 'scoped Pages request aborted')
     }
     const { headers: _headers, signal: _signal, ...bridgeOptions } = options
-    return apiFetch<T>(pagesScopedApiPath(snapshot, endpoint), bridgeOptions)
+    try {
+      return await apiFetch<T>(pagesScopedApiPath(snapshot, endpoint), bridgeOptions)
+    } catch (cause) {
+      throw pagesScopedBridgeError(cause)
+    }
   }
   const bootstrap = await apiFetch<ScopeBootstrapResponse>(scopeBootstrapPath(snapshot), {
     method: 'POST',

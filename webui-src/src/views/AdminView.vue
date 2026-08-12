@@ -1,6 +1,124 @@
+<script lang="ts">
+import type {
+  LegacyInventoryRecord as LegacyRecord,
+  ScopeRequestSnapshot as GuardSnapshot,
+  ScopedApiResponse as GuardResponse,
+} from '../api/types'
+
+export interface LegacyAdminState {
+  records: LegacyRecord[]
+  inventoryError: string
+  copyingId: string
+  claimMessage: string
+}
+
+export interface LegacyAdminRequestFence {
+  requestGeneration: number
+  selectionEpoch: number
+  snapshot: GuardSnapshot | null
+  signal?: AbortSignal
+}
+
+export interface LegacyAdminRequestGuard {
+  begin: (
+    selectionEpoch: number,
+    snapshot: GuardSnapshot | null,
+    abortable: boolean,
+  ) => LegacyAdminRequestFence
+  acceptsSelection: (fence: LegacyAdminRequestFence, currentSelectionEpoch: number) => boolean
+  acceptsScope: (
+    fence: LegacyAdminRequestFence,
+    currentSelectionEpoch: number,
+    currentSnapshot: GuardSnapshot | null,
+    response: GuardResponse,
+  ) => boolean
+  invalidate: () => void
+}
+
+export function createLegacyAdminState(): LegacyAdminState {
+  return { records: [], inventoryError: '', copyingId: '', claimMessage: '' }
+}
+
+export function canCopyLegacyClaim(
+  snapshot: GuardSnapshot | null,
+  busy: boolean,
+): snapshot is GuardSnapshot {
+  return snapshot !== null && !busy
+}
+
+export function legacyClaimBody(recordId: string): { record_id: string } {
+  return { record_id: recordId }
+}
+
+function sameGuardSnapshot(left: GuardSnapshot, right: GuardSnapshot): boolean {
+  return (
+    left.selectionEpoch === right.selectionEpoch &&
+    left.scopeGeneration === right.scopeGeneration &&
+    left.selection.botRef === right.selection.botRef &&
+    left.selection.personaRef === right.selection.personaRef &&
+    left.selection.sessionRef === right.selection.sessionRef
+  )
+}
+
+export function createLegacyAdminRequestGuard(): LegacyAdminRequestGuard {
+  let requestGeneration = 0
+  let controller: AbortController | null = null
+  return {
+    begin(selectionEpoch, snapshot, abortable) {
+      requestGeneration += 1
+      controller?.abort()
+      controller = abortable ? new AbortController() : null
+      return {
+        requestGeneration,
+        selectionEpoch,
+        snapshot,
+        ...(controller ? { signal: controller.signal } : {}),
+      }
+    },
+    acceptsSelection(fence, currentSelectionEpoch) {
+      return (
+        fence.requestGeneration === requestGeneration &&
+        fence.selectionEpoch === currentSelectionEpoch
+      )
+    },
+    acceptsScope(fence, currentSelectionEpoch, currentSnapshot, response) {
+      const captured = fence.snapshot
+      if (
+        fence.requestGeneration !== requestGeneration ||
+        fence.selectionEpoch !== currentSelectionEpoch ||
+        !captured ||
+        !currentSnapshot ||
+        !sameGuardSnapshot(captured, currentSnapshot)
+      ) return false
+      const generation = response.scope_generation ?? response.generations?.scope
+      return (
+        response.scope?.bot_ref === captured.selection.botRef &&
+        response.scope.persona_ref === captured.selection.personaRef &&
+        response.scope.session_ref === captured.selection.sessionRef &&
+        generation === captured.scopeGeneration
+      )
+    },
+    invalidate() {
+      requestGeneration += 1
+      controller?.abort()
+      controller = null
+    },
+  }
+}
+
+export function clearLegacyAdminState(
+  state: LegacyAdminState,
+  ...guards: Array<{ invalidate: () => void }>
+): void {
+  for (const guard of guards) guard.invalidate()
+  Object.assign(state, createLegacyAdminState())
+}
+</script>
+
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, toRefs, watch } from 'vue'
 import { apiFetch, scopedApiFetch } from '../api/client'
+import { isAstrBotPage } from '../api/astrBotBridge'
 import type {
   LegacyInventoryRecord,
   LegacyInventoryResponse,
@@ -19,16 +137,14 @@ const { t } = useI18n()
 const live = useLiveStore()
 const scope = useScopeStore()
 
-const records = ref<LegacyInventoryRecord[]>([])
-const inventoryError = ref('')
-const copyingId = ref('')
-const claimMessage = ref('')
-let inventoryRequest = 0
-let claimRequest = 0
+const legacyState = reactive(createLegacyAdminState())
+const { records, inventoryError, copyingId, claimMessage } = toRefs(legacyState)
+const inventoryGuard = createLegacyAdminRequestGuard()
+const claimGuard = createLegacyAdminRequestGuard()
 let timer: number | null = null
 
 const delivery = computed(() => live.state?.delivery)
-const hasCompleteScope = computed(() => scope.snapshot() !== null)
+const claimEnabled = computed(() => canCopyLegacyClaim(scope.snapshot(), copyingId.value !== ''))
 
 function deliveryReason(): string {
   if (delivery.value?.last_reason === 'account_route_unavailable') {
@@ -51,24 +167,21 @@ function formatBytes(value: number): string {
 }
 
 function clearScopeData(): void {
-  inventoryRequest += 1
-  claimRequest += 1
-  records.value = []
-  inventoryError.value = ''
-  copyingId.value = ''
-  claimMessage.value = ''
+  clearLegacyAdminState(legacyState, inventoryGuard, claimGuard)
 }
 
 async function fetchInventory(): Promise<void> {
-  const request = ++inventoryRequest
   const selectionEpoch = scope.selectionEpoch
+  const fence = inventoryGuard.begin(selectionEpoch, null, !isAstrBotPage())
   inventoryError.value = ''
   try {
-    const response = await apiFetch<LegacyInventoryResponse>('/api/v1/legacy/inventory')
-    if (request !== inventoryRequest || selectionEpoch !== scope.selectionEpoch) return
+    const response = await apiFetch<LegacyInventoryResponse>('/api/v1/legacy/inventory', {
+      signal: fence.signal,
+    })
+    if (!inventoryGuard.acceptsSelection(fence, scope.selectionEpoch)) return
     records.value = Array.isArray(response.records) ? response.records : []
   } catch (cause) {
-    if (request !== inventoryRequest || selectionEpoch !== scope.selectionEpoch) return
+    if (!inventoryGuard.acceptsSelection(fence, scope.selectionEpoch)) return
     records.value = []
     inventoryError.value = cause instanceof Error ? cause.message : String(cause)
   }
@@ -76,27 +189,24 @@ async function fetchInventory(): Promise<void> {
 
 async function copyClaim(record: LegacyInventoryRecord): Promise<void> {
   const snapshot = scope.snapshot()
-  if (!snapshot) return
-  const request = ++claimRequest
+  if (!canCopyLegacyClaim(snapshot, copyingId.value !== '')) return
   const selectionEpoch = scope.selectionEpoch
+  const fence = claimGuard.begin(selectionEpoch, snapshot, !isAstrBotPage())
   copyingId.value = record.record_id
   claimMessage.value = ''
   try {
     const response = await scopedApiFetch(snapshot, 'legacy-claim', {
       method: 'POST',
-      body: { record_id: record.record_id },
+      body: legacyClaimBody(record.record_id),
+      signal: fence.signal,
     }) as ScopedApiResponse
-    if (
-      request !== claimRequest ||
-      selectionEpoch !== scope.selectionEpoch ||
-      !scope.isCurrent(snapshot, response)
-    ) return
+    if (!claimGuard.acceptsScope(fence, scope.selectionEpoch, scope.snapshot(), response)) return
     claimMessage.value = t('admin.legacy_copy_ok')
   } catch (cause) {
-    if (request !== claimRequest || selectionEpoch !== scope.selectionEpoch) return
+    if (!claimGuard.acceptsSelection(fence, scope.selectionEpoch)) return
     claimMessage.value = `${t('admin.legacy_copy_failed')}: ${cause instanceof Error ? cause.message : String(cause)}`
   } finally {
-    if (request === claimRequest && selectionEpoch === scope.selectionEpoch) copyingId.value = ''
+    if (claimGuard.acceptsSelection(fence, scope.selectionEpoch)) copyingId.value = ''
   }
 }
 
@@ -170,7 +280,7 @@ onUnmounted(() => {
             <Button
               size="sm"
               variant="primary"
-              :disabled="!hasCompleteScope || copyingId !== ''"
+              :disabled="!claimEnabled"
               :loading="copyingId === record.record_id"
               @click="copyClaim(record)"
             >{{ t('admin.legacy_copy') }}</Button>

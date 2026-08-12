@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { scopedApiFetch } from '../api/client'
 import { isAstrBotPage } from '../api/astrBotBridge'
-import type { ScopeRequestSnapshot, ScopedApiResponse, ScopedStateResponse, StateResponse } from '../api/types'
+import type { DeliveryDiagnostics, ScopeRequestSnapshot, ScopedApiResponse, ScopedStateResponse, StateResponse } from '../api/types'
 import { useScopeStore } from './scope'
 
 function isAbortError(cause: unknown): boolean {
@@ -28,10 +28,32 @@ function sameScope(
   )
 }
 
+function safeDeliveryCount(value: unknown): number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : 0
+}
+
+export function adaptDeliveryDiagnostics(value: unknown): DeliveryDiagnostics | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const source = value as Record<string, unknown>
+  const result: DeliveryDiagnostics = {
+    pending: safeDeliveryCount(source.pending),
+    failed_retryable: safeDeliveryCount(source.failed_retryable),
+    outcome_unknown: safeDeliveryCount(source.outcome_unknown),
+    suppressed: safeDeliveryCount(source.suppressed),
+  }
+  if (
+    source.last_reason === 'account_route_unavailable' ||
+    source.last_reason === 'delivery_outcome_unknown'
+  ) {
+    result.last_reason = source.last_reason
+  }
+  return result
+}
+
 function projectState(response: ScopedStateResponse): StateResponse {
   return {
     ...(response.state || {}),
-    delivery: response.delivery,
+    delivery: adaptDeliveryDiagnostics(response.delivery),
     scope: response.scope,
     scope_generation: response.scope_generation,
     generations: response.generations,
