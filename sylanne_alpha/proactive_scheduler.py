@@ -91,7 +91,9 @@ class ProactiveScheduler:
                 session_key_fn=getattr(plugin, "_session_key", None),
                 observed_now_fn=getattr(plugin, "_observed_now", None),
             )
-        self._session_state = getattr(plugin, "_session_state", None)
+        self._session_state = (
+            None if self._services_explicit else getattr(plugin, "_session_state", None)
+        )
         # 仪式注册表：session_key → {ritual_name: (start_hour, end_hour)}
         # 初始为空，后续可通过对话学习填充
         self._ritual_registry: dict[str, dict[str, tuple[int, int]]] = {}
@@ -215,7 +217,9 @@ class ProactiveScheduler:
         seen_event_ids: set[str] = set()
         # ① pipeline 视角（当前冻结 SessionStateStore → deque）。真实插件
         # 只能读当前 binding；原始 key 查表仅保留给没有 registry 的历史桩。
-        if session_runtime is not None:
+        if self._services_explicit:
+            history = None
+        elif session_runtime is not None:
             history = session_runtime.store.proactive_dispatch_audit.get(session_key)
         else:
             audit = getattr(self._p, "_proactive_dispatch_audit", None) or {}
@@ -233,7 +237,11 @@ class ProactiveScheduler:
                 if eid:
                     seen_event_ids.add(eid)
         # ② life_sim 视角（Phase 3 数据源补建：dict[session_key] → list[entry]）
-        life_sim = getattr(self._p, "_life_simulator", None)
+        life_sim = (
+            None
+            if self._services_explicit
+            else getattr(self._p, "_life_simulator", None)
+        )
         if life_sim is not None and session_key:
             try:
                 ls_audit = getattr(life_sim.state, "outreach_audit", {}) or {}
@@ -347,6 +355,8 @@ class ProactiveScheduler:
             阻塞原因字符串，空字符串表示可以发言。
         """
         self._require_legacy_session_api()
+        if self._services_explicit:
+            return "explicit_dispatch_capability_required"
         if force:
             return ""
         cfg = self._services.config or {}
@@ -362,7 +372,9 @@ class ProactiveScheduler:
         )
         if last_seen and (now - last_seen) < min_idle:
             return "recent_user_activity_quiet_period"
-        if self._session_state is not None:
+        if self._services_explicit:
+            last_sent = 0.0
+        elif self._session_state is not None:
             last_sent = self._session_state.proactive_dispatch_last_sent.get(sk, 0.0)
         else:
             last_sent = (getattr(self._plugin, "_proactive_dispatch_last_sent", None) or {}).get(
@@ -439,6 +451,8 @@ class ProactiveScheduler:
         """
         self._require_legacy_session_api()
         self.ensure_state()
+        if self._services_explicit:
+            return {"checked": 0, "dispatched": 0}
         candidates = dict(self._p._store.proactive_candidate_sessions.items())
         checked = 0
         dispatched = 0
@@ -489,12 +503,13 @@ class ProactiveScheduler:
         # v2core 空闲触达咨询：沉默积累（你的节律超期 + 她憋着的话）让 reach 胜出时，
         # 把决策升格为 reach_out——外部主动桥轮询本方法，这是"她主动找你"的真实入口。
         # 防连发不在这里造闸：下游 dispatch 自带冷却/静默期机制。
-        try:
-            from sylanne_alpha.v2core.integration import merge_idle_reach_into_decision
+        if not self._services_explicit:
+            try:
+                from sylanne_alpha.v2core.integration import merge_idle_reach_into_decision
 
-            decision = await merge_idle_reach_into_decision(self._p, sk, decision)
-        except Exception:
-            pass
+                decision = await merge_idle_reach_into_decision(self._p, sk, decision)
+            except Exception:
+                pass
         return decision
 
     async def _request_scoped_dispatch(
@@ -620,6 +635,13 @@ class ProactiveScheduler:
         )
         if not sk:
             return {"dispatched": False, "reason": "no_session_key", "dry_run": dry_run}
+        if self._services_explicit:
+            return {
+                "dispatched": False,
+                "reason": "explicit_dispatch_capability_required",
+                "session_key": sk,
+                "dry_run": dry_run,
+            }
 
         # A live scoped runtime owns an opaque SessionScope, not a reusable raw
         # session address.  Its proactive work must be issued as a sealed
@@ -789,6 +811,8 @@ class ProactiveScheduler:
         ts = float(self._last_message_times.get(session_key, 0.0) or 0.0)
         if ts > 0:
             return ts
+        if self._services_explicit:
+            return 0.0
         store = getattr(self._p, "_store", None)
         if store is not None:
             return float(store.last_user_message_time.get(session_key, 0.0) or 0.0)
@@ -804,6 +828,8 @@ class ProactiveScheduler:
         self._require_legacy_session_api()
         when = ts if ts is not None else self._observed_now()
         self._last_message_times[session_key] = when
+        if self._services_explicit:
+            return
         store = getattr(self._p, "_store", None)
         if store is not None:
             store.last_user_message_time.set(session_key, when)

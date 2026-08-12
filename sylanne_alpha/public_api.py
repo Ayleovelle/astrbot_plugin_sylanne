@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import inspect
 import json
 import time
 from collections.abc import Awaitable, Callable
@@ -1218,16 +1219,26 @@ class PublicAPI:
     async def request_bot_proactive_speech_dispatch_tool(
         self, event: Any = None, **kwargs: Any
     ) -> Any:
-        dispatch_fn = getattr(self._plugin, "request_proactive_speech_dispatch", None)
-        if dispatch_fn and callable(dispatch_fn):
-            result = await dispatch_fn(event, dry_run=True)
-            payload = result if isinstance(result, dict) else {"result": result}
-        else:
+        if self._services_explicit:
             payload = {
                 "kind": "proactive_speech_dispatch",
                 "dry_run": True,
                 "dispatched": False,
+                "reason": "explicit_dispatch_capability_required",
             }
+        else:
+            dispatch_fn = getattr(
+                self._plugin, "request_proactive_speech_dispatch", None
+            )
+            if dispatch_fn and callable(dispatch_fn):
+                result = await dispatch_fn(event, dry_run=True)
+                payload = result if isinstance(result, dict) else {"result": result}
+            else:
+                payload = {
+                    "kind": "proactive_speech_dispatch",
+                    "dry_run": True,
+                    "dispatched": False,
+                }
         yield self._tool_json(payload)
 
     async def _llm_tool_query_agent_state(self, event: Any) -> Any:
@@ -1767,6 +1778,40 @@ class PublicAPI:
         Returns:
             SimpleNamespace 对象，包含 values、confidence、label、source 等字段。
         """
+        if self._services_explicit:
+            assess_fn = self._services.assess_emotion_fn
+            if callable(assess_fn):
+                try:
+                    assessed = assess_fn(
+                        session_key=session_key,
+                        text=text,
+                        event=event,
+                        **kwargs,
+                    )
+                    if inspect.isawaitable(assessed):
+                        assessed = await assessed
+                    if assessed is not None:
+                        return assessed
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
+            return SimpleNamespace(
+                values={
+                    "valence": 0.0,
+                    "arousal": 0.0,
+                    "dominance": 0.0,
+                    "goal_congruence": 0.0,
+                    "certainty": 0.0,
+                    "control": 0.0,
+                    "affiliation": 0.0,
+                },
+                confidence=0.3,
+                label="neutral",
+                source="heuristic",
+                reason="assessor service unavailable",
+                appraisal={},
+            )
         p = self._plugin
         current_text = kwargs.get("current_text", text)
         cfg = self._services.config or {}

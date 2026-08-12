@@ -34,6 +34,15 @@ class _PluginTrap:
             last_user_message_time=_Map(),
             last_bot_expression_time=_Map(),
         )
+        self._session_state = SimpleNamespace(
+            proactive_dispatch_last_sent=_Map({"shared-session": 999.0})
+        )
+        self._proactive_dispatch_last_sent = {"shared-session": 999.0}
+        self._proactive_dispatch_audit = {
+            "shared-session": [
+                {"feedback_status": "unanswered", "event_id": "ambient-event"}
+            ]
+        }
 
     def _host(self, _session_key: str) -> Any:
         raise AssertionError("explicit services must not use plugin host lookup")
@@ -53,6 +62,9 @@ class _PluginTrap:
         raise AssertionError(
             f"explicit services must not use plugin dispatch callbacks: {dry_run=}"
         )
+
+    async def _call_internal_assessor_llm(self, **_kwargs: Any) -> Any:
+        raise AssertionError("explicit services must not use plugin assessor callbacks")
 
 
 def _services(
@@ -304,7 +316,152 @@ def test_explicit_scheduler_run_once_never_uses_plugin_dispatch_callback() -> No
         ),
     )
 
-    assert asyncio.run(scheduler.run_once()) == {"checked": 1, "dispatched": 0}
+    assert asyncio.run(scheduler.run_once()) == {"checked": 0, "dispatched": 0}
+
+
+def test_explicit_public_api_dispatch_tool_fails_closed_without_plugin_callback() -> None:
+    plugin = _PluginTrap()
+    api = PublicAPI(
+        plugin,
+        services=PluginServices(
+            config={},
+            session_key_fn=lambda _event=None, explicit="": explicit or "shared-session",
+            observed_now_fn=lambda: 1.0,
+        ),
+    )
+
+    async def exercise() -> dict[str, Any]:
+        results = [
+            json.loads(item)
+            async for item in api.request_bot_proactive_speech_dispatch_tool(object())
+        ]
+        assert len(results) == 1
+        return results[0]
+
+    payload = asyncio.run(exercise())
+    assert payload["kind"] == "proactive_speech_dispatch"
+    assert payload["dry_run"] is True
+    assert payload["dispatched"] is False
+    assert payload["reason"] == "explicit_dispatch_capability_required"
+
+
+def test_explicit_public_api_assessor_uses_only_injected_callback() -> None:
+    plugin = _PluginTrap()
+    calls: list[tuple[str, str, Any]] = []
+    expected = SimpleNamespace(
+        values={"valence": 0.75},
+        confidence=0.9,
+        label="service",
+        source="service",
+        reason="injected",
+        appraisal={},
+    )
+
+    async def assess(
+        *, session_key: str, text: str, event: Any = None, **_kwargs: Any
+    ) -> Any:
+        calls.append((session_key, text, event))
+        return expected
+
+    api = PublicAPI(
+        plugin,
+        services=PluginServices(config={}, assess_emotion_fn=assess),
+    )
+    event = object()
+
+    result = asyncio.run(
+        api._assess_emotion(
+            session_key="shared-session",
+            text="this is deliberately longer than the low signal threshold",
+            event=event,
+        )
+    )
+
+    assert result is expected
+    assert calls == [
+        (
+            "shared-session",
+            "this is deliberately longer than the low signal threshold",
+            event,
+        )
+    ]
+
+
+def test_missing_explicit_assessor_returns_neutral_without_plugin_callback() -> None:
+    api = PublicAPI(_PluginTrap(), services=PluginServices(config={}))
+
+    result = asyncio.run(
+        api._assess_emotion(
+            session_key="shared-session",
+            text="this is deliberately longer than the low signal threshold",
+        )
+    )
+
+    assert result.label == "neutral"
+    assert result.source == "heuristic"
+    assert result.reason == "assessor service unavailable"
+
+
+def test_same_plugin_same_session_explicit_schedulers_keep_state_isolated() -> None:
+    plugin = _PluginTrap()
+    services_a, _host_a, _calls_a = _services(
+        name="a",
+        now=1000.0,
+        moral_enabled=False,
+        dispatch_enabled=True,
+    )
+    services_b, _host_b, _calls_b = _services(
+        name="b",
+        now=2000.0,
+        moral_enabled=False,
+        dispatch_enabled=False,
+    )
+    services_a.session_key_fn = lambda _event=None, _explicit="": "shared-session"
+    services_b.session_key_fn = lambda _event=None, _explicit="": "shared-session"
+    scheduler_a = ProactiveScheduler(plugin, services=services_a)
+    scheduler_b = ProactiveScheduler(plugin, services=services_b)
+
+    assert scheduler_a._session_state is None
+    assert scheduler_b._session_state is None
+    assert scheduler_a.derive_dispatch_policy(session_key="shared-session")[
+        "feedback_pressure"
+    ] == 0.0
+    assert scheduler_b.derive_dispatch_policy(session_key="shared-session")[
+        "feedback_pressure"
+    ] == 0.0
+
+    scheduler_a.record_message_time("shared-session")
+    scheduler_b.record_message_time("shared-session")
+    assert scheduler_a._last_user_ts("shared-session") == 1000.0
+    assert scheduler_b._last_user_ts("shared-session") == 2000.0
+    assert "shared-session" not in plugin._store.last_user_message_time
+
+    assert asyncio.run(
+        scheduler_a.request_dispatch(object(), session_key="shared-session")
+    ) == {
+        "dispatched": False,
+        "reason": "explicit_dispatch_capability_required",
+        "session_key": "shared-session",
+        "dry_run": False,
+    }
+
+
+def test_default_scheduler_keeps_legacy_dispatch_and_session_state() -> None:
+    plugin = _PluginTrap()
+    dispatch_calls: list[tuple[Any, bool]] = []
+
+    async def dispatch(event: Any, *, dry_run: bool) -> dict[str, Any]:
+        dispatch_calls.append((event, dry_run))
+        return {"dispatched": True}
+
+    event = SimpleNamespace(unified_msg_origin="legacy-session")
+    plugin.request_proactive_speech_dispatch = dispatch  # type: ignore[method-assign]
+    plugin._store.proactive_candidate_sessions["legacy-session"] = {"event": event}
+    scheduler = ProactiveScheduler(plugin)
+
+    assert scheduler._session_state is plugin._session_state
+    assert asyncio.run(scheduler.run_once()) == {"checked": 1, "dispatched": 1}
+    assert dispatch_calls == [(event, False)]
 
 
 def test_missing_explicit_host_service_returns_neutral_denials() -> None:
