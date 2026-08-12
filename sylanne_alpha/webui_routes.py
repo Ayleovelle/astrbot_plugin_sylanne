@@ -1160,7 +1160,7 @@ class WebUIRoutes:
     # ------------------------------------------------------------------
 
     async def memory_settings_get_handler(self) -> dict[str, Any]:
-        return await self._plugin._sylanne_memory_settings_page_payload()
+        return await self._p._sylanne_memory_settings_page_payload()
 
     async def memory_settings_post_handler(self) -> dict[str, Any]:
         from astrbot.api.web import request
@@ -1368,7 +1368,7 @@ class WebUIRoutes:
             host.kernel._personality() if hasattr(host.kernel, "_personality") else {}
         )
         persona_info = {
-            "profile": self._plugin._persona_profile(None),
+            "profile": self._p._persona_profile(None),
             "traits": personality.get(
                 "traits", personality if isinstance(personality, dict) else {}
             ),
@@ -1438,7 +1438,7 @@ class WebUIRoutes:
 
     async def settings_get_handler(self) -> dict[str, Any]:
         """返回当前配置值和 schema，供设置面板渲染表单控件。"""
-        schema = self._plugin._load_conf_schema()
+        schema = self._p._load_conf_schema()
         values = {}
         for key in schema:
             raw = self._p._config.get(key, schema[key].get("default"))
@@ -1464,7 +1464,7 @@ class WebUIRoutes:
 
     async def provider_items(self) -> list[dict[str, Any]]:
         """尽力获取 AstrBot 已注册的 LLM/Embedding provider 列表，供设置面板下拉选择。"""
-        context = getattr(self._plugin, "context", None)
+        context = getattr(self._p, "context", None)
         items: list[dict[str, Any]] = []
         seen: set[str] = set()
 
@@ -1561,7 +1561,7 @@ class WebUIRoutes:
                 config[key] = self._services.config[key]
         if hasattr(config, "save_config"):
             config.save_config()
-        self._plugin._start_webui_if_enabled()
+        self._p._start_webui_if_enabled()
         return {"ok": True, "updated": updated}
 
     # ------------------------------------------------------------------
@@ -1703,11 +1703,11 @@ class WebUIRoutes:
             if not source_sessions:
                 source_sessions = [session_key or "default"]
 
-        state = await self._plugin._load_sylanne_memory_state(session_key)
+        state = await self._p._load_sylanne_memory_state(session_key)
 
         # Fallback to the live 3-layer MemorySystem if KV state is unavailable
         if state is None:
-            state = self._plugin._memory_system_for_session(session_key)
+            state = self._p._memory_system_for_session(session_key)
 
         def _memory_item_payload(item: Any) -> dict[str, Any]:
             data = item.to_dict() if hasattr(item, "to_dict") else dict(item or {})
@@ -1773,16 +1773,16 @@ class WebUIRoutes:
             return data
 
         async def _state_for_display(source_session: str) -> Any:
-            loaded = await self._plugin._load_sylanne_memory_state(source_session)
+            loaded = await self._p._load_sylanne_memory_state(source_session)
             if loaded is not None:
                 return loaded
-            return self._plugin._memory_system_for_session(source_session)
+            return self._p._memory_system_for_session(source_session)
 
         # Duplicated in webui_server.py for standalone mode
         def _body_traces_for_session(source_session: str) -> list[dict[str, Any]]:
             traces: list[dict[str, Any]] = []
             try:
-                host = self._plugin._host(source_session)
+                host = self._p._host(source_session)
                 raw_traces = host.kernel.body.memory.get("traces", [])
             except Exception:
                 raw_traces = []
@@ -2027,16 +2027,16 @@ class WebUIRoutes:
             return self._scope_unavailable_payload()
         # S4 fix: validate ONLY against server-side stored nonce — never trust
         # client-supplied expected_token (allows trivial bypass).
-        server_nonce = getattr(self._plugin, "_meltdown_nonces", {}).get(session, "")
+        server_nonce = getattr(self._p, "_meltdown_nonces", {}).get(session, "")
         if not server_nonce or not nonce or nonce != server_nonce:
             return {"ok": False, "error": "token_mismatch"}
         # Consume the nonce (single-use)
-        self._plugin._meltdown_nonces.pop(session, None)
+        self._p._meltdown_nonces.pop(session, None)
         # Clear memory for the session
         mem_sys = (
-            self._plugin._memory_system_for_session(session)
-            if hasattr(self._plugin, "_memory_system_for_session")
-            else getattr(self._plugin, "_memory_system", None)
+            self._p._memory_system_for_session(session)
+            if hasattr(self._p, "_memory_system_for_session")
+            else getattr(self._p, "_memory_system", None)
         )
         if mem_sys:
             mem_sys._l1.clear()
@@ -2051,7 +2051,7 @@ class WebUIRoutes:
             # 避免把刚清除的记忆从 KV 旧档里复活回来。
             mem_sys._hydrated = True
         # Also clear legacy body traces
-        hosts = getattr(self._plugin, "_hosts", {}) or {}
+        hosts = getattr(self._p, "_hosts", {}) or {}
         if session in hosts:
             hosts[session].kernel.body.memory["traces"] = []
             hosts[session].kernel.body.memory.pop("_memory_system", None)
@@ -2069,7 +2069,7 @@ class WebUIRoutes:
     def generate_meltdown_nonce(self, session: str) -> str:
         """生成一次性 nonce 用于记忆清除确认，防止 CSRF。"""
         nonce = secrets.token_hex(16)
-        self._plugin._meltdown_nonces[session] = nonce
+        self._p._meltdown_nonces[session] = nonce
         return nonce
 
     async def meltdown_nonce_handler(self) -> dict[str, Any]:
@@ -2107,7 +2107,7 @@ class WebUIRoutes:
                 return self._scope_unavailable_payload()
             session = scoped_session
         try:
-            plugin = self._plugin
+            plugin = self._p
             mem_sys = (
                 plugin._memory_system_for_session(session)
                 if hasattr(plugin, "_memory_system_for_session")
@@ -2146,9 +2146,9 @@ class WebUIRoutes:
 
         # 获取该会话的记忆系统实例
         mem_sys = (
-            self._plugin._memory_system_for_session(session)
-            if hasattr(self._plugin, "_memory_system_for_session")
-            else getattr(self._plugin, "_memory_system", None)
+            self._p._memory_system_for_session(session)
+            if hasattr(self._p, "_memory_system_for_session")
+            else getattr(self._p, "_memory_system", None)
         )
         if mem_sys is None:
             return {"ok": False, "error": "memory system unavailable"}
@@ -2439,9 +2439,9 @@ class WebUIRoutes:
 
         # Memory system
         mem_sys = (
-            self._plugin._memory_system_for_session(session_key)
-            if hasattr(self._plugin, "_memory_system_for_session")
-            else getattr(self._plugin, "_memory_system", None)
+            self._p._memory_system_for_session(session_key)
+            if hasattr(self._p, "_memory_system_for_session")
+            else getattr(self._p, "_memory_system", None)
         )
         if mem_sys is not None:
             export["memory"] = {
@@ -2482,7 +2482,7 @@ class WebUIRoutes:
 
         # Persisted state (KV)
         try:
-            state = await self._plugin._load_state(session_key)
+            state = await self._p._load_state(session_key)
             if state is not None:
                 export["persisted_state"] = (
                     state.to_dict() if hasattr(state, "to_dict") else state
@@ -2513,9 +2513,9 @@ class WebUIRoutes:
 
         # Clear memory system
         mem_sys = (
-            self._plugin._memory_system_for_session(session_key)
-            if hasattr(self._plugin, "_memory_system_for_session")
-            else getattr(self._plugin, "_memory_system", None)
+            self._p._memory_system_for_session(session_key)
+            if hasattr(self._p, "_memory_system_for_session")
+            else getattr(self._p, "_memory_system", None)
         )
         if mem_sys is not None:
             mem_sys._l1.clear()
@@ -2532,35 +2532,35 @@ class WebUIRoutes:
             purged.append("memory_system")
 
         # Remove host instance
-        hosts = getattr(self._plugin, "_hosts", {}) or {}
+        hosts = getattr(self._p, "_hosts", {}) or {}
         if session_key in hosts:
             del hosts[session_key]
             purged.append("host")
 
         # Clear conversation buffer
-        buffers = getattr(self._plugin, "_conversation_buffers", {}) or {}
+        buffers = getattr(self._p, "_conversation_buffers", {}) or {}
         if session_key in buffers:
             del buffers[session_key]
             purged.append("conversation_buffer")
 
         # Delete persisted KV states
         try:
-            await self._plugin._delete_state(session_key)
+            await self._p._delete_state(session_key)
             purged.append("kv_state")
         except Exception:
             pass
         try:
-            await self._plugin._delete_humanlike_state(session_key)
+            await self._p._delete_humanlike_state(session_key)
             purged.append("kv_humanlike")
         except Exception:
             pass
         try:
-            await self._plugin._delete_personality_drift_state(session_key)
+            await self._p._delete_personality_drift_state(session_key)
             purged.append("kv_personality_drift")
         except Exception:
             pass
         try:
-            await self._plugin._delete_sylanne_memory_state(session_key)
+            await self._p._delete_sylanne_memory_state(session_key)
             purged.append("kv_memory")
         except Exception:
             pass
@@ -2652,20 +2652,20 @@ class WebUIRoutes:
         enabled = self._services.config.get("sylanne_webui_enabled", False)
         host = str(self._services.config.get("sylanne_webui_host", "127.0.0.1") or "127.0.0.1")
         port = int(self._services.config.get("sylanne_webui_port", 2718) or 2718)
-        expected_runtime = self._plugin._webui_runtime_info()
+        expected_runtime = self._p._webui_runtime_info()
         stopped: list[str] = []
-        module_count_before = len(self._plugin._iter_loaded_webui_server_modules())
+        module_count_before = len(self._p._iter_loaded_webui_server_modules())
         if enabled:
-            stopped = await self._plugin._stop_stale_webui_server_modules(
+            stopped = await self._p._stop_stale_webui_server_modules(
                 include_current=True
             )
             if stopped:
                 self._services.logger.info(
                     f"Sylanne WebUI probe stopped stale listener modules: {stopped}"
                 )
-            self._plugin._start_webui_if_enabled()
+            self._p._start_webui_if_enabled()
             await asyncio.sleep(0.2)
-        module_count_after = len(self._plugin._iter_loaded_webui_server_modules())
+        module_count_after = len(self._p._iter_loaded_webui_server_modules())
 
         local_url = f"http://127.0.0.1:{port}/api/state"
 
@@ -2810,7 +2810,7 @@ class WebUIRoutes:
 
     async def config_export_handler(self) -> dict[str, Any]:
         """GET /api/config_export — 返回当前配置 JSON（敏感字段脱敏）。"""
-        config = dict(getattr(self._plugin, "_config", {}) or {})
+        config = dict(getattr(self._p, "_config", {}) or {})
         return {
             k: ("***" if self._is_sensitive_key(k) else v)
             for k, v in config.items()
@@ -2823,14 +2823,14 @@ class WebUIRoutes:
         body = await request.json()
         if not isinstance(body, dict) or not body:
             return {"ok": False, "error": "expected_object"}
-        config = getattr(self._plugin, "_config", None)
+        config = getattr(self._p, "_config", None)
         if config is None:
             return {"ok": False, "error": "no_config"}
         blocked = [k for k in body if self._is_sensitive_key(k)]
         if blocked:
             return {"ok": False, "error": "sensitive_keys_blocked", "keys": blocked}
         config.update(body)
-        persistent = getattr(self._plugin, "config", config)
+        persistent = getattr(self._p, "config", config)
         if isinstance(persistent, dict):
             persistent.update(body)
         if hasattr(persistent, "save_config"):
