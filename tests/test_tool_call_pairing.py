@@ -10,7 +10,8 @@ from __future__ import annotations
 import asyncio
 import sys
 import unittest
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from unittest.mock import patch
 
 from sylanne_alpha.llm_request_pipeline import sanitize_tool_call_pairing
 
@@ -160,13 +161,29 @@ class TestOnDecoratingResultStrip(unittest.TestCase):
         return main.EmotionalStatePlugin(context=SimpleNamespace(), config={})
 
     def _plain(self, text):
-        try:
-            from astrbot.api.message_components import Plain
-        except Exception:  # 降级环境
-            import importlib
+        import importlib
 
-            Plain = importlib.import_module("main").Plain
-        return Plain(text)
+        return importlib.import_module("main").Plain(text)
+
+    def test_plain_fixture_uses_main_canonical_type_when_sdk_appears_late(self):
+        """测试夹具必须匹配钩子导入时绑定的 ``main.Plain`` 类。"""
+        import importlib
+
+        main = importlib.import_module("main")
+
+        class LateSdkPlain:
+            def __init__(self, text):
+                self.text = text
+
+        components = ModuleType("astrbot.api.message_components")
+        components.Plain = LateSdkPlain
+        with patch.dict(
+            sys.modules,
+            {"astrbot.api.message_components": components},
+        ):
+            segment = self._plain("可见文本")
+
+        self.assertIs(type(segment), main.Plain)
 
     def test_hook_strips_thinking_from_chain(self):
         plugin = self._make_plugin()
