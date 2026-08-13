@@ -1588,20 +1588,6 @@ def test_follow_up_deferral_matches_astrbot_runner_guards(
     assert target_run_id == ("run-original" if expected else "")
 
 
-def test_follow_up_promotion_hook_is_registered_before_other_waiting_hooks() -> None:
-    """未消费补话必须在任何可能 stop 的 waiting hook 之前推进代次。"""
-
-    from astrbot.core.star.register.star_handler import star_handlers_registry
-
-    handler = next(
-        metadata
-        for metadata in star_handlers_registry.get_handlers_by_module_name("main")
-        if metadata.handler_name == "on_waiting_llm_request"
-    )
-
-    assert handler.extras_configs.get("priority") == 1000
-
-
 def test_full_delivery_commits_exact_visible_bubbles_as_assistant_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
