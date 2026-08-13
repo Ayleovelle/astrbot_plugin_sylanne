@@ -1155,30 +1155,41 @@ async def test_concurrent_same_transport_message_isolated_by_bot_account(
     )
     assert {id(view) for view in observed} == {id(left_view), id(right_view)}
 
-    left_view.persona_runtime.store.last_user_texts.set(
-        left_scope.storage_token,
-        "left-only",
-    )
-    right_view.persona_runtime.store.last_user_texts.set(
-        right_scope.storage_token,
-        "right-only",
-    )
-    assert (
-        left_view.persona_runtime.store.last_user_texts.get(left_scope.storage_token)
-        == "left-only"
-    )
-    assert (
-        right_view.persona_runtime.store.last_user_texts.get(right_scope.storage_token)
-        == "right-only"
-    )
-    assert (
-        left_view.persona_runtime.store.last_user_texts.get(right_scope.storage_token)
-        is None
-    )
-    assert (
-        right_view.persona_runtime.store.last_user_texts.get(left_scope.storage_token)
-        is None
-    )
+    with plugin._bind_runtime_for_scope(left_scope):
+        left_view.persona_runtime.store.last_user_texts.set(
+            left_scope.storage_token,
+            "left-only",
+        )
+        assert (
+            left_view.persona_runtime.store.last_user_texts.get(
+                left_scope.storage_token
+            )
+            == "left-only"
+        )
+        assert (
+            left_view.persona_runtime.store.last_user_texts.get(
+                right_scope.storage_token
+            )
+            is None
+        )
+
+    with plugin._bind_runtime_for_scope(right_scope):
+        right_view.persona_runtime.store.last_user_texts.set(
+            right_scope.storage_token,
+            "right-only",
+        )
+        assert (
+            right_view.persona_runtime.store.last_user_texts.get(
+                right_scope.storage_token
+            )
+            == "right-only"
+        )
+        assert (
+            right_view.persona_runtime.store.last_user_texts.get(
+                left_scope.storage_token
+            )
+            is None
+        )
 
 
 @pytest.mark.asyncio
