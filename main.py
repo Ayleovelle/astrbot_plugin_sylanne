@@ -6010,12 +6010,14 @@ class EmotionalStatePlugin(Star):
             session_context = getattr(self, "_session_ctx", None)
             session_key_for_event = getattr(session_context, "session_key", None)
             if callable(session_key_for_event):
-                EmotionalStatePlugin._commit_inbound_delivery_epoch(
-                    self,
-                    event,
-                    session_key_for_event(event),
-                    reason="follow_up_promoted_to_new_turn",
-                )
+                session_key = session_key_for_event(event)
+                if isinstance(session_key, str):
+                    EmotionalStatePlugin._commit_inbound_delivery_epoch(
+                        self,
+                        event,
+                        session_key,
+                        reason="follow_up_promoted_to_new_turn",
+                    )
         else:
             EmotionalStatePlugin._promote_deferred_follow_up(self, event)
         await EmotionalStatePlugin._on_waiting_llm_request_scoped(

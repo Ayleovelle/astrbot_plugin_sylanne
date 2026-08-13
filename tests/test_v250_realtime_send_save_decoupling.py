@@ -1523,6 +1523,52 @@ def test_unconsumed_follow_up_promotes_once_and_interrupts_old_delivery(
     asyncio.run(scenario())
 
 
+def test_registry_free_follow_up_skips_non_string_session_key() -> None:
+    """A compatibility host must not use an untyped key as write authority."""
+
+    class SessionMap:
+        def __init__(self) -> None:
+            self.values: dict[object, object] = {}
+
+        def get(self, key: object, default: object = None) -> object:
+            return self.values.get(key, default)
+
+        def set(self, key: object, value: object) -> None:
+            self.values[key] = value
+
+    class Turn:
+        def __init__(self) -> None:
+            self.interrupted = False
+
+        def interrupt(self) -> None:
+            self.interrupted = True
+
+    invalid_session_key = object()
+    epochs = SessionMap()
+    active_turns = SessionMap()
+    old_turn = Turn()
+    active_turns.set("trusted-session", old_turn)
+    shell = object.__new__(EmotionalStatePlugin)
+    shell._scope_runtime_registry = None
+    shell._store = SimpleNamespace(
+        conversation_input_epoch=epochs,
+        segmented_delivery_turns=active_turns,
+    )
+    shell._session_ctx = SimpleNamespace(
+        session_key=lambda _event: invalid_session_key,
+    )
+    event = _Ev()
+    event.set_extra("_syl_follow_up_deferred", True)
+
+    asyncio.run(EmotionalStatePlugin.on_waiting_llm_request(shell, event))
+
+    assert epochs.values == {}
+    assert old_turn.interrupted is False
+    assert event.get_extra("_syl_follow_up_deferred") is True
+    assert event.get_extra("_syl_input_epoch") is None
+    assert event.get_extra("_syl_input_epoch_committed") is None
+
+
 @pytest.mark.parametrize(
     (
         "active_sender",
