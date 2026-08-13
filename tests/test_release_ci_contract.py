@@ -16,7 +16,7 @@ from scripts import package_plugin
 
 ROOT = Path(__file__).resolve().parents[1]
 GREY_OVERRIDE_VERSION = "2.5.0-grey.7"
-EXPECTED_STABLE_VERSION = "2.5.7"
+EXPECTED_STABLE_VERSION = "2.5.1"
 _RESOLVE_CHANNEL_COMMAND = (
     "CHANNEL=$(python -c \"from pathlib import Path; "
     "from scripts.package_plugin import _metadata_channel_for_version, "
