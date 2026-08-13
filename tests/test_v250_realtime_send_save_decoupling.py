@@ -1311,6 +1311,297 @@ def test_transport_safety_bridge_rejects_event_session_id_tamper(tmp_path) -> No
     assert event.get_extra("_syl_inbound_registered") is True
 
 
+def test_active_runner_follow_up_defers_epoch_and_preserves_final_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """工具轮吃掉的补话不能把同一工具轮最终答案判成过期。"""
+
+    async def scenario() -> None:
+        from astrbot.core.pipeline.process_stage import follow_up as follow_up_module
+
+        session_key = "sess:realtime-decouple"
+
+        class SenderEvent(_Ev):
+            def __init__(self, message_id: str, sender_id: str = "same-user") -> None:
+                super().__init__()
+                self.message_obj = SimpleNamespace(message_id=message_id)
+                self._sender_id = sender_id
+                self.is_at_or_wake_command = True
+
+            def get_sender_id(self) -> str:
+                return self._sender_id
+
+        original_event = SenderEvent("run-original")
+        original_event.set_extra("_syl_input_epoch", 1)
+        runner = SimpleNamespace(
+            run_context=SimpleNamespace(
+                context=SimpleNamespace(event=original_event)
+            ),
+            done=lambda: False,
+        )
+        monkeypatch.setitem(
+            follow_up_module._ACTIVE_AGENT_RUNNERS,
+            session_key,
+            runner,
+        )
+
+        plugin = _Plugin(
+            tempfile.mkdtemp(prefix="rt_follow_up_consumed_"),
+            _cfg(enabled=True, intercept=True),
+        )
+        plugin._inbound_seen = {}
+        plugin._store.conversation_input_epoch.set(session_key, 1)
+        follow_up_event = SenderEvent("follow-up-message")
+
+        EmotionalStatePlugin._register_or_defer_inbound_delivery_epoch(
+            plugin,
+            follow_up_event,
+            session_key,
+        )
+
+        assert plugin._store.conversation_input_epoch.get(session_key) == 1
+        assert follow_up_event.get_extra("_syl_follow_up_deferred") is True
+        assert follow_up_event.get_extra("_syl_input_epoch") == 1
+
+        sent: list[str] = []
+
+        class Context:
+            async def send_message(self, _origin: str, message: object) -> None:
+                chain = getattr(message, "chain", None) or getattr(
+                    message,
+                    "parts",
+                    None,
+                )
+                sent.append(str(getattr(chain[0], "text", "")) if chain else "")
+
+        plugin.context = Context()
+        pipe = LLMResponsePipeline(plugin)  # type: ignore[arg-type]
+        monkeypatch.setattr(
+            "sylanne_alpha.llm_response_pipeline.realtime_plan",
+            lambda *_args, **_kwargs: {
+                "message_parts": [
+                    {
+                        "index": 0,
+                        "text": "最终分析结果",
+                        "delay_before_seconds": 0.0,
+                    }
+                ],
+                "message_count": 1,
+                "segmentation_source": "single_fallback",
+            },
+        )
+        response = LLMResponse(
+            role="assistant",
+            completion_text="最终分析结果",
+        )
+        await pipe._on_llm_response_inner(original_event, response)
+
+        assistant_part = SimpleNamespace(text=response.completion_text)
+        run_context = SimpleNamespace(
+            messages=[
+                SimpleNamespace(role="user", content="开始分析"),
+                SimpleNamespace(role="assistant", content=[assistant_part]),
+            ]
+        )
+        shell = object.__new__(EmotionalStatePlugin)
+        shell._llm_response_pipeline = pipe
+        shell._has_conversation_manager = lambda: False
+        await EmotionalStatePlugin.on_agent_done(
+            shell,
+            original_event,
+            run_context,
+            response,
+        )
+        original_event._result = SimpleNamespace(
+            chain=[Plain(response.completion_text)]
+        )
+        assert (
+            await EmotionalStatePlugin._maybe_suppress_realtime_takeover(
+                shell,
+                original_event,
+            )
+            is True
+        )
+
+        assert sent == ["最终分析结果"]
+        assert assistant_part.text == "最终分析结果"
+        assert response.completion_text == "最终分析结果"
+        assert plugin._store.conversation_input_epoch.get(session_key) == 1
+
+    asyncio.run(scenario())
+
+
+def test_unconsumed_follow_up_promotes_once_and_interrupts_old_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AstrBot 未吃掉补话时，waiting hook 才把它升级为真正的新轮。"""
+
+    async def scenario() -> None:
+        from astrbot.core.pipeline.process_stage import follow_up as follow_up_module
+
+        class SessionMap:
+            def __init__(self) -> None:
+                self.values: dict[str, object] = {}
+
+            def get(self, key: str, default: object = None) -> object:
+                return self.values.get(key, default)
+
+            def set(self, key: str, value: object) -> None:
+                self.values[key] = value
+
+        class Turn:
+            def __init__(self) -> None:
+                self.interrupted = False
+
+            def interrupt(self) -> None:
+                self.interrupted = True
+
+        class SenderEvent(_Ev):
+            def __init__(self, message_id: str, sender_id: str = "same-user") -> None:
+                super().__init__()
+                self.message_obj = SimpleNamespace(message_id=message_id)
+                self._sender_id = sender_id
+                self.is_at_or_wake_command = True
+
+            def get_sender_id(self) -> str:
+                return self._sender_id
+
+        session_key = "sess:realtime-decouple"
+        original_event = SenderEvent("run-original")
+        runner = SimpleNamespace(
+            run_context=SimpleNamespace(
+                context=SimpleNamespace(event=original_event)
+            ),
+            done=lambda: False,
+        )
+        monkeypatch.setitem(
+            follow_up_module._ACTIVE_AGENT_RUNNERS,
+            session_key,
+            runner,
+        )
+
+        epochs = SessionMap()
+        epochs.set(session_key, 1)
+        active_turns = SessionMap()
+        turn = Turn()
+        active_turns.set(session_key, turn)
+        shell = object.__new__(EmotionalStatePlugin)
+        shell._inbound_seen = {}
+        shell._store = SimpleNamespace(
+            conversation_input_epoch=epochs,
+            segmented_delivery_turns=active_turns,
+        )
+        shell._session_ctx = SimpleNamespace(session_key=lambda _event: session_key)
+
+        follow_up_event = SenderEvent("follow-up-message")
+        EmotionalStatePlugin._register_or_defer_inbound_delivery_epoch(
+            shell,
+            follow_up_event,
+            session_key,
+        )
+        duplicate_event = SenderEvent("follow-up-message")
+        EmotionalStatePlugin._register_or_defer_inbound_delivery_epoch(
+            shell,
+            duplicate_event,
+            session_key,
+        )
+        assert epochs.get(session_key) == 1
+        assert turn.interrupted is False
+        assert duplicate_event.get_extra("_syl_inbound_duplicate") is True
+
+        await EmotionalStatePlugin.on_waiting_llm_request(shell, follow_up_event)
+        await EmotionalStatePlugin.on_waiting_llm_request(shell, follow_up_event)
+
+        assert epochs.get(session_key) == 2
+        assert follow_up_event.get_extra("_syl_input_epoch") == 2
+        assert follow_up_event.get_extra("_syl_input_epoch_committed") is True
+        assert follow_up_event.get_extra("_syl_follow_up_deferred") is False
+        assert turn.interrupted is True
+        assert duplicate_event.get_extra("_syl_input_epoch") is None
+        assert duplicate_event.get_extra("_syl_input_epoch_committed") is None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    (
+        "active_sender",
+        "incoming_sender",
+        "done",
+        "stop_requested",
+        "is_wake",
+        "expected",
+    ),
+    [
+        ("same-user", "same-user", False, False, True, True),
+        ("same-user", "other-user", False, False, True, False),
+        ("same-user", "same-user", True, False, True, False),
+        ("same-user", "same-user", False, True, True, False),
+        ("same-user", "same-user", False, False, False, False),
+    ],
+)
+def test_follow_up_deferral_matches_astrbot_runner_guards(
+    monkeypatch: pytest.MonkeyPatch,
+    active_sender: str,
+    incoming_sender: str,
+    done: bool,
+    stop_requested: bool,
+    is_wake: bool,
+    expected: bool,
+) -> None:
+    from astrbot.core.pipeline.process_stage import follow_up as follow_up_module
+
+    class SenderEvent(_Ev):
+        def __init__(self, message_id: str, sender_id: str) -> None:
+            super().__init__()
+            self.message_obj = SimpleNamespace(message_id=message_id)
+            self._sender_id = sender_id
+
+        def get_sender_id(self) -> str:
+            return self._sender_id
+
+    original_event = SenderEvent("run-original", active_sender)
+    original_event.set_extra("agent_stop_requested", stop_requested)
+    runner = SimpleNamespace(
+        run_context=SimpleNamespace(
+            context=SimpleNamespace(event=original_event)
+        ),
+        done=lambda: done,
+    )
+    monkeypatch.setitem(
+        follow_up_module._ACTIVE_AGENT_RUNNERS,
+        "sess:realtime-decouple",
+        runner,
+    )
+    incoming_event = SenderEvent("follow-up-message", incoming_sender)
+    incoming_event.is_at_or_wake_command = is_wake
+    shell = object.__new__(EmotionalStatePlugin)
+
+    is_follow_up, target_run_id = (
+        EmotionalStatePlugin._astrbot_active_follow_up_target(
+            shell,
+            incoming_event,
+        )
+    )
+
+    assert is_follow_up is expected
+    assert target_run_id == ("run-original" if expected else "")
+
+
+def test_follow_up_promotion_hook_is_registered_before_other_waiting_hooks() -> None:
+    """未消费补话必须在任何可能 stop 的 waiting hook 之前推进代次。"""
+
+    from astrbot.core.star.register.star_handler import star_handlers_registry
+
+    handler = next(
+        metadata
+        for metadata in star_handlers_registry.get_handlers_by_module_name("main")
+        if metadata.handler_name == "on_waiting_llm_request"
+    )
+
+    assert handler.extras_configs.get("priority") == 1000
+
+
 def test_full_delivery_commits_exact_visible_bubbles_as_assistant_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

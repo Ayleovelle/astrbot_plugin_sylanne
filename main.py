@@ -222,7 +222,12 @@ from sylanne_alpha.agents import (  # noqa: E402
 )
 from sylanne_alpha.social_field import SocialFieldCollector  # noqa: E402
 from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline  # noqa: E402
-from sylanne_alpha.follow_up_epoch import active_follow_up_target, event_extra  # noqa: E402
+from sylanne_alpha.follow_up_epoch import (  # noqa: E402
+    active_follow_up_target,
+    commit_inbound_delivery_epoch,
+    event_extra,
+    register_or_defer_inbound_delivery_epoch,
+)
 from sylanne_alpha.public_api import PublicAPI  # noqa: E402
 from sylanne_alpha.state_persistence import StatePersistence  # noqa: E402
 from sylanne_alpha.memory_facade import MemoryFacade  # noqa: E402
@@ -3025,6 +3030,41 @@ class EmotionalStatePlugin(Star):
                 session_key,
                 exc_info=True,
             )
+
+    def _astrbot_active_follow_up_target(self, event: Any) -> tuple[bool, str]:
+        """Expose the PR #70 read-only probe for registry-free compatibility hosts."""
+
+        return active_follow_up_target(event)
+
+    def _commit_inbound_delivery_epoch(
+        self,
+        event: Any,
+        session_key: str,
+        *,
+        reason: str,
+    ) -> int:
+        """Preserve the registry-free PR #70 delivery-epoch bridge.
+
+        The live scoped path uses ``_advance_transport_delivery_fence`` with the
+        published exact transport owner; this wrapper is intentionally not used
+        by that path.
+        """
+
+        return commit_inbound_delivery_epoch(
+            self,
+            event,
+            session_key,
+            reason=reason,
+        )
+
+    def _register_or_defer_inbound_delivery_epoch(
+        self,
+        event: Any,
+        session_key: str,
+    ) -> None:
+        """Preserve PR #70 behavior for registry-free compatibility hosts."""
+
+        register_or_defer_inbound_delivery_epoch(self, event, session_key)
 
     def _defer_active_runner_follow_up(self, event: Any) -> bool:
         """Defer only an AstrBot candidate before it can create a transport turn.
@@ -5960,7 +6000,24 @@ class EmotionalStatePlugin(Star):
     ) -> None:
         """Promote an unconsumed follow-up before AstrBot starts its new turn."""
 
-        EmotionalStatePlugin._promote_deferred_follow_up(self, event)
+        if (
+            bool(event_extra(event, "_syl_follow_up_deferred", False))
+            and getattr(self, "_scope_runtime_registry", None) is None
+        ):
+            # Preserve PR #70's registry-free host seam. A real scoped plugin
+            # must instead promote through its previously published transport
+            # owner, so it follows the branch below.
+            session_context = getattr(self, "_session_ctx", None)
+            session_key_for_event = getattr(session_context, "session_key", None)
+            if callable(session_key_for_event):
+                EmotionalStatePlugin._commit_inbound_delivery_epoch(
+                    self,
+                    event,
+                    session_key_for_event(event),
+                    reason="follow_up_promoted_to_new_turn",
+                )
+        else:
+            EmotionalStatePlugin._promote_deferred_follow_up(self, event)
         await EmotionalStatePlugin._on_waiting_llm_request_scoped(
             self,
             event,
