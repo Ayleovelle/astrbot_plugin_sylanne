@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import multiprocessing as mp
+import os
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -534,8 +535,18 @@ def test_cross_process_claim_cas_allows_exactly_one_worker(outbox_context) -> No
         )
         for worker_id in ("worker-a", "worker-b")
     ]
-    for worker in workers:
-        worker.start()
+    inherited_astrbot_root = os.environ.get("ASTRBOT_ROOT")
+    try:
+        for worker, worker_id in zip(workers, ("worker-a", "worker-b"), strict=True):
+            os.environ["ASTRBOT_ROOT"] = str(
+                outbox_context.repository.root.parent / f"astrbot-{worker_id}"
+            )
+            worker.start()
+    finally:
+        if inherited_astrbot_root is None:
+            os.environ.pop("ASTRBOT_ROOT", None)
+        else:
+            os.environ["ASTRBOT_ROOT"] = inherited_astrbot_root
     start.set()
     outcomes = [results.get(timeout=15) for _ in workers]
     for worker in workers:
