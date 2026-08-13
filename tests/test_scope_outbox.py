@@ -52,6 +52,10 @@ _TARGET = "test-target-address"
 _PROOF_DIGEST = "proof-set-v1"
 _NOW_MS = 1_000
 _EXPIRES_AT_MS = 10_000
+# A Windows ``spawn`` child imports this module before it can acquire the test
+# lock. Keep that cold-cache bootstrap wait bounded without weakening the
+# independently measured request-path lock bound below.
+_SPAWN_BOOTSTRAP_TIMEOUT_SECONDS = 30
 
 
 class _StaticProofs:
@@ -277,11 +281,27 @@ def _outbox(context: SimpleNamespace) -> DeliveryOutbox:
     )
 
 
-def _hold_repository_lock(root: str, ready, release) -> None:
-    repository = ScopeRepository(root)
-    with repository.transaction():
+def _hold_repository_lock(root: str, ready, release, bootstrap_errors) -> None:
+    try:
+        repository = ScopeRepository(root)
+        with repository.transaction():
+            ready.set()
+            release.wait(10)
+    except BaseException as exc:
+        bootstrap_errors.send((type(exc).__name__, str(exc)))
         ready.set()
-        release.wait(10)
+        raise
+
+
+def _read_bootstrap_error(bootstrap_errors) -> tuple[str, str] | None:
+    """Read an optional child startup error without treating normal pipe close as one."""
+
+    try:
+        if bootstrap_errors.poll():
+            return bootstrap_errors.recv()
+    except (EOFError, OSError):
+        return None
+    return None
 
 
 def test_delivery_diagnostics_are_exact_scope_generation_bound_and_redacted(
@@ -359,41 +379,63 @@ def test_delivery_diagnostics_and_state_dto_fail_fast_when_repository_is_busy(
     process_context = mp.get_context("spawn")
     ready = process_context.Event()
     release = process_context.Event()
+    bootstrap_errors, child_bootstrap_errors = process_context.Pipe(duplex=False)
     holder = process_context.Process(
         target=_hold_repository_lock,
-        args=(str(outbox_context.repository.root), ready, release),
+        args=(
+            str(outbox_context.repository.root),
+            ready,
+            release,
+            child_bootstrap_errors,
+        ),
     )
-    holder.start()
-    assert ready.wait(10)
-
-    class Authorization:
-        scope = outbox_context.scope
-
-        @staticmethod
-        def public_payload() -> dict[str, object]:
-            return {"ok": True}
-
+    holder_started = False
+    ready_observed = False
+    bootstrap_error: tuple[str, str] | None = None
     try:
-        started = time.perf_counter()
-        assert outbox.diagnostics(outbox_context.scope) is None
-        diagnostics_elapsed = time.perf_counter() - started
+        holder.start()
+        holder_started = True
+        ready_observed = ready.wait(_SPAWN_BOOTSTRAP_TIMEOUT_SECONDS)
+        if ready_observed:
+            bootstrap_error = _read_bootstrap_error(bootstrap_errors)
+        if ready_observed and bootstrap_error is None:
 
-        started = time.perf_counter()
-        payload = asyncio.run(
-            scoped_api_payload(
-                SimpleNamespace(_scope_delivery_outbox=outbox),
-                Authorization(),
-                "state",
+            class Authorization:
+                scope = outbox_context.scope
+
+                @staticmethod
+                def public_payload() -> dict[str, object]:
+                    return {"ok": True}
+
+            started = time.perf_counter()
+            assert outbox.diagnostics(outbox_context.scope) is None
+            diagnostics_elapsed = time.perf_counter() - started
+
+            started = time.perf_counter()
+            payload = asyncio.run(
+                scoped_api_payload(
+                    SimpleNamespace(_scope_delivery_outbox=outbox),
+                    Authorization(),
+                    "state",
+                )
             )
-        )
-        state_elapsed = time.perf_counter() - started
+            state_elapsed = time.perf_counter() - started
     finally:
         release.set()
-        holder.join(10)
-        if holder.is_alive():
-            holder.terminate()
-            holder.join(5)
+        if holder_started:
+            holder.join(10)
+            if holder.is_alive():
+                holder.terminate()
+                holder.join(5)
+        child_bootstrap_errors.close()
+        bootstrap_error = bootstrap_error or _read_bootstrap_error(bootstrap_errors)
+        bootstrap_errors.close()
 
+    assert ready_observed, (
+        "holder did not signal bootstrap within the bounded startup budget; "
+        f"exitcode={holder.exitcode!r}, bootstrap_error={bootstrap_error!r}"
+    )
+    assert bootstrap_error is None, f"holder bootstrap failed: {bootstrap_error!r}"
     assert holder.exitcode == 0
     assert diagnostics_elapsed < 0.25
     assert state_elapsed < 0.25
