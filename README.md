@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases"><img src="https://img.shields.io/badge/version-2.5.0-blue" alt="Version 2.5.0" /></a>
+  <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases"><img src="https://img.shields.io/badge/version-2.5.7-blue" alt="Version 2.5.7" /></a>
   <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne/stargazers"><img src="https://img.shields.io/github/stars/Ayleovelle/astrbot_plugin_sylanne?style=flat" alt="Stars" /></a>
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.26%2C%3C5.0.0-16a34a" alt="AstrBot >=4.26,<5.0.0" />
   <img src="https://img.shields.io/badge/Python-3.10%E2%80%933.13-3776AB" alt="Python 3.10–3.13" />
@@ -17,7 +17,7 @@
   <a href="#功能">功能</a> · <a href="#架构">架构</a> · <a href="#安装与兼容性">安装</a> · <a href="#常用配置">配置</a> · <a href="CHANGELOG.md">CHANGELOG</a> · <a href="CONTRIBUTING.md">贡献</a>
 </p>
 
-面向 AstrBot 的长期记忆、关系状态建模与即时聊天插件，由 2718 Labs 维护。`Embodiment-2.5.0` 把一次对话中的上下文、节拍、投递和观测收在可验证的运行链路里。
+面向 AstrBot 的长期记忆、关系状态建模与即时聊天插件，由 2718 Labs 维护。`Embodiment-2.5.7` 把一次对话中的上下文、节拍、投递和观测收在可验证的运行链路里。
 
 它服务于持续对话的产品体验，但不替代 AstrBot 的消息、模型或权限边界。插件始终以框架提供的会话、Provider 与投递机制为基础；可选能力应由部署者根据场景逐项决定。
 
@@ -45,7 +45,7 @@
 
 每次只改变一项配置，并在 WebUI 或日志中确认运行状态。这样更容易定位 Provider、权限或平台适配造成的差异。
 
-## Embodiment-2.5.0
+## Embodiment-2.5.7
 
 - **模型原生语义节拍**：同一次主模型生成中标注节拍边界，不增加额外 LLM 请求。
 - **Provider 配置收口**：共享辅助文本模型集中配置；前台即时判断由本地 `v2core` 完成。
@@ -108,12 +108,12 @@ WebUI 是观测分支而非另一条控制链：它汇总运行时信息，不�
 | --- | --- |
 | AstrBot | `>=4.26,<5.0.0` |
 | Python | `3.10`–`3.13` |
-| 发布包 | `Embodiment-2.5.0` |
+| 发布包 | `Embodiment-2.5.7` |
 | 许可证 | [AGPL-3.0-or-later](LICENSE) |
 
 1. 从 [Releases](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases) 下载版本化 ZIP。
 2. 在 AstrBot 管理面板上传 ZIP 并启用插件。
-3. 确认包内 `metadata.yaml` 的版本为 `2.5.0`。
+3. 确认包内 `metadata.yaml` 的版本为 `2.5.7`。
 4. 先验证普通对话、连续多轮上下文和重启后的历史恢复。
 5. 再逐项开启可选能力并观察运行状态。
 

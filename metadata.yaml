@@ -1,8 +1,8 @@
 name: astrbot_plugin_sylanne
 display_name: Sylanne
 desc: "面向 AstrBot 的长期记忆、关系状态建模与即时聊天插件，提供情感状态计算、认知编排、生活模拟、主动消息及 WebUI 观测能力；高风险可选功能默认关闭。"
-short_desc: "Sylanne-Embodiment 2.5.0 — 长期记忆、关系状态建模与即时聊天"
-version: "2.5.0"
+short_desc: "Sylanne-Embodiment 2.5.7 — 长期记忆、关系状态建模与即时聊天"
+version: "2.5.7"
 author: 2718-labs
 license: AGPL-3.0-or-later
 repo: "https://github.com/Ayleovelle/astrbot_plugin_sylanne"

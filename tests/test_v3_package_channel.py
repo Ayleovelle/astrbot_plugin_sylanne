@@ -228,7 +228,7 @@ def test_grey_packaging_rejects_checked_in_stable_metadata(tmp_path: Path) -> No
     version = package_plugin._read_metadata_version(
         (package_plugin.ROOT / "metadata.yaml").read_bytes()
     )
-    assert version == "2.5.0"
+    assert version == "2.5.7"
 
     with pytest.raises(RuntimeError, match="grey"):
         _build(tmp_path, "grey")
@@ -323,7 +323,7 @@ def test_manifest_records_channel_version_commit_and_digests(stable_archive: Pat
     ).stdout.strip()
 
     assert manifest["channel"] == "stable"
-    assert manifest["metadata_version"] == "2.5.0"
+    assert manifest["metadata_version"] == "2.5.7"
     assert manifest["git_commit"] == commit
     assert re.fullmatch(r"[0-9a-f]{64}", manifest["payload_digest"])
     assert re.fullmatch(r"[0-9a-f]{64}", manifest["generated_file_digest"])
