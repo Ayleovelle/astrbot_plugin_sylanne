@@ -1,3 +1,3 @@
 aiohttp>=3.9
-portalocker>=2.10
+portalocker>=4.1.0
 pywin32>=312; sys_platform == "win32"
